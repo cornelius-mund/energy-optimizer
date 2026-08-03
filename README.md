@@ -139,3 +139,29 @@ Tests should follow a test-driven development pattern:
 4. Refactor the implementation while keeping the tests passing.
 
 See [`AGENTS.md`](AGENTS.md) for backlog, issue, and engineering process guidelines.
+
+## Running the Service
+
+Install the application and development dependencies in a virtual environment:
+
+```bash
+python -m pip install -e '.[dev]'
+```
+
+Start the service with Uvicorn:
+
+```bash
+uvicorn energy_optimizer.api:app --host 0.0.0.0 --port 8000
+```
+
+Check that it is running:
+
+```bash
+curl http://localhost:8000/health
+```
+
+The health endpoint returns the service status and version, for example:
+
+```json
+{"status":"ok","version":"0.1.0"}
+```
