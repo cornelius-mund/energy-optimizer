@@ -122,9 +122,11 @@ An issue is complete when:
 The typical development workflow is:
 
 1. Select an issue from the GitHub Project.
-2. Create a feature branch from `devel`.
-3. Develop the feature on the feature branch, following the testing and verification requirements.
-4. Open a pull request from the feature branch into `devel`.
+2. When work starts, move the issue to `In Progress` or the equivalent active-work status.
+3. Create a feature branch from `devel`.
+4. Develop the feature on the feature branch, following the testing and verification requirements.
+5. When the implementation is complete and verified, commit the changes and push the feature branch.
+6. Open a pull request from the feature branch into `devel`. Include an automatic issue-closing reference such as `Closes #123` in the pull request description so that merging the pull request into `devel` closes the issue.
 
 Branch conventions:
 
