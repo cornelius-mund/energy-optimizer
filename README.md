@@ -129,4 +129,13 @@ The project is currently in the planning and initial setup phase.
 
 Development should follow the ordered product backlog. Each feature should deliver direct user value and include its required implementation, tests, documentation, configuration, and deployment work.
 
+### Test-Driven Development
+
+Tests should follow a test-driven development pattern:
+
+1. Write a test that expresses the expected behavior and fails for the current implementation.
+2. Implement the smallest change that makes the test pass.
+3. Run the relevant test suite and verify that all tests pass.
+4. Refactor the implementation while keeping the tests passing.
+
 See [`AGENTS.md`](AGENTS.md) for backlog, issue, and engineering process guidelines.
