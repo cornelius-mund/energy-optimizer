@@ -27,19 +27,14 @@ The service is designed to support:
 
 ## Planned Architecture
 
-The service is expected to contain the following components:
+The target architecture separates HTTP transport, application orchestration, domain
+models, external integrations, and optimization. The optimizer should remain
+independent of specific external data providers, with providers returning normalized
+internal data before it reaches the optimization model.
 
-- HTTP API for optimization requests and results
-- YAML configuration loading and validation
-- Normalized energy and time-series data models
-- MILP model construction
-- HiGHS solver integration
-- Optimization result mapping and diagnostics
-- External data provider interfaces
-
-The optimizer should remain independent of specific external data providers. Price and forecast providers should return normalized internal data before their data is passed to the optimization model.
-
-The energy and asset models may change throughout the project as the requirements and understanding of the domain evolve.
+The detailed planned package structure, dependency direction, and request flow are
+documented in [`docs/architecture.md`](docs/architecture.md). These boundaries are
+targets for the implementation, not a claim that all of the modules exist today.
 
 ## Input
 
