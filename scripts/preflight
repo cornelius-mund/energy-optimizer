@@ -1,0 +1,55 @@
+#!/bin/sh
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root" || exit 1
+
+failed=0
+
+check_executable() {
+    label=$1
+    path=$2
+    if [ -x "$path" ]; then
+        printf 'PASS %-12s %s\n' "$label" "$path"
+    else
+        printf 'FAIL %-12s missing or not executable: %s\n' "$label" "$path"
+        failed=1
+    fi
+}
+
+if [ -n "${UV_BIN:-}" ]; then
+    uv_path=$UV_BIN
+else
+    uv_path=$(command -v uv 2>/dev/null || true)
+fi
+if [ -n "$uv_path" ]; then
+    check_executable "uv" "$uv_path"
+else
+    printf 'FAIL %-12s not found on PATH\n' "uv"
+    failed=1
+fi
+check_executable "python" "$repo_root/.venv/bin/python"
+check_executable "gh" "$repo_root/.venv/bin/gh"
+
+if command -v curl >/dev/null 2>&1; then
+    printf 'PASS %-12s %s\n' "curl" "$(command -v curl)"
+else
+    printf 'FAIL %-12s not found on PATH\n' "curl"
+    failed=1
+fi
+
+if "$repo_root/.venv/bin/gh" auth status >/dev/null 2>&1; then
+    printf 'PASS %-12s authenticated\n' "gh auth"
+elif [ -x "$repo_root/.venv/bin/gh" ]; then
+    printf 'WARN %-12s unavailable or unauthenticated\n' "gh auth"
+else
+    printf 'SKIP %-12s gh is unavailable\n' "gh auth"
+fi
+
+if [ "$failed" -eq 0 ]; then
+    printf 'Preflight passed.\n'
+else
+    printf 'Preflight failed. Fix the missing required tools before continuing.\n'
+fi
+
+exit "$failed"
