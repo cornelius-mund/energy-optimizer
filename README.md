@@ -142,7 +142,8 @@ See [`AGENTS.md`](AGENTS.md) for backlog, issue, and engineering process guideli
 
 ## Running the Service
 
-Install uv, then create/update project virtual environment and lockfile dependencies:
+Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), then
+create/update the project virtual environment and lockfile dependencies:
 
 ```bash
 uv sync --extra dev
