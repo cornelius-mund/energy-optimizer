@@ -5,6 +5,19 @@
 - Use English for source code, documentation, commit messages, and GitHub issues.
 - Prefer clear, explicit terminology over abbreviations.
 
+## Tooling
+
+- Run `scripts/preflight` before work that uses multiple development or GitHub tools.
+- Use `uv run python` instead of assuming a system `python` command exists.
+- Use `uv run pytest` for tests.
+- Use `uv run ruff check .` for linting.
+- Use `uv run ruff format --check .` to verify formatting.
+- Use `uv run mypy .` for type checking.
+- Use `.venv/bin/gh` for GitHub issues, pull requests, checks, and releases.
+- Verify GitHub authentication with `.venv/bin/gh auth status` before authenticated operations.
+- If a documented tool is unavailable, stop and report the missing tool before trying an undocumented replacement.
+- Do not use `python`, `python3`, `gh`, or `jq` directly from `PATH` without first verifying their availability.
+
 ## Product Backlog
 
 - Maintain one ordered backlog.
