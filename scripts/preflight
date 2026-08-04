@@ -8,39 +8,31 @@ failed=0
 
 check_executable() {
     label=$1
-    path=$2
-    if [ -x "$path" ]; then
+    command_name=$2
+    path=$(command -v "$command_name" 2>/dev/null || true)
+    if [ -n "$path" ] && [ -x "$path" ]; then
         printf 'PASS %-12s %s\n' "$label" "$path"
     else
-        printf 'FAIL %-12s missing or not executable: %s\n' "$label" "$path"
+        printf 'FAIL %-12s not found on PATH\n' "$label"
         failed=1
     fi
 }
 
-if [ -n "${UV_BIN:-}" ]; then
-    uv_path=$UV_BIN
+check_executable "uv" "uv"
+check_executable "gh" "gh"
+check_executable "curl" "curl"
+python_path=$(command -v python 2>/dev/null || command -v python3 2>/dev/null || true)
+if [ -n "$python_path" ] && [ -x "$python_path" ]; then
+    printf 'PASS %-12s %s\n' "python" "$python_path"
 else
-    uv_path=$(command -v uv 2>/dev/null || true)
-fi
-if [ -n "$uv_path" ]; then
-    check_executable "uv" "$uv_path"
-else
-    printf 'FAIL %-12s not found on PATH\n' "uv"
+    printf 'FAIL %-12s not found on PATH (tried python and python3)\n' "python"
     failed=1
 fi
-check_executable "python" "$repo_root/.venv/bin/python"
-check_executable "gh" "$repo_root/.venv/bin/gh"
+gh_path=$(command -v gh 2>/dev/null || true)
 
-if command -v curl >/dev/null 2>&1; then
-    printf 'PASS %-12s %s\n' "curl" "$(command -v curl)"
-else
-    printf 'FAIL %-12s not found on PATH\n' "curl"
-    failed=1
-fi
-
-if "$repo_root/.venv/bin/gh" auth status >/dev/null 2>&1; then
+if [ -n "${gh_path:-}" ] && "$gh_path" auth status >/dev/null 2>&1; then
     printf 'PASS %-12s authenticated\n' "gh auth"
-elif [ -x "$repo_root/.venv/bin/gh" ]; then
+elif [ -n "${gh_path:-}" ] && [ -x "$gh_path" ]; then
     printf 'WARN %-12s unavailable or unauthenticated\n' "gh auth"
 else
     printf 'SKIP %-12s gh is unavailable\n' "gh auth"
