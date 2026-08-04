@@ -196,12 +196,12 @@ Before completing work:
 
 ## Testing
 
-- Use `pytest` for unit and integration tests.
+- Use `uv run pytest` for unit and integration tests.
 - Use `httpx` with FastAPI's test client for API tests.
 - Use `pytest-cov` for coverage reporting.
 - Use `hypothesis` for property-based validation tests where generated inputs add value.
-- Use `ruff` for linting and formatting.
-- Use `mypy` for static type checking.
+- Use `uv run ruff` for linting and formatting.
+- Use `uv run mypy` for static type checking.
 - Keep MILP test cases small and deterministic.
 - Use `Pyomo` with `highspy` for optimization-model tests.
 - Assert energy balances and relevant constraint behavior.
@@ -226,10 +226,10 @@ The workflow should:
 - Run on `ubuntu-latest`.
 - Use the supported Python version matrix.
 - Install project and development dependencies.
-- Run `ruff check .`.
-- Run `ruff format --check .`.
-- Run `mypy .`.
-- Run `pytest --cov --cov-report=term-missing`.
+- Run `uv run ruff check .`.
+- Run `uv run ruff format --check .`.
+- Run `uv run mypy .`.
+- Run `uv run pytest --cov --cov-report=term-missing`.
 - Use `permissions: contents: read` unless a job requires more.
 - Cache Python dependencies where practical.
 
