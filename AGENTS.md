@@ -117,16 +117,53 @@ An issue is complete when:
 - Add comments only when they explain non-obvious reasoning.
 - Preserve existing user changes and do not overwrite unrelated work.
 
-## Agent Workflow
+## Mandatory Issue Workflow
 
-The typical development workflow is:
+These workflow steps are required, not advisory. If a step cannot be completed,
+stop and report the blocker before changing application files.
 
-1. Select an issue from the GitHub Project.
-2. When work starts, move the issue to `In Progress` or the equivalent active-work status.
-3. Create a feature branch from `devel`.
-4. Develop the feature on the feature branch, following the testing and verification requirements.
-5. When the implementation is complete and verified, commit the changes and push the feature branch.
-6. Open a pull request from the feature branch into `devel`. Include an automatic issue-closing reference such as `Closes #123` in the pull request description so that merging the pull request into `devel` closes the issue.
+### Before Changing Application Files
+
+1. Fetch the repository and confirm the issue exists.
+2. Move the issue to `In Progress` or the equivalent active-work status.
+3. Check the working tree for unrelated changes.
+4. Fetch the latest version of the `devel` branch from GitHub before starting
+   development work.
+5. Update the local work from the fetched `devel` branch.
+6. Create and switch to `feature/<short-description>` from `devel`.
+7. Confirm the current branch is not `main` or `devel`.
+8. Record the work-start state:
+
+```text
+## Work Start Record
+
+- Issue:
+- Issue status:
+- Base branch:
+- Feature branch:
+- Initial worktree status:
+- GitHub authentication verified:
+```
+
+Only after these steps may application files be modified.
+
+### During Development
+
+1. Develop on the feature branch and follow the testing requirements.
+2. Keep changes focused on the selected issue.
+3. Preserve unrelated user changes and do not overwrite them.
+
+### Before Reporting Completion
+
+1. Run tests, linting, formatting, and type checks when available.
+2. Inspect `git status`, `git diff`, and recent commits.
+3. Commit all intended changes with a clear message.
+4. Push the feature branch using the repository GitHub credentials.
+5. Open a pull request from the feature branch into `devel`.
+6. Include `Closes #<issue-number>` in the pull request body.
+7. Verify the PR base branch, head branch, issue reference, and CI status.
+8. Report the pull request URL and verification results.
+9. Do not merge the pull request unless explicitly requested.
 
 Branch conventions:
 

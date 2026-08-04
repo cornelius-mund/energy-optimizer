@@ -1,0 +1,10 @@
+# Copy this file to config.yaml and adjust values for the deployment.
+time_resolution_minutes: 60
+
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+
+solver:
+  name: highs
+  time_limit_seconds: 60
