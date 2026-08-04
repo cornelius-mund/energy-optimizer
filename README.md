@@ -142,22 +142,33 @@ See [`AGENTS.md`](AGENTS.md) for backlog, issue, and engineering process guideli
 
 ## Running the Service
 
-Install the application and development dependencies in a virtual environment:
+Install uv, then create/update project virtual environment and lockfile dependencies:
 
 ```bash
-python -m pip install -e '.[dev]'
+uv sync --extra dev
 ```
+
+`uv sync` reads dependencies from `pyproject.toml`, resolves them into `uv.lock`,
+and installs project plus development dependencies into `.venv`. Use `uv run`
+to execute commands inside this environment. CI uses `uv sync --locked --extra
+dev` so it fails when lockfile no longer matches project metadata.
 
 Start the service with Uvicorn:
 
 ```bash
-uvicorn energy_optimizer.api:app --host 0.0.0.0 --port 8000
+uv run uvicorn energy_optimizer.api:app --host 0.0.0.0 --port 8000
 ```
 
 Check that it is running:
 
 ```bash
 curl http://localhost:8000/health
+```
+
+Check static OpenAPI documentation against FastAPI-generated schema:
+
+```bash
+uv run pytest tests/test_openapi.py
 ```
 
 The health endpoint returns the service status and version, for example:
