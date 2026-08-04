@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="energy-optimizer:smoke"
+container="energy-optimizer-smoke-${RANDOM}"
+
+cleanup() {
+    docker rm --force "$container" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+docker build --tag "$image" .
+docker run --detach --name "$container" --publish 18000:8000 "$image" >/dev/null
+
+for _ in {1..30}; do
+    if curl --fail --silent http://127.0.0.1:18000/health >/dev/null; then
+        health_status="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
+        if [[ "$health_status" == "healthy" ]]; then
+            printf 'Docker smoke test passed.\n'
+            exit 0
+        fi
+    fi
+    sleep 1
+done
+
+docker logs "$container"
+printf 'Docker smoke test failed: health endpoint did not become ready.\n' >&2
+exit 1
