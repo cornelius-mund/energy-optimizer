@@ -7,7 +7,7 @@ name = "energy-optimizer"
 version = "0.1.0"
 description = "HTTP service for optimizing household energy usage"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.115,<1.0",
     "pydantic>=2.10,<3.0",
@@ -37,7 +37,7 @@ src = ["src", "tests"]
 select = ["E", "F", "I"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 mypy_path = "src"
 
