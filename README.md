@@ -83,7 +83,9 @@ The response should also include:
 
 ## Configuration
 
-Runtime and system configuration will be provided through YAML.
+Runtime and system configuration is loaded from `config.yaml` at startup. Set
+`ENERGY_OPTIMIZER_CONFIG` to use a different file. A complete example is
+provided in [`config.example.yaml`](config.example.yaml).
 
 Configuration is expected to contain parameters such as:
 
@@ -153,6 +155,16 @@ uv sync --extra dev
 and installs project plus development dependencies into `.venv`. Use `uv run`
 to execute commands inside this environment. CI uses `uv sync --locked --extra
 dev` so it fails when lockfile no longer matches project metadata.
+
+Create a runtime configuration before starting the service:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+The service validates the YAML structure and types during startup. Missing,
+malformed, or invalid configuration stops startup with an error identifying the
+file and invalid fields.
 
 Start the service with Uvicorn:
 
