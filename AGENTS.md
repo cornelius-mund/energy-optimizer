@@ -140,12 +140,34 @@ stop and report the blocker before changing application files.
 1. Fetch the repository and confirm the issue exists.
 2. Move the issue to `In Progress` or the equivalent active-work status.
 3. Check the working tree for unrelated changes.
-4. Fetch the latest version of the `devel` branch from GitHub before starting
-   development work.
-5. Update the local work from the fetched `devel` branch.
-6. Create and switch to `feature/<short-description>` from `devel`.
-7. Confirm the current branch is not `main` or `devel`.
-8. Record the work-start state:
+4. Fetch the latest refs from GitHub before starting development work:
+
+   ```bash
+   git fetch origin --prune
+   ```
+
+5. Update the local `devel` branch from the fetched remote branch:
+
+   ```bash
+   git switch devel
+   git pull --ff-only origin devel
+   ```
+
+   Do not create a feature branch if the fast-forward fails. Resolve the
+   branch state explicitly before continuing.
+6. Verify that local `devel` and `origin/devel` point to the same commit:
+
+   ```bash
+   test "$(git rev-parse devel)" = "$(git rev-parse origin/devel)"
+   ```
+
+   This equality check is a hard gate: feature branches must be created from
+   the verified, current local `devel`, never from a stale local branch or
+   directly from an unverified remote-tracking ref.
+7. Create and switch to `feature/<short-description>` from the verified
+   `devel` branch.
+8. Confirm the current branch is not `main` or `devel`.
+9. Record the work-start state:
 
 ```text
 ## Work Start Record
