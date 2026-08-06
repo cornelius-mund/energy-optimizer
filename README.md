@@ -96,17 +96,38 @@ Configuration is expected to contain parameters such as:
 
 Invalid configuration should result in a clear startup error.
 
-## Deployment
+## Docker Deployment
 
-The service will run in a Docker container.
+Build the production image from the repository root:
 
-The project should provide:
+```bash
+docker build --tag energy-optimizer .
+```
 
-- A production Docker image
-- A documented container startup command
-- Configurable runtime settings
-- Health checking
-- Reproducible development and test execution
+Start the service with a configuration mounted from the host. The image also
+contains `config.example.yaml` as a safe default:
+
+```bash
+docker run --detach --name energy-optimizer \
+  --publish 8000:8000 \
+  --volume "$PWD/config.yaml:/app/config.yaml:ro" \
+  energy-optimizer
+```
+
+The container listens on port `8000`, runs as a non-root user, and uses
+`ENERGY_OPTIMIZER_CONFIG` to select a different configuration path when needed.
+The image healthcheck calls the service health endpoint. Check it directly with:
+
+```bash
+curl http://localhost:8000/health
+```
+
+Run the local container smoke test, which builds the image and waits for the
+health endpoint:
+
+```bash
+./scripts/docker-smoke
+```
 
 ## Data Providers
 
