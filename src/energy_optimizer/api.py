@@ -1,5 +1,6 @@
 """HTTP API for the Energy Optimizer service."""
 
+import math
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, AsyncIterator, Literal
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from energy_optimizer import __version__
 from energy_optimizer.config import load_configuration
@@ -52,6 +53,76 @@ class HourlyOptimizationRequest(BaseModel):
         return self
 
 
+class SourceMetadata(BaseModel):
+    """Identify the system that supplied a normalized data series."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Annotated[str, Field(min_length=1, max_length=100)]
+    entity_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+
+
+class GridFlowRequest(BaseModel):
+    """Versioned hourly grid import and export data at the API boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    start_time: datetime = Field(description="Timezone-aware start of the series")
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every series interval; hourly data requires 60"
+    )
+    import_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=168,
+        description="Grid import in kW, one value per interval",
+    )
+    export_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=168,
+        description="Grid export in kW, one value per interval",
+    )
+    unit: Literal["kW"] = Field(description="Unit used by import_kw and export_kw")
+    source: SourceMetadata | None = Field(
+        default=None,
+        description="Optional source metadata for externally supplied data",
+    )
+
+    @field_validator("import_kw", "export_kw")
+    @classmethod
+    def validate_finite_values(cls, values: list[float]) -> list[float]:
+        """Reject non-finite values that cannot represent grid flow."""
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("grid-flow values must be finite")
+        return values
+
+    @model_validator(mode="after")
+    def validate_series(self) -> "GridFlowRequest":
+        """Require an unambiguous timestamp and aligned import/export series."""
+        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+            raise ValueError("start_time must include a timezone")
+        if len(self.import_kw) != len(self.export_kw):
+            raise ValueError(
+                "import_kw and export_kw must contain the same number of values"
+            )
+        return self
+
+
+class GridFlowResponse(BaseModel):
+    """Response returned after grid-flow data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    import_kw: list[float]
+    export_kw: list[float]
+    unit: Literal["kW"]
+    source: SourceMetadata | None = None
+
+
 class OptimizationResponse(BaseModel):
     """Response returned after an hourly request passes API validation."""
 
@@ -88,4 +159,19 @@ def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
         start_time=request.start_time,
         interval_minutes=request.interval_minutes,
         hours=len(request.load_kw),
+    )
+
+
+@app.post("/api/v1/grid-flow", response_model=GridFlowResponse)
+def grid_flow(request: GridFlowRequest) -> GridFlowResponse:
+    """Validate a versioned hourly grid import and export data series."""
+    return GridFlowResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        import_kw=request.import_kw,
+        export_kw=request.export_kw,
+        unit=request.unit,
+        source=request.source,
     )

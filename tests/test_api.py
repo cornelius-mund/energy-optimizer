@@ -153,3 +153,146 @@ solver:
 
     assert response.status_code == 422
     assert "timezone" in response.text
+
+
+def grid_flow_request() -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00+00:00",
+        "interval_minutes": 60,
+        "import_kw": [1.2, 1.0],
+        "export_kw": [0.0, 0.4],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.grid_import",
+        },
+    }
+
+
+def test_grid_flow_contract_accepts_a_valid_request(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/grid-flow", json=grid_flow_request())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "validated",
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00Z",
+        "interval_minutes": 60,
+        "import_kw": [1.2, 1.0],
+        "export_kw": [0.0, 0.4],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.grid_import",
+        },
+    }
+
+
+def test_grid_flow_contract_allows_direct_submissions_without_source(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = grid_flow_request()
+    request.pop("source")
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/grid-flow", json=request)
+
+    assert response.status_code == 200
+    assert response.json()["source"] is None
+
+
+def test_grid_flow_contract_rejects_invalid_payloads(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    invalid_requests = [
+        {**grid_flow_request(), "import_kw": []},
+        {**grid_flow_request(), "import_kw": [-0.1]},
+        {**grid_flow_request(), "interval_minutes": 30},
+        {**grid_flow_request(), "start_time": "2026-01-01T00:00:00"},
+        {**grid_flow_request(), "schema_version": "2"},
+        {**grid_flow_request(), "unexpected": True},
+        {**grid_flow_request(), "export_kw": [0.0]},
+    ]
+
+    with TestClient(app) as client:
+        responses = [
+            client.post("/api/v1/grid-flow", json=request)
+            for request in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response in responses)
+
+
+def test_grid_flow_contract_rejects_more_than_one_week(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = grid_flow_request()
+    request["import_kw"] = [1.0] * 169
+    request["export_kw"] = [0.0] * 169
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/grid-flow", json=request)
+
+    assert response.status_code == 422
+    assert "168" in response.text

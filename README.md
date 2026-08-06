@@ -213,6 +213,36 @@ horizon metadata. Invalid JSON or values return HTTP 422 with field-level
 validation details. The endpoint is the API boundary for the optimizer; solver
 schedule results will be added by a later vertical slice.
 
+### Grid-flow API
+
+`POST /api/v1/grid-flow` validates normalized hourly grid import and export
+data. The versioned request contains timezone-aware `start_time`,
+`interval_minutes: 60`, equally sized non-negative `import_kw` and `export_kw`
+series for one to 168 hours, `unit: "kW"`, and optional source metadata.
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "import_kw": [1.2, 1.0],
+  "export_kw": [0.0, 0.4],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.grid_import"
+  }
+}
+```
+
+The response echoes the normalized import and export series with
+`status: "validated"`. Missing fields, unknown fields, unsupported versions
+or units, naive timestamps, mismatched series lengths, invalid values, and
+series longer than 168 hours return HTTP 422 with field-level validation
+details.
+
 The health endpoint returns the service status and version, for example:
 
 ```json
