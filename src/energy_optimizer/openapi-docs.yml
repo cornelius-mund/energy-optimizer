@@ -157,7 +157,7 @@ components:
             maximum: 1000.0
             minimum: 0.0
           type: array
-          maxItems: 168
+          maxItems: 87672
           minItems: 1
           title: Load Kw
           description: Household electrical load in kW, one value per interval

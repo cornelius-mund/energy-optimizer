@@ -221,7 +221,7 @@ series. The versioned request contains:
 - `schema_version: "1"`
 - A timezone-aware `start_time`
 - `interval_minutes: 60`
-- `load_kw`, containing one non-negative value per hour for one to 168 hours
+- `load_kw`, containing one non-negative value per hour for one to 87,672 hours
 - `unit: "kW"`
 - Optional `source` metadata with a provider and entity identifier
 
@@ -243,8 +243,8 @@ Example:
 
 The response echoes the normalized data with `status: "validated"`. Missing
 fields, unknown fields, unsupported versions or units, naive timestamps,
-invalid values, and series longer than 168 hours return HTTP 422 with field-
-level validation details.
+invalid values, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
 
 The health endpoint returns the service status and version, for example:
 

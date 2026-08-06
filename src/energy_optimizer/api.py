@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from energy_optimizer import __version__
 from energy_optimizer.config import load_configuration
 
+MAX_HORIZON_HOURS = 87_672
+
 
 class HourlyOptimizationRequest(BaseModel):
     """Validated hourly inputs accepted by the optimization boundary."""
@@ -74,7 +76,7 @@ class HouseholdLoadRequest(BaseModel):
     )
     load_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
         min_length=1,
-        max_length=168,
+        max_length=MAX_HORIZON_HOURS,
         description="Household electrical load in kW, one value per interval",
     )
     unit: Literal["kW"] = Field(description="Unit used by load_kw")
