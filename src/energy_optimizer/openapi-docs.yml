@@ -91,7 +91,7 @@ components:
             maximum: 100000.0
             minimum: 0.0
           type: array
-          maxItems: 168
+          maxItems: 87672
           minItems: 1
           title: State Of Charge Kwh
           description: Battery state of charge in kWh, one value per interval

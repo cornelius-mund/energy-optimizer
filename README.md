@@ -217,7 +217,7 @@ schedule results will be added by a later vertical slice.
 
 `POST /api/v1/battery` validates normalized hourly battery state and capability
 data. The versioned request contains timezone-aware `start_time`,
-`interval_minutes: 60`, one to 168 `state_of_charge_kwh` values, capacity and
+`interval_minutes: 60`, one to 87,672 `state_of_charge_kwh` values, capacity and
 SOC bounds in kWh, initial SOC, charge and discharge power limits in kW,
 charge and discharge efficiencies from greater than zero through one,
 `unit: "kWh"`, `power_unit: "kW"`, and optional source metadata.
@@ -250,8 +250,8 @@ Example:
 The response echoes the validated battery data with `status: "validated"`.
 Missing fields, unknown fields, unsupported versions or units, naive
 timestamps, out-of-range state of charge, inconsistent limits, invalid
-efficiencies, and series longer than 168 hours return HTTP 422 with
-field-level validation details.
+efficiencies, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
 
 The health endpoint returns the service status and version, for example:
 
