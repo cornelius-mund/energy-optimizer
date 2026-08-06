@@ -1,5 +1,6 @@
 """HTTP API for the Energy Optimizer service."""
 
+import math
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, AsyncIterator, Literal
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from energy_optimizer import __version__
 from energy_optimizer.config import load_configuration
@@ -52,6 +53,66 @@ class HourlyOptimizationRequest(BaseModel):
         return self
 
 
+class SourceMetadata(BaseModel):
+    """Identify the system that supplied a normalized data series."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Annotated[str, Field(min_length=1, max_length=100)]
+    entity_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+
+
+class PvGenerationRequest(BaseModel):
+    """Versioned hourly PV-generation data at the API boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    start_time: datetime = Field(description="Timezone-aware start of the series")
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every series interval; hourly data requires 60"
+    )
+    generation_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=168,
+        description="PV generation in kW, one value per interval",
+    )
+    unit: Literal["kW"] = Field(description="Unit used by generation_kw")
+    source: SourceMetadata | None = Field(
+        default=None,
+        description="Optional source metadata for externally supplied data",
+    )
+
+    @field_validator("generation_kw")
+    @classmethod
+    def validate_finite_generation_values(cls, values: list[float]) -> list[float]:
+        """Reject non-finite values that cannot represent generation."""
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("generation_kw values must be finite")
+        return values
+
+    @model_validator(mode="after")
+    def validate_start_time(self) -> "PvGenerationRequest":
+        """Require timestamps that identify an unambiguous hourly series."""
+        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+            raise ValueError("start_time must include a timezone")
+        return self
+
+
+class PvGenerationResponse(BaseModel):
+    """Response returned after PV-generation data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    generation_kw: list[float]
+    unit: Literal["kW"]
+    source: SourceMetadata | None = None
+
+
 class OptimizationResponse(BaseModel):
     """Response returned after an hourly request passes API validation."""
 
@@ -88,4 +149,18 @@ def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
         start_time=request.start_time,
         interval_minutes=request.interval_minutes,
         hours=len(request.load_kw),
+    )
+
+
+@app.post("/api/v1/pv-generation", response_model=PvGenerationResponse)
+def pv_generation(request: PvGenerationRequest) -> PvGenerationResponse:
+    """Validate a versioned hourly PV-generation data series."""
+    return PvGenerationResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        generation_kw=request.generation_kw,
+        unit=request.unit,
+        source=request.source,
     )

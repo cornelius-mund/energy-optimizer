@@ -213,6 +213,34 @@ horizon metadata. Invalid JSON or values return HTTP 422 with field-level
 validation details. The endpoint is the API boundary for the optimizer; solver
 schedule results will be added by a later vertical slice.
 
+### PV-generation API
+
+`POST /api/v1/pv-generation` validates a normalized hourly PV-generation
+series. It uses a versioned request with a timezone-aware `start_time`,
+`interval_minutes: 60`, non-negative `generation_kw` values for one to 168
+hours, `unit: "kW"`, and optional source metadata.
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "generation_kw": [0.0, 2.4],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.pv_generation"
+  }
+}
+```
+
+The response echoes the normalized series with `status: "validated"`.
+Missing fields, unknown fields, unsupported versions or units, naive
+timestamps, invalid values, and series longer than 168 hours return HTTP 422
+with field-level validation details.
+
 The health endpoint returns the service status and version, for example:
 
 ```json
