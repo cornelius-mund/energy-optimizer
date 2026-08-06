@@ -217,9 +217,10 @@ schedule results will be added by a later vertical slice.
 
 `POST /api/v1/electricity-prices` validates normalized hourly import and export
 prices. The versioned request contains ascending, unique, timezone-aware
-`timestamps`, `interval_minutes: 60`, aligned `import_price_eur_per_kwh` and
-`export_price_eur_per_kwh` values in `EUR/kWh`, provider-independent `source`
-metadata, and timezone-aware `retrieved_at` and `expires_at` freshness bounds.
+`timestamps` for one to 87,672 hours, `interval_minutes: 60`, aligned
+`import_price_eur_per_kwh` and `export_price_eur_per_kwh` values in `EUR/kWh`,
+provider-independent `source` metadata, and timezone-aware `retrieved_at` and
+`expires_at` freshness bounds.
 Prices may be negative for markets that support negative rates, but must remain
 within the documented range of -100 to 100 EUR/kWh. Coverage must begin at or
 after retrieval and end before expiry.
@@ -246,8 +247,8 @@ Example:
 The response echoes the normalized prices with `status: "validated"`.
 Missing fields, unknown fields, unsupported versions or units, naive or
 duplicate timestamps, misaligned series, stale coverage, invalid freshness
-bounds, and out-of-range values return HTTP 422 with field-level validation
-details.
+bounds, out-of-range values, and series longer than ten years (87,672 hourly
+values) return HTTP 422 with field-level validation details.
 
 The health endpoint returns the service status and version, for example:
 
