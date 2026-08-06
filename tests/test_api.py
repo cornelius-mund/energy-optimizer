@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from energy_optimizer.api import app
+from energy_optimizer.api import MAX_HORIZON_HOURS, app
 
 
 def test_health_returns_service_status_and_version(
@@ -270,7 +270,7 @@ solver:
     assert all(response.status_code == 422 for response in responses)
 
 
-def test_grid_flow_contract_rejects_more_than_one_week(
+def test_grid_flow_contract_rejects_more_than_ten_years(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     configuration = tmp_path / "config.yaml"
@@ -288,11 +288,11 @@ solver:
     )
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
     request = grid_flow_request()
-    request["import_kw"] = [1.0] * 169
-    request["export_kw"] = [0.0] * 169
+    request["import_kw"] = [1.0] * (MAX_HORIZON_HOURS + 1)
+    request["export_kw"] = [0.0] * (MAX_HORIZON_HOURS + 1)
 
     with TestClient(app) as client:
         response = client.post("/api/v1/grid-flow", json=request)
 
     assert response.status_code == 422
-    assert "168" in response.text
+    assert str(MAX_HORIZON_HOURS) in response.text

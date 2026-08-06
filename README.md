@@ -218,7 +218,7 @@ schedule results will be added by a later vertical slice.
 `POST /api/v1/grid-flow` validates normalized hourly grid import and export
 data. The versioned request contains timezone-aware `start_time`,
 `interval_minutes: 60`, equally sized non-negative `import_kw` and `export_kw`
-series for one to 168 hours, `unit: "kW"`, and optional source metadata.
+series for one to 87,672 hours, `unit: "kW"`, and optional source metadata.
 
 Example:
 
@@ -240,8 +240,8 @@ Example:
 The response echoes the normalized import and export series with
 `status: "validated"`. Missing fields, unknown fields, unsupported versions
 or units, naive timestamps, mismatched series lengths, invalid values, and
-series longer than 168 hours return HTTP 422 with field-level validation
-details.
+series longer than ten years (87,672 hourly values) return HTTP 422 with
+field-level validation details.
 
 The health endpoint returns the service status and version, for example:
 

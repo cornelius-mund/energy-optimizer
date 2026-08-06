@@ -91,7 +91,7 @@ components:
             maximum: 1000.0
             minimum: 0.0
           type: array
-          maxItems: 168
+          maxItems: 87672
           minItems: 1
           title: Import Kw
           description: Grid import in kW, one value per interval
@@ -101,7 +101,7 @@ components:
             maximum: 1000.0
             minimum: 0.0
           type: array
-          maxItems: 168
+          maxItems: 87672
           minItems: 1
           title: Export Kw
           description: Grid export in kW, one value per interval
