@@ -18,3 +18,149 @@ paths:
                   type: string
                 type: object
                 title: Response Health Health Get
+  /optimize:
+    post:
+      summary: Optimize
+      description: Validate an hourly optimization request at the versioned API boundary.
+      operationId: optimize_optimize_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HourlyOptimizationRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptimizationResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+components:
+  schemas:
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HourlyOptimizationRequest:
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+          description: Timezone-aware start of the horizon
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+          description: Duration of every interval; hourly requests require 60
+        load_kw:
+          items:
+            type: number
+            minimum: 0.0
+            description: Household load in kW
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Load Kw
+        pv_generation_kw:
+          items:
+            type: number
+            minimum: 0.0
+            description: PV generation in kW
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Pv Generation Kw
+        import_price_eur_per_kwh:
+          items:
+            type: number
+            description: Grid import price in EUR/kWh
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Import Price Eur Per Kwh
+        export_price_eur_per_kwh:
+          items:
+            type: number
+            description: Grid export price in EUR/kWh
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Export Price Eur Per Kwh
+      additionalProperties: false
+      type: object
+      required:
+      - start_time
+      - interval_minutes
+      - load_kw
+      - pv_generation_kw
+      - import_price_eur_per_kwh
+      - export_price_eur_per_kwh
+      title: HourlyOptimizationRequest
+      description: Validated hourly inputs accepted by the optimization boundary.
+    OptimizationResponse:
+      properties:
+        status:
+          type: string
+          const: validated
+          title: Status
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+        hours:
+          type: integer
+          maximum: 168.0
+          minimum: 1.0
+          title: Hours
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - start_time
+      - interval_minutes
+      - hours
+      title: OptimizationResponse
+      description: Response returned after an hourly request passes API validation.
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
