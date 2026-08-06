@@ -42,8 +42,164 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/electricity-prices:
+    post:
+      summary: Electricity Prices
+      description: Validate normalized hourly electricity-price data.
+      operationId: electricity_prices_api_v1_electricity_prices_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElectricityPriceRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElectricityPriceResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
+    ElectricityPriceRequest:
+      properties:
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+          description: Version of this API contract
+        timestamps:
+          items:
+            type: string
+            format: date-time
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Timestamps
+          description: Timezone-aware hourly timestamps in ascending order
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+          description: Duration of every price interval; hourly data requires 60
+        import_price_eur_per_kwh:
+          items:
+            type: number
+            maximum: 100.0
+            minimum: -100.0
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Import Price Eur Per Kwh
+          description: Grid import price in EUR/kWh, one value per timestamp
+        export_price_eur_per_kwh:
+          items:
+            type: number
+            maximum: 100.0
+            minimum: -100.0
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Export Price Eur Per Kwh
+          description: Grid export price in EUR/kWh, one value per timestamp
+        unit:
+          type: string
+          const: EUR/kWh
+          title: Unit
+          description: Unit used by price fields
+        source:
+          $ref: '#/components/schemas/SourceMetadata'
+          description: Provider-independent source metadata
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+          description: Time when the source data was retrieved
+        expires_at:
+          type: string
+          format: date-time
+          title: Expires At
+          description: Time after which the data is stale
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - timestamps
+      - interval_minutes
+      - import_price_eur_per_kwh
+      - export_price_eur_per_kwh
+      - unit
+      - source
+      - retrieved_at
+      - expires_at
+      title: ElectricityPriceRequest
+      description: Versioned normalized hourly electricity-price data.
+    ElectricityPriceResponse:
+      properties:
+        status:
+          type: string
+          const: validated
+          title: Status
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+        timestamps:
+          items:
+            type: string
+            format: date-time
+          type: array
+          title: Timestamps
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+        import_price_eur_per_kwh:
+          items:
+            type: number
+          type: array
+          title: Import Price Eur Per Kwh
+        export_price_eur_per_kwh:
+          items:
+            type: number
+          type: array
+          title: Export Price Eur Per Kwh
+        unit:
+          type: string
+          const: EUR/kWh
+          title: Unit
+        source:
+          $ref: '#/components/schemas/SourceMetadata'
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+        expires_at:
+          type: string
+          format: date-time
+          title: Expires At
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - schema_version
+      - timestamps
+      - interval_minutes
+      - import_price_eur_per_kwh
+      - export_price_eur_per_kwh
+      - unit
+      - source
+      - retrieved_at
+      - expires_at
+      title: ElectricityPriceResponse
+      description: Response returned after electricity-price data passes validation.
     HTTPValidationError:
       properties:
         detail:
@@ -138,6 +294,26 @@ components:
       - hours
       title: OptimizationResponse
       description: Response returned after an hourly request passes API validation.
+    SourceMetadata:
+      properties:
+        provider:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Provider
+        entity_id:
+          anyOf:
+          - type: string
+            maxLength: 255
+            minLength: 1
+          - type: 'null'
+          title: Entity Id
+      additionalProperties: false
+      type: object
+      required:
+      - provider
+      title: SourceMetadata
+      description: Identify the system that supplied a normalized data series.
     ValidationError:
       properties:
         loc:
