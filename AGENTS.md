@@ -13,8 +13,9 @@
 - Use `uv run ruff check .` for linting.
 - Use `uv run ruff format --check .` to verify formatting.
 - Use `uv run mypy .` for type checking.
-- Use `.venv/bin/gh` for GitHub issues, pull requests, checks, and releases.
-- Verify GitHub authentication with `.venv/bin/gh auth status` before authenticated operations.
+- Use the installed `gh` CLI from `PATH` for GitHub issues, pull requests,
+  checks, and releases. Verify its location with `command -v gh` before use.
+- Verify GitHub authentication with `gh auth status` before authenticated operations.
 - If a documented tool is unavailable, stop and report the missing tool before trying an undocumented replacement.
 - Do not use `python`, `python3`, `gh`, or `jq` directly from `PATH` without first verifying their availability.
 
