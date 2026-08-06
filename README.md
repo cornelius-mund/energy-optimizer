@@ -200,6 +200,19 @@ Check static OpenAPI documentation against FastAPI-generated schema:
 uv run pytest tests/test_openapi.py
 ```
 
+### Hourly optimization API
+
+`POST /optimize` validates an hourly request. The request must contain a
+timezone-aware `start_time`, `interval_minutes: 60`, and equally sized series
+of `load_kw`, `pv_generation_kw`, `import_price_eur_per_kwh`, and
+`export_price_eur_per_kwh`. Series contain one value per hour, from one to 168
+hours, and values are expressed in kW or EUR/kWh as named by their fields.
+
+Requests that pass validation return a `validated` response containing the
+horizon metadata. Invalid JSON or values return HTTP 422 with field-level
+validation details. The endpoint is the API boundary for the optimizer; solver
+schedule results will be added by a later vertical slice.
+
 The health endpoint returns the service status and version, for example:
 
 ```json
