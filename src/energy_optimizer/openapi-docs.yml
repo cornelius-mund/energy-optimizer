@@ -42,6 +42,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/household-load:
+    post:
+      summary: Household Load
+      description: Validate a versioned hourly household-load data series.
+      operationId: household_load_api_v1_household_load_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HouseholdLoadRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HouseholdLoadResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     HTTPValidationError:
@@ -110,6 +134,95 @@ components:
       - export_price_eur_per_kwh
       title: HourlyOptimizationRequest
       description: Validated hourly inputs accepted by the optimization boundary.
+    HouseholdLoadRequest:
+      properties:
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+          description: Version of this API contract
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+          description: Timezone-aware start of the series
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+          description: Duration of every series interval; hourly data requires 60
+        load_kw:
+          items:
+            type: number
+            maximum: 1000.0
+            minimum: 0.0
+          type: array
+          maxItems: 168
+          minItems: 1
+          title: Load Kw
+          description: Household electrical load in kW, one value per interval
+        unit:
+          type: string
+          const: kW
+          title: Unit
+          description: Unit used by load_kw
+        source:
+          anyOf:
+          - $ref: '#/components/schemas/SourceMetadata'
+          - type: 'null'
+          description: Optional source metadata for externally supplied data
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - start_time
+      - interval_minutes
+      - load_kw
+      - unit
+      title: HouseholdLoadRequest
+      description: Versioned hourly household-load data at the API boundary.
+    HouseholdLoadResponse:
+      properties:
+        status:
+          type: string
+          const: validated
+          title: Status
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+        load_kw:
+          items:
+            type: number
+          type: array
+          title: Load Kw
+        unit:
+          type: string
+          const: kW
+          title: Unit
+        source:
+          anyOf:
+          - $ref: '#/components/schemas/SourceMetadata'
+          - type: 'null'
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - schema_version
+      - start_time
+      - interval_minutes
+      - load_kw
+      - unit
+      title: HouseholdLoadResponse
+      description: Response returned after household-load data passes validation.
     OptimizationResponse:
       properties:
         status:
@@ -138,6 +251,26 @@ components:
       - hours
       title: OptimizationResponse
       description: Response returned after an hourly request passes API validation.
+    SourceMetadata:
+      properties:
+        provider:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Provider
+        entity_id:
+          anyOf:
+          - type: string
+            maxLength: 255
+            minLength: 1
+          - type: 'null'
+          title: Entity Id
+      additionalProperties: false
+      type: object
+      required:
+      - provider
+      title: SourceMetadata
+      description: Identify the system that supplied a normalized data series.
     ValidationError:
       properties:
         loc:
