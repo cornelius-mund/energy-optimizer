@@ -217,7 +217,7 @@ schedule results will be added by a later vertical slice.
 
 `POST /api/v1/pv-generation` validates a normalized hourly PV-generation
 series. It uses a versioned request with a timezone-aware `start_time`,
-`interval_minutes: 60`, non-negative `generation_kw` values for one to 168
+`interval_minutes: 60`, non-negative `generation_kw` values for one to 87,672
 hours, `unit: "kW"`, and optional source metadata.
 
 Example:
@@ -238,8 +238,8 @@ Example:
 
 The response echoes the normalized series with `status: "validated"`.
 Missing fields, unknown fields, unsupported versions or units, naive
-timestamps, invalid values, and series longer than 168 hours return HTTP 422
-with field-level validation details.
+timestamps, invalid values, and series longer than ten years (87,672 hourly
+values) return HTTP 422 with field-level validation details.
 
 The health endpoint returns the service status and version, for example:
 
