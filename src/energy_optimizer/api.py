@@ -14,7 +14,6 @@ from energy_optimizer import __version__
 from energy_optimizer.config import load_configuration
 
 MAX_HORIZON_HOURS = 87_672
-MAX_PRICE_HORIZON_HOURS = 168
 
 
 class HourlyOptimizationRequest(BaseModel):
@@ -73,7 +72,7 @@ class ElectricityPriceRequest(BaseModel):
     schema_version: Literal["1"] = Field(description="Version of this API contract")
     timestamps: list[datetime] = Field(
         min_length=1,
-        max_length=MAX_PRICE_HORIZON_HOURS,
+        max_length=MAX_HORIZON_HOURS,
         description="Timezone-aware hourly timestamps in ascending order",
     )
     interval_minutes: Literal[60] = Field(
@@ -81,12 +80,12 @@ class ElectricityPriceRequest(BaseModel):
     )
     import_price_eur_per_kwh: list[Annotated[float, Field(ge=-100, le=100)]] = Field(
         min_length=1,
-        max_length=MAX_PRICE_HORIZON_HOURS,
+        max_length=MAX_HORIZON_HOURS,
         description="Grid import price in EUR/kWh, one value per timestamp",
     )
     export_price_eur_per_kwh: list[Annotated[float, Field(ge=-100, le=100)]] = Field(
         min_length=1,
-        max_length=MAX_PRICE_HORIZON_HOURS,
+        max_length=MAX_HORIZON_HOURS,
         description="Grid export price in EUR/kWh, one value per timestamp",
     )
     unit: Literal["EUR/kWh"] = Field(description="Unit used by price fields")

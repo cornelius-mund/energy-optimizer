@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from energy_optimizer.api import MAX_PRICE_HORIZON_HOURS, app
+from energy_optimizer.api import MAX_HORIZON_HOURS, app
 
 
 def test_health_returns_service_status_and_version(
@@ -383,7 +383,7 @@ solver:
     assert all("import_price_eur_per_kwh" in response.text for response in responses)
 
 
-def test_electricity_price_contract_rejects_more_than_one_week(
+def test_electricity_price_contract_rejects_more_than_ten_years(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     configuration = tmp_path / "config.yaml"
@@ -401,15 +401,13 @@ solver:
     )
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
     request = electricity_price_request()
-    request["timestamps"] = [
-        f"2026-01-{1 + hour // 24:02d}T{hour % 24:02d}:00:00+00:00"
-        for hour in range(MAX_PRICE_HORIZON_HOURS + 1)
-    ]
-    request["import_price_eur_per_kwh"] = [0.30] * (MAX_PRICE_HORIZON_HOURS + 1)
-    request["export_price_eur_per_kwh"] = [0.08] * (MAX_PRICE_HORIZON_HOURS + 1)
+    horizon = MAX_HORIZON_HOURS + 1
+    request["timestamps"] = ["2026-01-01T00:00:00+00:00"] * horizon
+    request["import_price_eur_per_kwh"] = [0.30] * horizon
+    request["export_price_eur_per_kwh"] = [0.08] * horizon
 
     with TestClient(app) as client:
         response = client.post("/api/v1/electricity-prices", json=request)
 
     assert response.status_code == 422
-    assert str(MAX_PRICE_HORIZON_HOURS) in response.text
+    assert str(MAX_HORIZON_HOURS) in response.text
