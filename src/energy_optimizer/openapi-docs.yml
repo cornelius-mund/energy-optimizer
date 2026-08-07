@@ -80,7 +80,7 @@ components:
             type: string
             format: date-time
           type: array
-          maxItems: 87672
+          maxItems: 168
           minItems: 1
           title: Timestamps
           description: Timezone-aware hourly timestamps in ascending order
@@ -95,7 +95,7 @@ components:
             maximum: 100.0
             minimum: -100.0
           type: array
-          maxItems: 87672
+          maxItems: 168
           minItems: 1
           title: Import Price Eur Per Kwh
           description: Grid import price in EUR/kWh, one value per timestamp
@@ -105,7 +105,7 @@ components:
             maximum: 100.0
             minimum: -100.0
           type: array
-          maxItems: 87672
+          maxItems: 168
           minItems: 1
           title: Export Price Eur Per Kwh
           description: Grid export price in EUR/kWh, one value per timestamp
