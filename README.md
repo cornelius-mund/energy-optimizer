@@ -246,6 +246,39 @@ fields, unknown fields, unsupported versions or units, naive timestamps,
 invalid values, and series longer than ten years (87,672 hourly values) return
 HTTP 422 with field-level validation details.
 
+### PV-generation API
+
+`POST /api/v1/pv-generation` validates a normalized hourly PV-generation
+series. The versioned request contains:
+
+- `schema_version: "1"`
+- A timezone-aware `start_time`
+- `interval_minutes: 60`
+- `generation_kw`, containing one non-negative value per hour for one to 87,672 hours
+- `unit: "kW"`
+- Optional `source` metadata with a provider and entity identifier
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "generation_kw": [0.0, 2.4],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.pv_generation"
+  }
+}
+```
+
+The response echoes the normalized series with `status: "validated"`. Missing
+fields, unknown fields, unsupported versions or units, naive timestamps,
+invalid values, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
+
 The health endpoint returns the service status and version, for example:
 
 ```json
