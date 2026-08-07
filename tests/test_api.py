@@ -380,3 +380,537 @@ solver:
 
     assert response.status_code == 422
     assert str(MAX_HORIZON_HOURS) in response.text
+
+
+def household_load_request() -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00+00:00",
+        "interval_minutes": 60,
+        "load_kw": [1.2, 1.0],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.household_load",
+        },
+    }
+
+
+def grid_flow_request() -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00+00:00",
+        "interval_minutes": 60,
+        "import_kw": [1.2, 1.0],
+        "export_kw": [0.0, 0.4],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.grid_import",
+        },
+    }
+
+
+def test_grid_flow_contract_accepts_a_valid_request(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/grid-flow", json=grid_flow_request())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "validated",
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00Z",
+        "interval_minutes": 60,
+        "import_kw": [1.2, 1.0],
+        "export_kw": [0.0, 0.4],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.grid_import",
+        },
+    }
+
+
+def test_grid_flow_contract_allows_direct_submissions_without_source(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = grid_flow_request()
+    request.pop("source")
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/grid-flow", json=request)
+
+    assert response.status_code == 200
+    assert response.json()["source"] is None
+
+
+def test_grid_flow_contract_rejects_invalid_payloads(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    invalid_requests = [
+        ({**grid_flow_request(), "import_kw": []}, "import_kw"),
+        ({**grid_flow_request(), "import_kw": [-0.1]}, "import_kw"),
+        ({**grid_flow_request(), "import_kw": [1000.1]}, "import_kw"),
+        ({**grid_flow_request(), "export_kw": [1000.1]}, "export_kw"),
+        ({**grid_flow_request(), "interval_minutes": 30}, "interval_minutes"),
+        (
+            {**grid_flow_request(), "start_time": "2026-01-01T00:00:00"},
+            "start_time",
+        ),
+        ({**grid_flow_request(), "schema_version": "2"}, "schema_version"),
+        ({**grid_flow_request(), "unit": "W"}, "unit"),
+        ({**grid_flow_request(), "unexpected": True}, "unexpected"),
+        ({**grid_flow_request(), "source": {"provider": ""}}, "provider"),
+        (
+            {
+                **grid_flow_request(),
+                "source": {"provider": "home-assistant", "unexpected": True},
+            },
+            "extra",
+        ),
+        ({**grid_flow_request(), "export_kw": [0.0]}, "same number"),
+    ]
+
+    with TestClient(app) as client:
+        responses = [
+            (client.post("/api/v1/grid-flow", json=request), expected_text)
+            for request, expected_text in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
+
+
+def test_grid_flow_contract_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/api/v1/grid-flow",
+                content=(
+                    '{"schema_version":"1",'
+                    '"start_time":"2026-01-01T00:00:00+00:00",'
+                    '"interval_minutes":60,"import_kw":[0.0,'
+                    f'{value},1.0],"export_kw":[0.0,0.0,0.0],"unit":"kW"}}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+            for value in ("NaN", "Infinity", "-Infinity")
+        ]
+
+    assert all(response.status_code == 422 for response in responses)
+    assert all("import_kw" in response.text for response in responses)
+
+
+def test_grid_flow_contract_rejects_more_than_ten_years(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = grid_flow_request()
+    request["import_kw"] = [1.0] * (MAX_HORIZON_HOURS + 1)
+    request["export_kw"] = [0.0] * (MAX_HORIZON_HOURS + 1)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/grid-flow", json=request)
+
+    assert response.status_code == 422
+    assert str(MAX_HORIZON_HOURS) in response.text
+
+
+def test_household_load_contract_accepts_a_valid_request(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/household-load", json=household_load_request())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "validated",
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00Z",
+        "interval_minutes": 60,
+        "load_kw": [1.2, 1.0],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.household_load",
+        },
+    }
+
+
+def test_household_load_contract_allows_direct_submissions_without_source(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = household_load_request()
+    request.pop("source")
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/household-load", json=request)
+
+    assert response.status_code == 200
+    assert response.json()["source"] is None
+
+
+def test_household_load_contract_rejects_invalid_payloads(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    invalid_requests = [
+        ({**household_load_request(), "load_kw": []}, "load_kw"),
+        ({**household_load_request(), "load_kw": [-0.1]}, "load_kw"),
+        ({**household_load_request(), "load_kw": [1000.1]}, "load_kw"),
+        ({**household_load_request(), "interval_minutes": 30}, "interval_minutes"),
+        (
+            {**household_load_request(), "start_time": "2026-01-01T00:00:00"},
+            "start_time",
+        ),
+        ({**household_load_request(), "schema_version": "2"}, "schema_version"),
+        ({**household_load_request(), "unit": "W"}, "unit"),
+        ({**household_load_request(), "unexpected": True}, "unexpected"),
+    ]
+
+    with TestClient(app) as client:
+        responses = [
+            (client.post("/api/v1/household-load", json=request), expected_text)
+            for request, expected_text in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
+
+
+def test_household_load_contract_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/api/v1/household-load",
+                content=(
+                    '{"schema_version":"1",'
+                    '"start_time":"2026-01-01T00:00:00+00:00",'
+                    '"interval_minutes":60,"load_kw":[0.0,'
+                    f"{value}"  # JSON's non-standard numeric values exercise parsing.
+                    '],"unit":"kW"}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+            for value in ("NaN", "Infinity", "-Infinity")
+        ]
+
+    assert all(response.status_code == 422 for response in responses)
+    assert all("load_kw" in response.text for response in responses)
+
+
+def test_household_load_contract_rejects_more_than_ten_years(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = household_load_request()
+    request["load_kw"] = [1.0] * (MAX_HORIZON_HOURS + 1)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/household-load", json=request)
+
+    assert response.status_code == 422
+    assert str(MAX_HORIZON_HOURS) in response.text
+
+
+def pv_generation_request() -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00+00:00",
+        "interval_minutes": 60,
+        "generation_kw": [0.0, 2.4],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.pv_generation",
+        },
+    }
+
+
+def test_pv_generation_contract_accepts_a_valid_request(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/pv-generation", json=pv_generation_request())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "validated",
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00Z",
+        "interval_minutes": 60,
+        "generation_kw": [0.0, 2.4],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.pv_generation",
+        },
+    }
+
+
+def test_pv_generation_contract_rejects_invalid_payloads(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    invalid_requests = [
+        ({**pv_generation_request(), "generation_kw": []}, "generation_kw"),
+        ({**pv_generation_request(), "generation_kw": [-0.1]}, "generation_kw"),
+        ({**pv_generation_request(), "generation_kw": [1000.1]}, "generation_kw"),
+        ({**pv_generation_request(), "interval_minutes": 30}, "interval_minutes"),
+        (
+            {**pv_generation_request(), "start_time": "2026-01-01T00:00:00"},
+            "start_time",
+        ),
+        ({**pv_generation_request(), "schema_version": "2"}, "schema_version"),
+        ({**pv_generation_request(), "unit": "W"}, "unit"),
+        ({**pv_generation_request(), "unexpected": True}, "unexpected"),
+    ]
+
+    with TestClient(app) as client:
+        responses = [
+            (client.post("/api/v1/pv-generation", json=request), expected_text)
+            for request, expected_text in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
+
+
+def test_pv_generation_contract_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/api/v1/pv-generation",
+                content=(
+                    '{"schema_version":"1",'
+                    '"start_time":"2026-01-01T00:00:00+00:00",'
+                    '"interval_minutes":60,"generation_kw":[0.0,'
+                    f"{value}"
+                    '],"unit":"kW"}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+            for value in ("NaN", "Infinity", "-Infinity")
+        ]
+
+    assert all(response.status_code == 422 for response in responses)
+    assert all("generation_kw" in response.text for response in responses)
+
+
+def test_pv_generation_contract_rejects_more_than_ten_years(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    request = pv_generation_request()
+    request["generation_kw"] = [1.0] * (MAX_HORIZON_HOURS + 1)
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/pv-generation", json=request)
+
+    assert response.status_code == 422
+    assert str(MAX_HORIZON_HOURS) in response.text

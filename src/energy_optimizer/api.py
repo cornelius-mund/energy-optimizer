@@ -181,6 +181,178 @@ class BatteryResponse(BaseModel):
     source: SourceMetadata | None = None
 
 
+class HouseholdLoadRequest(BaseModel):
+    """Versioned hourly household-load data at the API boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    start_time: datetime = Field(description="Timezone-aware start of the series")
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every series interval; hourly data requires 60"
+    )
+    load_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Household electrical load in kW, one value per interval",
+    )
+    unit: Literal["kW"] = Field(description="Unit used by load_kw")
+    source: SourceMetadata | None = Field(
+        default=None,
+        description="Optional source metadata for externally supplied data",
+    )
+
+    @field_validator("load_kw", mode="before")
+    @classmethod
+    def validate_finite_load_values(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
+        return values
+
+    @model_validator(mode="after")
+    def validate_start_time(self) -> "HouseholdLoadRequest":
+        """Require timestamps that identify an unambiguous hourly series."""
+        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+            raise ValueError("start_time must include a timezone")
+        return self
+
+
+class HouseholdLoadResponse(BaseModel):
+    """Response returned after household-load data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    load_kw: list[float]
+    unit: Literal["kW"]
+    source: SourceMetadata | None = None
+
+
+class PvGenerationRequest(BaseModel):
+    """Versioned hourly PV-generation data at the API boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    start_time: datetime = Field(description="Timezone-aware start of the series")
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every series interval; hourly data requires 60"
+    )
+    generation_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="PV generation in kW, one value per interval",
+    )
+    unit: Literal["kW"] = Field(description="Unit used by generation_kw")
+    source: SourceMetadata | None = Field(
+        default=None,
+        description="Optional source metadata for externally supplied data",
+    )
+
+    @field_validator("generation_kw", mode="before")
+    @classmethod
+    def validate_finite_generation_values(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
+        return values
+
+    @model_validator(mode="after")
+    def validate_start_time(self) -> "PvGenerationRequest":
+        """Require timestamps that identify an unambiguous hourly series."""
+        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+            raise ValueError("start_time must include a timezone")
+        return self
+
+
+class PvGenerationResponse(BaseModel):
+    """Response returned after PV-generation data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    generation_kw: list[float]
+    unit: Literal["kW"]
+    source: SourceMetadata | None = None
+
+
+class GridFlowRequest(BaseModel):
+    """Versioned hourly grid import and export data at the API boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    start_time: datetime = Field(description="Timezone-aware start of the series")
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every series interval; hourly data requires 60"
+    )
+    import_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Grid import in kW, one value per interval",
+    )
+    export_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Grid export in kW, one value per interval",
+    )
+    unit: Literal["kW"] = Field(description="Unit used by import_kw and export_kw")
+    source: SourceMetadata | None = Field(
+        default=None,
+        description="Optional source metadata for externally supplied data",
+    )
+
+    @field_validator("import_kw", "export_kw", mode="before")
+    @classmethod
+    def validate_finite_values(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
+        return values
+
+    @model_validator(mode="after")
+    def validate_series(self) -> "GridFlowRequest":
+        """Require an unambiguous timestamp and aligned import/export series."""
+        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+            raise ValueError("start_time must include a timezone")
+        if len(self.import_kw) != len(self.export_kw):
+            raise ValueError(
+                "import_kw and export_kw must contain the same number of values"
+            )
+        return self
+
+
+class GridFlowResponse(BaseModel):
+    """Response returned after grid-flow data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    import_kw: list[Annotated[float, Field(ge=0, le=1000)]]
+    export_kw: list[Annotated[float, Field(ge=0, le=1000)]]
+    unit: Literal["kW"]
+    source: SourceMetadata | None = None
+
+
 class OptimizationResponse(BaseModel):
     """Response returned after an hourly request passes API validation."""
 
@@ -239,5 +411,48 @@ def battery(request: BatteryRequest) -> BatteryResponse:
         discharge_efficiency=request.discharge_efficiency,
         unit=request.unit,
         power_unit=request.power_unit,
+        source=request.source,
+    )
+
+
+@app.post("/api/v1/household-load", response_model=HouseholdLoadResponse)
+def household_load(request: HouseholdLoadRequest) -> HouseholdLoadResponse:
+    """Validate a versioned hourly household-load data series."""
+    return HouseholdLoadResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        load_kw=request.load_kw,
+        unit=request.unit,
+        source=request.source,
+    )
+
+
+@app.post("/api/v1/pv-generation", response_model=PvGenerationResponse)
+def pv_generation(request: PvGenerationRequest) -> PvGenerationResponse:
+    """Validate a versioned hourly PV-generation data series."""
+    return PvGenerationResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        generation_kw=request.generation_kw,
+        unit=request.unit,
+        source=request.source,
+    )
+
+
+@app.post("/api/v1/grid-flow", response_model=GridFlowResponse)
+def grid_flow(request: GridFlowRequest) -> GridFlowResponse:
+    """Validate a versioned hourly grid import and export data series."""
+    return GridFlowResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        import_kw=request.import_kw,
+        export_kw=request.export_kw,
+        unit=request.unit,
         source=request.source,
     )
