@@ -64,6 +64,108 @@ class SourceMetadata(BaseModel):
     entity_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
 
+class ElectricityPriceRequest(BaseModel):
+    """Versioned normalized hourly electricity-price data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    timestamps: list[datetime] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Timezone-aware hourly timestamps in ascending order",
+    )
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every price interval; hourly data requires 60"
+    )
+    import_price_eur_per_kwh: list[Annotated[float, Field(ge=-100, le=100)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Grid import price in EUR/kWh, one value per timestamp",
+    )
+    export_price_eur_per_kwh: list[Annotated[float, Field(ge=-100, le=100)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Grid export price in EUR/kWh, one value per timestamp",
+    )
+    unit: Literal["EUR/kWh"] = Field(description="Unit used by price fields")
+    source: SourceMetadata = Field(description="Provider-independent source metadata")
+    retrieved_at: datetime = Field(
+        description="Time when the source data was retrieved"
+    )
+    expires_at: datetime = Field(description="Time after which the data is stale")
+
+    @field_validator("timestamps", "retrieved_at", "expires_at")
+    @classmethod
+    def validate_aware_timestamps(
+        cls, values: datetime | list[datetime]
+    ) -> datetime | list[datetime]:
+        """Reject naive timestamps that cannot be compared safely."""
+        candidates = values if isinstance(values, list) else [values]
+        if any(
+            value.tzinfo is None or value.utcoffset() is None for value in candidates
+        ):
+            raise ValueError("timestamps must include a timezone")
+        return values
+
+    @field_validator(
+        "import_price_eur_per_kwh", "export_price_eur_per_kwh", mode="before"
+    )
+    @classmethod
+    def validate_finite_prices(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
+        return values
+
+    @model_validator(mode="after")
+    def validate_price_series(self) -> "ElectricityPriceRequest":
+        """Require aligned, ordered, fresh price data with explicit coverage."""
+        if len(self.timestamps) != len(self.import_price_eur_per_kwh):
+            raise ValueError(
+                "timestamps and import_price_eur_per_kwh must have the same length"
+            )
+        if len(self.timestamps) != len(self.export_price_eur_per_kwh):
+            raise ValueError(
+                "timestamps and export_price_eur_per_kwh must have the same length"
+            )
+        timestamp_values = [timestamp.timestamp() for timestamp in self.timestamps]
+        if timestamp_values != sorted(set(timestamp_values)):
+            raise ValueError("timestamps must be unique and in ascending order")
+        if any(
+            later - earlier != self.interval_minutes * 60
+            for earlier, later in zip(timestamp_values, timestamp_values[1:])
+        ):
+            raise ValueError("timestamps must be spaced by interval_minutes")
+        if self.expires_at <= self.retrieved_at:
+            raise ValueError("expires_at must be later than retrieved_at")
+        if self.timestamps[0] < self.retrieved_at:
+            raise ValueError("price coverage must not start before retrieved_at")
+        if self.timestamps[-1] >= self.expires_at:
+            raise ValueError("price data is stale at the end of its coverage")
+        return self
+
+
+class ElectricityPriceResponse(BaseModel):
+    """Response returned after electricity-price data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    timestamps: list[datetime]
+    interval_minutes: Literal[60]
+    import_price_eur_per_kwh: list[float]
+    export_price_eur_per_kwh: list[float]
+    unit: Literal["EUR/kWh"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    expires_at: datetime
+
+
 class BatteryRequest(BaseModel):
     """Versioned battery state and capability data at the API boundary."""
 
@@ -412,6 +514,25 @@ def battery(request: BatteryRequest) -> BatteryResponse:
         unit=request.unit,
         power_unit=request.power_unit,
         source=request.source,
+    )
+
+
+@app.post("/api/v1/electricity-prices", response_model=ElectricityPriceResponse)
+def electricity_prices(
+    request: ElectricityPriceRequest,
+) -> ElectricityPriceResponse:
+    """Validate normalized hourly electricity-price data."""
+    return ElectricityPriceResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        timestamps=request.timestamps,
+        interval_minutes=request.interval_minutes,
+        import_price_eur_per_kwh=request.import_price_eur_per_kwh,
+        export_price_eur_per_kwh=request.export_price_eur_per_kwh,
+        unit=request.unit,
+        source=request.source,
+        retrieved_at=request.retrieved_at,
+        expires_at=request.expires_at,
     )
 
 
