@@ -213,6 +213,39 @@ horizon metadata. Invalid JSON or values return HTTP 422 with field-level
 validation details. The endpoint is the API boundary for the optimizer; solver
 schedule results will be added by a later vertical slice.
 
+### Household-load API
+
+`POST /api/v1/household-load` validates a normalized hourly household-load
+series. The versioned request contains:
+
+- `schema_version: "1"`
+- A timezone-aware `start_time`
+- `interval_minutes: 60`
+- `load_kw`, containing one non-negative value per hour for one to 87,672 hours
+- `unit: "kW"`
+- Optional `source` metadata with a provider and entity identifier
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "load_kw": [1.2, 1.0],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.household_load"
+  }
+}
+```
+
+The response echoes the normalized data with `status: "validated"`. Missing
+fields, unknown fields, unsupported versions or units, naive timestamps,
+invalid values, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
+
 The health endpoint returns the service status and version, for example:
 
 ```json
