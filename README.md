@@ -251,6 +251,142 @@ coverage, invalid freshness bounds, out-of-range values, and series longer than
 ten years (87,672 hourly values) return HTTP 422 with field-level validation
 details.
 
+### Battery API
+
+`POST /api/v1/battery` validates normalized hourly battery state and capability
+data. The versioned request contains timezone-aware `start_time`,
+`interval_minutes: 60`, one to 87,672 `state_of_charge_kwh` values, capacity and
+SOC bounds in kWh, initial SOC, charge and discharge power limits in kW,
+charge and discharge efficiencies from greater than zero through one,
+`unit: "kWh"`, `power_unit: "kW"`, and optional source metadata.
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "state_of_charge_kwh": [5.0, 5.5],
+  "capacity_kwh": 10.0,
+  "minimum_soc_kwh": 2.0,
+  "maximum_soc_kwh": 10.0,
+  "initial_soc_kwh": 5.0,
+  "maximum_charge_kw": 4.0,
+  "maximum_discharge_kw": 4.0,
+  "charge_efficiency": 0.95,
+  "discharge_efficiency": 0.95,
+  "unit": "kWh",
+  "power_unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.battery_soc"
+  }
+}
+```
+
+The response echoes the validated battery data with `status: "validated"`.
+Missing fields, unknown fields, unsupported versions or units, naive
+timestamps, out-of-range state of charge, inconsistent limits, invalid
+efficiencies, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
+
+### Household-load API
+
+`POST /api/v1/household-load` validates a normalized hourly household-load
+series. The versioned request contains:
+
+- `schema_version: "1"`
+- A timezone-aware `start_time`
+- `interval_minutes: 60`
+- `load_kw`, containing one non-negative value per hour for one to 87,672 hours
+- `unit: "kW"`
+- Optional `source` metadata with a provider and entity identifier
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "load_kw": [1.2, 1.0],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.household_load"
+  }
+}
+```
+
+The response echoes the normalized data with `status: "validated"`. Missing
+fields, unknown fields, unsupported versions or units, naive timestamps,
+invalid values, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
+
+### PV-generation API
+
+`POST /api/v1/pv-generation` validates a normalized hourly PV-generation
+series. The versioned request contains:
+
+- `schema_version: "1"`
+- A timezone-aware `start_time`
+- `interval_minutes: 60`
+- `generation_kw`, containing one non-negative value per hour for one to 87,672 hours
+- `unit: "kW"`
+- Optional `source` metadata with a provider and entity identifier
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "generation_kw": [0.0, 2.4],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.pv_generation"
+  }
+}
+```
+
+The response echoes the normalized series with `status: "validated"`. Missing
+fields, unknown fields, unsupported versions or units, naive timestamps,
+invalid values, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
+
+### Grid-flow API
+
+`POST /api/v1/grid-flow` validates normalized hourly grid import and export
+data. The versioned request contains timezone-aware `start_time`,
+`interval_minutes: 60`, equally sized non-negative `import_kw` and `export_kw`
+series for one to 87,672 hours, `unit: "kW"`, and optional source metadata.
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "import_kw": [1.2, 1.0],
+  "export_kw": [0.0, 0.4],
+  "unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.grid_import"
+  }
+}
+```
+
+The response echoes the normalized import and export series with
+`status: "validated"`. Missing fields, unknown fields, unsupported versions
+or units, naive timestamps, mismatched series lengths, invalid values, and
+series longer than ten years (87,672 hourly values) return HTTP 422 with
+field-level validation details.
+
 The health endpoint returns the service status and version, for example:
 
 ```json
