@@ -120,13 +120,18 @@ class BatteryRequest(BaseModel):
         "maximum_discharge_kw",
         "charge_efficiency",
         "discharge_efficiency",
+        mode="before",
     )
     @classmethod
-    def validate_finite_values(cls, values: float | list[float]) -> float | list[float]:
-        """Reject non-finite values that cannot represent battery data."""
-        candidates = values if isinstance(values, list) else [values]
-        if not all(math.isfinite(value) for value in candidates):
-            raise ValueError("battery values must be finite")
+    def validate_finite_values(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
+        if isinstance(values, float) and not math.isfinite(values):
+            return None
         return values
 
     @model_validator(mode="after")

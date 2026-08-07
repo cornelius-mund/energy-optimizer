@@ -268,25 +268,74 @@ solver:
     )
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
     invalid_requests = [
-        {**battery_request(), "state_of_charge_kwh": []},
-        {**battery_request(), "state_of_charge_kwh": [11.0]},
-        {**battery_request(), "minimum_soc_kwh": 11.0},
-        {**battery_request(), "maximum_soc_kwh": 1.0},
-        {**battery_request(), "initial_soc_kwh": 1.0},
-        {**battery_request(), "maximum_charge_kw": 0.0},
-        {**battery_request(), "charge_efficiency": 0.0},
-        {**battery_request(), "interval_minutes": 30},
-        {**battery_request(), "start_time": "2026-01-01T00:00:00"},
-        {**battery_request(), "schema_version": "2"},
-        {**battery_request(), "unexpected": True},
+        ({**battery_request(), "state_of_charge_kwh": []}, "state_of_charge_kwh"),
+        ({**battery_request(), "state_of_charge_kwh": [11.0]}, "state_of_charge_kwh"),
+        ({**battery_request(), "minimum_soc_kwh": 11.0}, "minimum_soc_kwh"),
+        ({**battery_request(), "maximum_soc_kwh": 100001.0}, "maximum_soc_kwh"),
+        ({**battery_request(), "maximum_soc_kwh": 1.0}, "minimum_soc_kwh"),
+        ({**battery_request(), "initial_soc_kwh": 1.0}, "initial_soc_kwh"),
+        ({**battery_request(), "maximum_charge_kw": 0.0}, "maximum_charge_kw"),
+        ({**battery_request(), "charge_efficiency": 0.0}, "charge_efficiency"),
+        ({**battery_request(), "interval_minutes": 30}, "interval_minutes"),
+        (
+            {**battery_request(), "start_time": "2026-01-01T00:00:00"},
+            "start_time",
+        ),
+        ({**battery_request(), "schema_version": "2"}, "schema_version"),
+        ({**battery_request(), "unit": "kW"}, "unit"),
+        ({**battery_request(), "unexpected": True}, "unexpected"),
     ]
 
     with TestClient(app) as client:
         responses = [
-            client.post("/api/v1/battery", json=request) for request in invalid_requests
+            (client.post("/api/v1/battery", json=request), expected_text)
+            for request, expected_text in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
+
+
+def test_battery_contract_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/api/v1/battery",
+                content=(
+                    '{"schema_version":"1",'
+                    '"start_time":"2026-01-01T00:00:00+00:00",'
+                    '"interval_minutes":60,"state_of_charge_kwh":[5.0,'
+                    f"{value}],"
+                    '"capacity_kwh":10.0,"minimum_soc_kwh":2.0,'
+                    '"maximum_soc_kwh":10.0,"initial_soc_kwh":5.0,'
+                    '"maximum_charge_kw":4.0,"maximum_discharge_kw":4.0,'
+                    '"charge_efficiency":0.95,"discharge_efficiency":0.95,'
+                    '"unit":"kWh","power_unit":"kW"}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+            for value in ("NaN", "Infinity", "-Infinity")
         ]
 
     assert all(response.status_code == 422 for response in responses)
+    assert all("state_of_charge_kwh" in response.text for response in responses)
 
 
 def test_battery_contract_rejects_more_than_ten_years(
