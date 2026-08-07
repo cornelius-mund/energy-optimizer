@@ -64,8 +64,8 @@ class SourceMetadata(BaseModel):
     entity_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
 
-class PvGenerationRequest(BaseModel):
-    """Versioned hourly PV-generation data at the API boundary."""
+class HouseholdLoadRequest(BaseModel):
+    """Versioned hourly household-load data at the API boundary."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -74,20 +74,20 @@ class PvGenerationRequest(BaseModel):
     interval_minutes: Literal[60] = Field(
         description="Duration of every series interval; hourly data requires 60"
     )
-    generation_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
+    load_kw: list[Annotated[float, Field(ge=0, le=1000)]] = Field(
         min_length=1,
         max_length=MAX_HORIZON_HOURS,
-        description="PV generation in kW, one value per interval",
+        description="Household electrical load in kW, one value per interval",
     )
-    unit: Literal["kW"] = Field(description="Unit used by generation_kw")
+    unit: Literal["kW"] = Field(description="Unit used by load_kw")
     source: SourceMetadata | None = Field(
         default=None,
         description="Optional source metadata for externally supplied data",
     )
 
-    @field_validator("generation_kw", mode="before")
+    @field_validator("load_kw", mode="before")
     @classmethod
-    def validate_finite_generation_values(cls, values: object) -> object:
+    def validate_finite_load_values(cls, values: object) -> object:
         """Make non-finite values safe for the JSON validation response."""
         if isinstance(values, list):
             return [
@@ -97,15 +97,15 @@ class PvGenerationRequest(BaseModel):
         return values
 
     @model_validator(mode="after")
-    def validate_start_time(self) -> "PvGenerationRequest":
+    def validate_start_time(self) -> "HouseholdLoadRequest":
         """Require timestamps that identify an unambiguous hourly series."""
         if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
             raise ValueError("start_time must include a timezone")
         return self
 
 
-class PvGenerationResponse(BaseModel):
-    """Response returned after PV-generation data passes validation."""
+class HouseholdLoadResponse(BaseModel):
+    """Response returned after household-load data passes validation."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -113,7 +113,7 @@ class PvGenerationResponse(BaseModel):
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
-    generation_kw: list[float]
+    load_kw: list[float]
     unit: Literal["kW"]
     source: SourceMetadata | None = None
 
@@ -157,15 +157,15 @@ def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
     )
 
 
-@app.post("/api/v1/pv-generation", response_model=PvGenerationResponse)
-def pv_generation(request: PvGenerationRequest) -> PvGenerationResponse:
-    """Validate a versioned hourly PV-generation data series."""
-    return PvGenerationResponse(
+@app.post("/api/v1/household-load", response_model=HouseholdLoadResponse)
+def household_load(request: HouseholdLoadRequest) -> HouseholdLoadResponse:
+    """Validate a versioned hourly household-load data series."""
+    return HouseholdLoadResponse(
         status="validated",
         schema_version=request.schema_version,
         start_time=request.start_time,
         interval_minutes=request.interval_minutes,
-        generation_kw=request.generation_kw,
+        load_kw=request.load_kw,
         unit=request.unit,
         source=request.source,
     )
