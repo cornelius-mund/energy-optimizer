@@ -90,6 +90,30 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/grid-flow:
+    post:
+      summary: Grid Flow
+      description: Validate a versioned hourly grid import and export data series.
+      operationId: grid_flow_api_v1_grid_flow_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GridFlowRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GridFlowResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
     GridFlowRequest:
@@ -171,11 +195,15 @@ components:
         import_kw:
           items:
             type: number
+            maximum: 1000.0
+            minimum: 0.0
           type: array
           title: Import Kw
         export_kw:
           items:
             type: number
+            maximum: 1000.0
+            minimum: 0.0
           type: array
           title: Export Kw
         unit:
