@@ -231,48 +231,119 @@ solver:
     )
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
     invalid_requests = [
-        {**electricity_price_request(), "timestamps": []},
-        {
-            **electricity_price_request(),
-            "timestamps": [
-                "2026-01-01T01:00:00+00:00",
-                "2026-01-01T00:00:00+00:00",
-            ],
-        },
-        {
-            **electricity_price_request(),
-            "timestamps": [
-                "2026-01-01T00:00:00+00:00",
-                "2026-01-01T00:00:00+00:00",
-            ],
-        },
-        {
-            **electricity_price_request(),
-            "import_price_eur_per_kwh": [0.30],
-        },
-        {**electricity_price_request(), "unit": "EUR/MWh"},
-        {
-            **electricity_price_request(),
-            "timestamps": ["2026-01-01T00:00:00"],
-        },
-        {
-            **electricity_price_request(),
-            "retrieved_at": "2026-01-01T04:00:00+00:00",
-        },
-        {
-            **electricity_price_request(),
-            "expires_at": "2026-01-01T01:00:00+00:00",
-        },
-        {**electricity_price_request(), "unexpected": True},
+        ({**electricity_price_request(), "timestamps": []}, "timestamps"),
+        (
+            {
+                **electricity_price_request(),
+                "timestamps": [
+                    "2026-01-01T01:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ],
+            },
+            "ascending",
+        ),
+        (
+            {
+                **electricity_price_request(),
+                "timestamps": [
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ],
+            },
+            "ascending",
+        ),
+        (
+            {**electricity_price_request(), "import_price_eur_per_kwh": [0.30]},
+            "same length",
+        ),
+        (
+            {
+                **electricity_price_request(),
+                "export_price_eur_per_kwh": [100.1, 0.08],
+            },
+            "export_price_eur_per_kwh",
+        ),
+        (
+            {
+                **electricity_price_request(),
+                "import_price_eur_per_kwh": [-100.1, 0.25],
+            },
+            "import_price_eur_per_kwh",
+        ),
+        ({**electricity_price_request(), "unit": "EUR/MWh"}, "unit"),
+        (
+            {
+                **electricity_price_request(),
+                "timestamps": ["2026-01-01T00:00:00"],
+            },
+            "timestamps",
+        ),
+        (
+            {
+                **electricity_price_request(),
+                "retrieved_at": "2026-01-01T04:00:00+00:00",
+            },
+            "retrieved_at",
+        ),
+        (
+            {
+                **electricity_price_request(),
+                "expires_at": "2026-01-01T01:00:00+00:00",
+            },
+            "expires_at",
+        ),
+        ({**electricity_price_request(), "unexpected": True}, "unexpected"),
     ]
 
     with TestClient(app) as client:
         responses = [
-            client.post("/api/v1/electricity-prices", json=request)
-            for request in invalid_requests
+            (client.post("/api/v1/electricity-prices", json=request), expected_text)
+            for request, expected_text in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
+
+
+def test_electricity_price_contract_rejects_non_finite_values(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        responses = [
+            client.post(
+                "/api/v1/electricity-prices",
+                content=(
+                    '{"schema_version":"1",'
+                    '"timestamps":["2026-01-01T00:00:00+00:00"],'
+                    '"interval_minutes":60,"import_price_eur_per_kwh":[0.1,'
+                    f"{value}],"
+                    '"export_price_eur_per_kwh":[0.08,0.08],"unit":"EUR/kWh",'
+                    '"source":{"provider":"day-ahead-market"},'
+                    '"retrieved_at":"2025-12-31T23:00:00+00:00",'
+                    '"expires_at":"2026-01-01T03:00:00+00:00"}'
+                ),
+                headers={"content-type": "application/json"},
+            )
+            for value in ("NaN", "Infinity", "-Infinity")
         ]
 
     assert all(response.status_code == 422 for response in responses)
+    assert all("import_price_eur_per_kwh" in response.text for response in responses)
 
 
 def test_electricity_price_contract_rejects_more_than_ten_years(

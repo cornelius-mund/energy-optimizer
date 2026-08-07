@@ -108,12 +108,17 @@ class ElectricityPriceRequest(BaseModel):
             raise ValueError("timestamps must include a timezone")
         return values
 
-    @field_validator("import_price_eur_per_kwh", "export_price_eur_per_kwh")
+    @field_validator(
+        "import_price_eur_per_kwh", "export_price_eur_per_kwh", mode="before"
+    )
     @classmethod
-    def validate_finite_prices(cls, values: list[float]) -> list[float]:
-        """Reject non-finite values that cannot represent prices."""
-        if not all(math.isfinite(value) for value in values):
-            raise ValueError("price values must be finite")
+    def validate_finite_prices(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
         return values
 
     @model_validator(mode="after")
