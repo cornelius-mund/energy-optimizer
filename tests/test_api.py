@@ -1,5 +1,6 @@
 """Tests for the HTTP API."""
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -314,28 +315,44 @@ solver:
     )
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
 
+    non_finite_values = (float("nan"), float("inf"), float("-inf"))
+    requests = []
+    for value in non_finite_values:
+        request = battery_request()
+        request["state_of_charge_kwh"] = [5.0, value]
+        requests.append((request, "state_of_charge_kwh"))
+
+    scalar_fields = (
+        "capacity_kwh",
+        "minimum_soc_kwh",
+        "maximum_soc_kwh",
+        "initial_soc_kwh",
+        "maximum_charge_kw",
+        "maximum_discharge_kw",
+        "charge_efficiency",
+        "discharge_efficiency",
+    )
+    for field in scalar_fields:
+        for value in non_finite_values:
+            request = battery_request()
+            request[field] = value
+            requests.append((request, field))
+
     with TestClient(app) as client:
         responses = [
-            client.post(
-                "/api/v1/battery",
-                content=(
-                    '{"schema_version":"1",'
-                    '"start_time":"2026-01-01T00:00:00+00:00",'
-                    '"interval_minutes":60,"state_of_charge_kwh":[5.0,'
-                    f"{value}],"
-                    '"capacity_kwh":10.0,"minimum_soc_kwh":2.0,'
-                    '"maximum_soc_kwh":10.0,"initial_soc_kwh":5.0,'
-                    '"maximum_charge_kw":4.0,"maximum_discharge_kw":4.0,'
-                    '"charge_efficiency":0.95,"discharge_efficiency":0.95,'
-                    '"unit":"kWh","power_unit":"kW"}'
+            (
+                client.post(
+                    "/api/v1/battery",
+                    content=json.dumps(request),
+                    headers={"content-type": "application/json"},
                 ),
-                headers={"content-type": "application/json"},
+                expected_text,
             )
-            for value in ("NaN", "Infinity", "-Infinity")
+            for request, expected_text in requests
         ]
 
-    assert all(response.status_code == 422 for response in responses)
-    assert all("state_of_charge_kwh" in response.text for response in responses)
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
 
 
 def test_battery_contract_rejects_more_than_ten_years(
