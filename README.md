@@ -141,6 +141,28 @@ External data provider modules may support:
 
 External providers should be configurable and isolated from the optimization model. Provider data must be validated before use.
 
+### Home Assistant household-load importer
+
+`HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's
+REST history API. It retrieves one requested half-open hourly period and returns
+provider-independent household-load data with `load_kw`, `unit: "kW"`, source
+metadata, and freshness timestamps. The importer accepts Home Assistant values
+reported in `W` or `kW`; the target unit is always the contract-defined `kW` and
+is not configurable.
+
+Configure the Home Assistant URL, bearer token, household-load entity ID,
+request timeout, polling interval, and maximum data age in `config.yaml`. The
+token is a secret and must not be committed to source control. The importer
+raises an actionable error for authentication failures, missing or unavailable
+entities, malformed or non-numeric values, unsupported units, request failures,
+and stale data.
+
+Call `fetch(start_time, end_time, history_lookback_seconds)` for a requested
+period. The lookback asks Home Assistant for an earlier state so the importer
+can carry the last known value into the first requested hour. The caller owns
+the lookback and polling policy. Polling, scheduling, caching, persistence, and
+orchestration are intentionally outside this feature and will be added later.
+
 ## Development
 
 The project is currently in the planning and initial setup phase.
@@ -302,6 +324,7 @@ series. The versioned request contains:
 - `load_kw`, containing one non-negative value per hour for one to 87,672 hours
 - `unit: "kW"`
 - Optional `source` metadata with a provider and entity identifier
+- Timezone-aware `retrieved_at` and `expires_at` freshness bounds
 
 Example:
 
@@ -315,14 +338,16 @@ Example:
   "source": {
     "provider": "home-assistant",
     "entity_id": "sensor.household_load"
-  }
+  },
+  "retrieved_at": "2026-01-01T00:00:00+00:00",
+  "expires_at": "2026-01-01T02:00:00+00:00"
 }
 ```
 
 The response echoes the normalized data with `status: "validated"`. Missing
 fields, unknown fields, unsupported versions or units, naive timestamps,
-invalid values, and series longer than ten years (87,672 hourly values) return
-HTTP 422 with field-level validation details.
+invalid values, invalid freshness bounds, and series longer than ten years
+(87,672 hourly values) return HTTP 422 with field-level validation details.
 
 ### PV-generation API
 

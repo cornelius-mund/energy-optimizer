@@ -651,6 +651,8 @@ def household_load_request() -> dict[str, object]:
             "provider": "home-assistant",
             "entity_id": "sensor.household_load",
         },
+        "retrieved_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": "2026-01-01T02:00:00+00:00",
     }
 
 
@@ -882,6 +884,8 @@ solver:
             "provider": "home-assistant",
             "entity_id": "sensor.household_load",
         },
+        "retrieved_at": "2026-01-01T00:00:00Z",
+        "expires_at": "2026-01-01T02:00:00Z",
     }
 
 
@@ -910,6 +914,70 @@ solver:
 
     assert response.status_code == 200
     assert response.json()["source"] is None
+
+
+def test_household_load_contract_returns_freshness_metadata(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/household-load", json=household_load_request())
+
+    assert response.status_code == 200
+    assert response.json()["retrieved_at"] == "2026-01-01T00:00:00Z"
+    assert response.json()["expires_at"] == "2026-01-01T02:00:00Z"
+
+
+def test_household_load_contract_rejects_invalid_freshness(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    invalid_requests = [
+        (
+            {**household_load_request(), "retrieved_at": "2026-01-01T00:00:00"},
+            "timezone",
+        ),
+        (
+            {**household_load_request(), "expires_at": "2026-01-01T00:00:00+00:00"},
+            "expires_at",
+        ),
+    ]
+
+    with TestClient(app) as client:
+        responses = [
+            (client.post("/api/v1/household-load", json=request), expected_text)
+            for request, expected_text in invalid_requests
+        ]
+
+    assert all(response.status_code == 422 for response, _ in responses)
+    assert all(expected_text in response.text for response, expected_text in responses)
 
 
 def test_household_load_contract_rejects_invalid_payloads(
@@ -980,7 +1048,9 @@ solver:
                     '"start_time":"2026-01-01T00:00:00+00:00",'
                     '"interval_minutes":60,"load_kw":[0.0,'
                     f"{value}"  # JSON's non-standard numeric values exercise parsing.
-                    '],"unit":"kW"}'
+                    '],"unit":"kW",'
+                    '"retrieved_at":"2026-01-01T00:00:00+00:00",'
+                    '"expires_at":"2026-01-01T02:00:00+00:00"}'
                 ),
                 headers={"content-type": "application/json"},
             )

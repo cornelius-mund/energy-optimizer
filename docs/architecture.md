@@ -37,8 +37,9 @@ src/energy_optimizer/
 
 The implementation should add these boundaries through complete vertical slices,
 rather than creating empty modules in advance. The current implementation is
-smaller: `api.py` contains the FastAPI application and `config.py` contains YAML
-loading and validation.
+smaller: `api.py` contains the FastAPI application, `config.py` contains YAML
+loading and validation, and `providers/home_assistant.py` contains the first
+provider adapter.
 
 ## Dependency Direction
 
@@ -120,6 +121,13 @@ Provider interfaces define the data needed from prices, PV forecasts, and weathe
 services. Adapters own vendor-specific authentication, HTTP calls, response
 formats, and provider errors. Normalization and validation happen before data is
 passed to the application or optimizer.
+
+The Home Assistant household-load adapter is the first concrete provider slice.
+`HomeAssistantLoadImporter` owns the Home Assistant REST request, bearer-token
+authentication, history mapping, W-to-kW conversion, hourly normalization, and
+freshness checks. It returns `HouseholdLoadData` and does not start polling,
+schedule requests, cache results, persist data, or invoke the API layer. A later
+orchestration layer selects the requested period and history lookback.
 
 ### Optimization
 

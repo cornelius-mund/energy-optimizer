@@ -303,6 +303,12 @@ class HouseholdLoadRequest(BaseModel):
         default=None,
         description="Optional source metadata for externally supplied data",
     )
+    retrieved_at: datetime = Field(
+        description="Time when the household-load data was retrieved"
+    )
+    expires_at: datetime = Field(
+        description="Time after which the household-load data is stale"
+    )
 
     @field_validator("load_kw", mode="before")
     @classmethod
@@ -317,9 +323,15 @@ class HouseholdLoadRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_start_time(self) -> "HouseholdLoadRequest":
-        """Require timestamps that identify an unambiguous hourly series."""
-        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
-            raise ValueError("start_time must include a timezone")
+        """Require unambiguous timestamps and valid freshness bounds."""
+        timestamps = (self.start_time, self.retrieved_at, self.expires_at)
+        if any(
+            timestamp.tzinfo is None or timestamp.utcoffset() is None
+            for timestamp in timestamps
+        ):
+            raise ValueError("timestamps must include a timezone")
+        if self.expires_at <= self.retrieved_at:
+            raise ValueError("expires_at must be later than retrieved_at")
         return self
 
 
@@ -335,6 +347,8 @@ class HouseholdLoadResponse(BaseModel):
     load_kw: list[float]
     unit: Literal["kW"]
     source: SourceMetadata | None = None
+    retrieved_at: datetime
+    expires_at: datetime
 
 
 class PvGenerationRequest(BaseModel):
@@ -547,6 +561,8 @@ def household_load(request: HouseholdLoadRequest) -> HouseholdLoadResponse:
         load_kw=request.load_kw,
         unit=request.unit,
         source=request.source,
+        retrieved_at=request.retrieved_at,
+        expires_at=request.expires_at,
     )
 
 
