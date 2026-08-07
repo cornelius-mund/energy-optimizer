@@ -64,6 +64,123 @@ class SourceMetadata(BaseModel):
     entity_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
 
+class BatteryRequest(BaseModel):
+    """Versioned battery state and capability data at the API boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"] = Field(description="Version of this API contract")
+    start_time: datetime = Field(description="Timezone-aware start of the series")
+    interval_minutes: Literal[60] = Field(
+        description="Duration of every series interval; hourly data requires 60"
+    )
+    state_of_charge_kwh: list[Annotated[float, Field(ge=0, le=100000)]] = Field(
+        min_length=1,
+        max_length=MAX_HORIZON_HOURS,
+        description="Battery state of charge in kWh, one value per interval",
+    )
+    capacity_kwh: Annotated[float, Field(gt=0, le=100000)] = Field(
+        description="Usable battery capacity in kWh"
+    )
+    minimum_soc_kwh: Annotated[float, Field(ge=0, le=100000)] = Field(
+        description="Minimum allowed state of charge in kWh"
+    )
+    maximum_soc_kwh: Annotated[float, Field(gt=0, le=100000)] = Field(
+        description="Maximum allowed state of charge in kWh"
+    )
+    initial_soc_kwh: Annotated[float, Field(ge=0, le=100000)] = Field(
+        description="State of charge before the first interval in kWh"
+    )
+    maximum_charge_kw: Annotated[float, Field(gt=0, le=100000)] = Field(
+        description="Maximum charging power in kW"
+    )
+    maximum_discharge_kw: Annotated[float, Field(gt=0, le=100000)] = Field(
+        description="Maximum discharging power in kW"
+    )
+    charge_efficiency: Annotated[float, Field(gt=0, le=1)] = Field(
+        description="Fraction of charging energy retained by the battery"
+    )
+    discharge_efficiency: Annotated[float, Field(gt=0, le=1)] = Field(
+        description="Fraction of battery energy delivered during discharge"
+    )
+    unit: Literal["kWh"] = Field(description="Unit used by energy fields")
+    power_unit: Literal["kW"] = Field(description="Unit used by power fields")
+    source: SourceMetadata | None = Field(
+        default=None,
+        description="Optional source metadata for externally supplied data",
+    )
+
+    @field_validator(
+        "state_of_charge_kwh",
+        "capacity_kwh",
+        "minimum_soc_kwh",
+        "maximum_soc_kwh",
+        "initial_soc_kwh",
+        "maximum_charge_kw",
+        "maximum_discharge_kw",
+        "charge_efficiency",
+        "discharge_efficiency",
+        mode="before",
+    )
+    @classmethod
+    def validate_finite_values(cls, values: object) -> object:
+        """Make non-finite values safe for the JSON validation response."""
+        if isinstance(values, list):
+            return [
+                None if isinstance(value, float) and not math.isfinite(value) else value
+                for value in values
+            ]
+        if isinstance(values, float) and not math.isfinite(values):
+            return None
+        return values
+
+    @model_validator(mode="after")
+    def validate_battery_constraints(self) -> "BatteryRequest":
+        """Require an unambiguous timestamp and internally consistent limits."""
+        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+            raise ValueError("start_time must include a timezone")
+        if self.minimum_soc_kwh > self.maximum_soc_kwh:
+            raise ValueError("minimum_soc_kwh must not exceed maximum_soc_kwh")
+        if self.maximum_soc_kwh > self.capacity_kwh:
+            raise ValueError("maximum_soc_kwh must not exceed capacity_kwh")
+        if not self.minimum_soc_kwh <= self.initial_soc_kwh <= self.maximum_soc_kwh:
+            raise ValueError(
+                "initial_soc_kwh must be between minimum_soc_kwh and maximum_soc_kwh"
+            )
+        if any(
+            not self.minimum_soc_kwh <= value <= self.maximum_soc_kwh
+            for value in self.state_of_charge_kwh
+        ):
+            raise ValueError(
+                "state_of_charge_kwh values must be between minimum_soc_kwh "
+                "and maximum_soc_kwh"
+            )
+        return self
+
+
+class BatteryResponse(BaseModel):
+    """Response returned after battery data passes validation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated"]
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    state_of_charge_kwh: list[float]
+    capacity_kwh: float
+    minimum_soc_kwh: float
+    maximum_soc_kwh: float
+    initial_soc_kwh: float
+    maximum_charge_kw: float
+    maximum_discharge_kw: float
+    charge_efficiency: float
+    discharge_efficiency: float
+    unit: Literal["kWh"]
+    power_unit: Literal["kW"]
+    source: SourceMetadata | None = None
+
+
 class HouseholdLoadRequest(BaseModel):
     """Versioned hourly household-load data at the API boundary."""
 
@@ -272,6 +389,29 @@ def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
         start_time=request.start_time,
         interval_minutes=request.interval_minutes,
         hours=len(request.load_kw),
+    )
+
+
+@app.post("/api/v1/battery", response_model=BatteryResponse)
+def battery(request: BatteryRequest) -> BatteryResponse:
+    """Validate a versioned hourly battery state and capabilities object."""
+    return BatteryResponse(
+        status="validated",
+        schema_version=request.schema_version,
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        state_of_charge_kwh=request.state_of_charge_kwh,
+        capacity_kwh=request.capacity_kwh,
+        minimum_soc_kwh=request.minimum_soc_kwh,
+        maximum_soc_kwh=request.maximum_soc_kwh,
+        initial_soc_kwh=request.initial_soc_kwh,
+        maximum_charge_kw=request.maximum_charge_kw,
+        maximum_discharge_kw=request.maximum_discharge_kw,
+        charge_efficiency=request.charge_efficiency,
+        discharge_efficiency=request.discharge_efficiency,
+        unit=request.unit,
+        power_unit=request.power_unit,
+        source=request.source,
     )
 
 

@@ -213,6 +213,46 @@ horizon metadata. Invalid JSON or values return HTTP 422 with field-level
 validation details. The endpoint is the API boundary for the optimizer; solver
 schedule results will be added by a later vertical slice.
 
+### Battery API
+
+`POST /api/v1/battery` validates normalized hourly battery state and capability
+data. The versioned request contains timezone-aware `start_time`,
+`interval_minutes: 60`, one to 87,672 `state_of_charge_kwh` values, capacity and
+SOC bounds in kWh, initial SOC, charge and discharge power limits in kW,
+charge and discharge efficiencies from greater than zero through one,
+`unit: "kWh"`, `power_unit: "kW"`, and optional source metadata.
+
+Example:
+
+```json
+{
+  "schema_version": "1",
+  "start_time": "2026-01-01T00:00:00+00:00",
+  "interval_minutes": 60,
+  "state_of_charge_kwh": [5.0, 5.5],
+  "capacity_kwh": 10.0,
+  "minimum_soc_kwh": 2.0,
+  "maximum_soc_kwh": 10.0,
+  "initial_soc_kwh": 5.0,
+  "maximum_charge_kw": 4.0,
+  "maximum_discharge_kw": 4.0,
+  "charge_efficiency": 0.95,
+  "discharge_efficiency": 0.95,
+  "unit": "kWh",
+  "power_unit": "kW",
+  "source": {
+    "provider": "home-assistant",
+    "entity_id": "sensor.battery_soc"
+  }
+}
+```
+
+The response echoes the validated battery data with `status: "validated"`.
+Missing fields, unknown fields, unsupported versions or units, naive
+timestamps, out-of-range state of charge, inconsistent limits, invalid
+efficiencies, and series longer than ten years (87,672 hourly values) return
+HTTP 422 with field-level validation details.
+
 ### Household-load API
 
 `POST /api/v1/household-load` validates a normalized hourly household-load
