@@ -1,7 +1,7 @@
 """Loading and validation of runtime configuration."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import (
@@ -14,6 +14,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from energy_optimizer.providers.interfaces import HOUSEHOLD_LOAD_SOURCE_ID
 
 
 class ConfigurationError(ValueError):
@@ -38,16 +40,68 @@ class SolverConfiguration(BaseModel):
     time_limit_seconds: float = Field(gt=0)
 
 
+class HouseholdLoadEntityConfiguration(BaseModel):
+    """Configuration for one Home Assistant household-load energy entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str = Field(min_length=1, max_length=255)
+    reading_type: Literal["cumulative", "interval"]
+    unit: Literal["Wh", "kWh", "MWh"]
+    operation: Literal["add", "subtract"]
+
+
 class HomeAssistantConfiguration(BaseModel):
-    """Connection and mapping settings for the Home Assistant provider."""
+    """Connection and household-load mappings for Home Assistant."""
 
     model_config = ConfigDict(extra="forbid")
 
     base_url: AnyHttpUrl
     token: SecretStr
-    household_load_entity_id: str = Field(min_length=1, max_length=255)
+    household_load_entities: list[HouseholdLoadEntityConfiguration] | None = Field(
+        default=None, min_length=1
+    )
+    household_load_entity_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Legacy single-entity setting; migrate to household_load_entities",
+    )
     timeout_seconds: float = Field(gt=0, le=120)
     max_data_age_seconds: float | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_household_load_entities(self) -> "HomeAssistantConfiguration":
+        """Require explicit energy semantics and reject duplicate entities."""
+        if self.household_load_entities is None:
+            if self.household_load_entity_id is None:
+                raise ValueError(
+                    "household_load_entities is required; configure at least one "
+                    "energy entity with reading_type, unit, and operation"
+                )
+            self.household_load_entities = [
+                HouseholdLoadEntityConfiguration(
+                    entity_id=self.household_load_entity_id,
+                    reading_type="cumulative",
+                    unit="kWh",
+                    operation="add",
+                )
+            ]
+        elif self.household_load_entity_id is not None:
+            raise ValueError(
+                "configure household_load_entities instead of the legacy "
+                "household_load_entity_id"
+            )
+
+        entity_ids = [entity.entity_id for entity in self.household_load_entities]
+        if len(entity_ids) != len(set(entity_ids)):
+            raise ValueError("household_load_entities must not contain duplicates")
+        return self
+
+    @property
+    def household_load_source_id(self) -> str:
+        """Return the single persistence identity for the aggregate dataset."""
+        return HOUSEHOLD_LOAD_SOURCE_ID
 
 
 class PersistenceConfiguration(BaseModel):
@@ -162,7 +216,7 @@ class Configuration(BaseModel):
         return (
             self.home_assistant is not None
             and provider == "home-assistant"
-            and entity_id == self.home_assistant.household_load_entity_id
+            and entity_id == self.home_assistant.household_load_source_id
         )
 
 

@@ -38,6 +38,59 @@ def test_load_configuration_returns_typed_values(tmp_path: Path) -> None:
     assert configuration.home_assistant.max_data_age_seconds == 7200
 
 
+def test_load_configuration_returns_explicit_energy_entity_mappings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  household_load_entities:\n"
+            "    - entity_id: sensor.household_energy\n"
+            "      reading_type: cumulative\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "    - entity_id: sensor.ev_energy\n"
+            "      reading_type: interval\n"
+            "      unit: Wh\n"
+            "      operation: subtract\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert [
+        (entity.entity_id, entity.reading_type, entity.unit, entity.operation)
+        for entity in configuration.home_assistant.household_load_entities or []
+    ] == [
+        ("sensor.household_energy", "cumulative", "kWh", "add"),
+        ("sensor.ev_energy", "interval", "Wh", "subtract"),
+    ]
+    assert configuration.home_assistant.household_load_source_id == "household_load"
+
+
+def test_load_configuration_migrates_legacy_single_entity_to_energy_mapping(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(VALID_CONFIGURATION, encoding="utf-8")
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert configuration.home_assistant.household_load_entity_id == (
+        "sensor.household_load"
+    )
+    assert configuration.home_assistant.household_load_entities is not None
+    assert configuration.home_assistant.household_load_entities[0].reading_type == (
+        "cumulative"
+    )
+    assert configuration.home_assistant.household_load_entities[0].unit == "kWh"
+    assert configuration.home_assistant.household_load_source_id == "household_load"
+
+
 def test_load_configuration_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(ConfigurationError, match="Configuration file not found"):
         load_configuration(tmp_path / "missing.yaml")

@@ -649,7 +649,7 @@ def household_load_request() -> dict[str, object]:
         "unit": "kW",
         "source": {
             "provider": "home-assistant",
-            "entity_id": "sensor.household_load",
+            "entity_id": "household_load",
         },
         "retrieved_at": "2026-01-01T00:00:00+00:00",
         "latest_observation_at": "2026-01-01T01:00:00+00:00",
@@ -672,7 +672,11 @@ persistence:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: test-token
-  household_load_entity_id: sensor.household_load
+  household_load_entities:
+    - entity_id: sensor.household_energy
+      reading_type: cumulative
+      unit: kWh
+      operation: add
   timeout_seconds: 10
 """,
         encoding="utf-8",
@@ -704,7 +708,7 @@ def test_household_load_provider_data_is_persisted_and_retrieved_after_restart(
         "unit": "kW",
         "source": {
             "provider": "home-assistant",
-            "entity_id": "sensor.household_load",
+            "entity_id": "household_load",
         },
         "retrieved_at": "2026-01-01T00:00:00Z",
         "latest_observation_at": "2026-01-01T01:00:00Z",
@@ -985,7 +989,7 @@ solver:
         "unit": "kW",
         "source": {
             "provider": "home-assistant",
-            "entity_id": "sensor.household_load",
+            "entity_id": "household_load",
         },
         "retrieved_at": "2026-01-01T00:00:00Z",
         "latest_observation_at": "2026-01-01T01:00:00Z",
