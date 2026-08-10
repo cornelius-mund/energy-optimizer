@@ -12,6 +12,7 @@ COPY config.example.yaml ./config.yaml
 
 RUN pip install --no-cache-dir . \
     && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data/provider-data \
     && chown -R appuser:appuser /app
 
 USER appuser

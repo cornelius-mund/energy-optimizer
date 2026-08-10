@@ -7,11 +7,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, AsyncIterator, Literal
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 from energy_optimizer import __version__
 from energy_optimizer.config import load_configuration
+from energy_optimizer.providers.interfaces import (
+    HouseholdLoadData,
+)
+from energy_optimizer.providers.interfaces import (
+    SourceMetadata as ProviderSourceMetadata,
+)
+from energy_optimizer.storage import (
+    ProviderDataKey,
+    ProviderDataStore,
+    ProviderDataStoreError,
+)
 
 MAX_HORIZON_HOURS = 87_672
 
@@ -349,6 +367,9 @@ class HouseholdLoadResponse(BaseModel):
     latest_observation_at: datetime
 
 
+HOUSEHOLD_LOAD_ADAPTER = TypeAdapter(HouseholdLoadData)
+
+
 class PvGenerationRequest(BaseModel):
     """Versioned hourly PV-generation data at the API boundary."""
 
@@ -482,7 +503,13 @@ class OptimizationResponse(BaseModel):
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Load configuration before accepting requests."""
     path = Path(os.environ.get("ENERGY_OPTIMIZER_CONFIG", "config.yaml"))
-    application.state.configuration = load_configuration(path)
+    configuration = load_configuration(path)
+    application.state.configuration = configuration
+    application.state.provider_data_store = (
+        ProviderDataStore(configuration.persistence.directory)
+        if configuration.persistence is not None
+        else None
+    )
     yield
 
 
@@ -548,19 +575,121 @@ def electricity_prices(
     )
 
 
-@app.post("/api/v1/household-load", response_model=HouseholdLoadResponse)
-def household_load(request: HouseholdLoadRequest) -> HouseholdLoadResponse:
+@app.post(
+    "/api/v1/household-load",
+    response_model=HouseholdLoadResponse,
+    responses={503: {"description": "Provider data could not be persisted"}},
+)
+def household_load(
+    request: Request,
+    data: HouseholdLoadRequest,
+) -> HouseholdLoadResponse:
     """Validate a versioned hourly household-load data series."""
+    configuration = request.app.state.configuration
+    store = request.app.state.provider_data_store
+    if (
+        store is not None
+        and data.source is not None
+        and configuration.is_configured_household_load_source(
+            data.source.provider, data.source.entity_id
+        )
+    ):
+        key = ProviderDataKey(
+            data_type="household-load",
+            provider=data.source.provider,
+            entity_id=data.source.entity_id,
+        )
+        provider_data = HouseholdLoadData(
+            schema_version=data.schema_version,
+            start_time=data.start_time,
+            interval_minutes=data.interval_minutes,
+            load_kw=tuple(data.load_kw),
+            unit=data.unit,
+            source=ProviderSourceMetadata(
+                provider=data.source.provider,
+                entity_id=data.source.entity_id,
+            ),
+            retrieved_at=data.retrieved_at,
+            latest_observation_at=data.latest_observation_at,
+        )
+        try:
+            store.save(key, HOUSEHOLD_LOAD_ADAPTER, provider_data)
+        except ProviderDataStoreError as error:
+            raise HTTPException(
+                status_code=503,
+                detail=f"could not persist household-load provider data: {error}",
+            ) from error
+
     return HouseholdLoadResponse(
         status="validated",
-        schema_version=request.schema_version,
-        start_time=request.start_time,
-        interval_minutes=request.interval_minutes,
-        load_kw=request.load_kw,
-        unit=request.unit,
-        source=request.source,
-        retrieved_at=request.retrieved_at,
-        latest_observation_at=request.latest_observation_at,
+        schema_version=data.schema_version,
+        start_time=data.start_time,
+        interval_minutes=data.interval_minutes,
+        load_kw=data.load_kw,
+        unit=data.unit,
+        source=data.source,
+        retrieved_at=data.retrieved_at,
+        latest_observation_at=data.latest_observation_at,
+    )
+
+
+@app.get(
+    "/api/v1/household-load",
+    response_model=HouseholdLoadResponse,
+    responses={
+        404: {"description": "No persisted provider data is available"},
+        503: {"description": "Provider data persistence is unavailable"},
+    },
+)
+def persisted_household_load(request: Request) -> HouseholdLoadResponse:
+    """Return the latest persisted normalized household-load provider data."""
+    configuration = request.app.state.configuration
+    store = request.app.state.provider_data_store
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="provider data persistence is not configured",
+        )
+    if configuration.home_assistant is None:
+        raise HTTPException(
+            status_code=503,
+            detail="the Home Assistant household-load provider is not configured",
+        )
+
+    source = SourceMetadata(
+        provider="home-assistant",
+        entity_id=configuration.home_assistant.household_load_entity_id,
+    )
+    key = ProviderDataKey(
+        data_type="household-load",
+        provider=source.provider,
+        entity_id=source.entity_id,
+    )
+    try:
+        provider_data = store.load(key, HOUSEHOLD_LOAD_ADAPTER)
+    except ProviderDataStoreError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not recover household-load provider data: {error}",
+        ) from error
+    if provider_data is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no persisted household-load provider data is available",
+        )
+    return HouseholdLoadResponse(
+        status="validated",
+        schema_version=provider_data.schema_version,
+        start_time=provider_data.start_time,
+        interval_minutes=provider_data.interval_minutes,
+        load_kw=list(provider_data.load_kw),
+        unit=provider_data.unit,
+        source=SourceMetadata(
+            provider=provider_data.source.provider,
+            entity_id=provider_data.source.entity_id,
+        ),
+        retrieved_at=provider_data.retrieved_at,
+        latest_observation_at=provider_data.latest_observation_at,
     )
 
 
