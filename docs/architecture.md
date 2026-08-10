@@ -23,7 +23,8 @@ src/energy_optimizer/
 │   ├── assets.py             # Grid, PV, battery, EV, and heat-pump models
 │   └── optimization.py       # Optimization inputs, schedules, and outcomes
 ├── application/
-│   └── optimize.py           # End-to-end optimization use case
+│   ├── optimize.py           # End-to-end optimization use case
+│   └── orchestration.py      # Scheduled provider retrieval and plan triggers
 ├── providers/
 │   ├── interfaces.py         # Provider contracts
 │   ├── prices.py             # Electricity-price adapters
@@ -62,6 +63,9 @@ storage -> validated provider-independent data models
   energy-balance or scheduling logic.
 - `application` coordinates one optimization request: it obtains or accepts data,
   invokes normalization and optimization, and returns an application-level result.
+  Its orchestration component may schedule provider retrieval independently of
+  optimization availability, persist successful normalized results, and trigger a
+  plan from a coherent snapshot once an optimizer is configured.
 - `domain` contains provider- and framework-independent energy concepts. It should
   not import FastAPI, Pyomo, HiGHS, or vendor clients.
 - `providers.interfaces` defines the data required by the application. Concrete

@@ -123,6 +123,72 @@ def test_load_configuration_returns_persistence_directory(tmp_path: Path) -> Non
     assert configuration.persistence.directory == Path("/var/lib/provider-data")
 
 
+def test_load_configuration_returns_orchestration_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION
+        + "persistence:\n  directory: provider-data\n"
+        + "orchestration:\n"
+        + "  enabled: true\n"
+        + "  startup_fetch: false\n"
+        + "  sources:\n"
+        + "    household_load:\n"
+        + "      interval_seconds: 300\n"
+        + "      horizon_hours: 12\n"
+        + "      history_lookback_seconds: 3600\n"
+        + "  optimization:\n"
+        + "    enabled: true\n"
+        + "    required_sources: [household_load]\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.orchestration is not None
+    assert configuration.orchestration.startup_fetch is False
+    schedule = configuration.orchestration.sources["household_load"]
+    assert schedule.interval_seconds == 300
+    assert schedule.horizon_hours == 12
+    assert schedule.history_lookback_seconds == 3600
+    assert configuration.orchestration.optimization.required_sources == [
+        "household_load"
+    ]
+
+
+def test_load_configuration_rejects_orchestration_without_persistence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION
+        + "orchestration:\n"
+        + "  enabled: true\n"
+        + "  sources:\n"
+        + "    household_load:\n"
+        + "      interval_seconds: 300\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="persistence"):
+        load_configuration(path)
+
+
+def test_load_configuration_rejects_unconfigured_plan_source(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION
+        + "persistence:\n  directory: provider-data\n"
+        + "orchestration:\n"
+        + "  optimization:\n"
+        + "    enabled: true\n"
+        + "    required_sources: [pv_generation]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="not configured as sources"):
+        load_configuration(path)
+
+
 def test_load_configuration_allows_persistence_without_provider(
     tmp_path: Path,
 ) -> None:

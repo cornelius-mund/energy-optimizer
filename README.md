@@ -165,6 +165,23 @@ Battery and electric-vehicle persistence will use the same store when their
 normalized provider contracts are available; optimizer-owned state transitions
 remain outside this persistence boundary.
 
+### Scheduled orchestration
+
+The optional `orchestration` configuration schedules registered providers without
+putting polling or scheduling behavior in provider adapters. Each source has an
+independent `interval_seconds`, requested `horizon_hours`, and optional history
+lookback. With `startup_fetch: true`, enabled sources are fetched when the service
+starts; failed attempts leave the last valid persisted data in place and are
+reported through service logs. Missed intervals are not replayed: the next run is
+scheduled from the completed attempt.
+
+Scheduled collection requires `persistence.directory`, so normalized data survives
+application restarts. Automatic plan generation is disabled until an optimization
+plan generator is configured. Once enabled, a refresh triggers planning only when
+all required sources have current, valid data; the plan generator receives one
+coherent `ProviderDataSnapshot`. Concurrent orchestration cycles are skipped to
+avoid duplicate plans.
+
 ### Home Assistant household-load importer
 
 `HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's

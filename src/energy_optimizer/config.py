@@ -11,6 +11,8 @@ from pydantic import (
     Field,
     SecretStr,
     ValidationError,
+    field_validator,
+    model_validator,
 )
 
 
@@ -59,6 +61,75 @@ class PersistenceConfiguration(BaseModel):
     )
 
 
+class DataSourceScheduleConfiguration(BaseModel):
+    """Polling and requested-period settings for one data source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    interval_seconds: float = Field(gt=0)
+    horizon_hours: int = Field(default=24, gt=0, le=168)
+    history_lookback_seconds: float = Field(default=0, ge=0)
+
+
+class OptimizationTriggerConfiguration(BaseModel):
+    """Settings controlling automatic plan-generation triggers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    required_sources: list[str] = Field(default_factory=list)
+
+    @field_validator("required_sources")
+    @classmethod
+    def validate_required_sources(cls, values: list[str]) -> list[str]:
+        """Reject empty and duplicate source names in the plan input set."""
+        if any(not source.strip() for source in values):
+            raise ValueError("required_sources must contain non-empty names")
+        if len(values) != len(set(values)):
+            raise ValueError("required_sources must not contain duplicates")
+        return values
+
+
+class OrchestrationConfiguration(BaseModel):
+    """Runtime settings for scheduled provider retrieval and plan triggers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    startup_fetch: bool = True
+    sources: dict[str, DataSourceScheduleConfiguration] = Field(default_factory=dict)
+    optimization: OptimizationTriggerConfiguration = Field(
+        default_factory=OptimizationTriggerConfiguration
+    )
+
+    @model_validator(mode="after")
+    def validate_optimization_sources(self) -> "OrchestrationConfiguration":
+        """Require plan inputs to be configured when automatic planning is enabled."""
+        if any(not source.strip() for source in self.sources):
+            raise ValueError("orchestration source names must not be empty")
+        if self.optimization.enabled and not self.optimization.required_sources:
+            raise ValueError(
+                "optimization.required_sources must not be empty when optimization "
+                "triggers are enabled"
+            )
+        missing = set(self.optimization.required_sources) - set(self.sources)
+        if missing:
+            names = ", ".join(sorted(missing))
+            raise ValueError(
+                f"optimization.required_sources are not configured as sources: {names}"
+            )
+        disabled = {
+            source
+            for source in self.optimization.required_sources
+            if not self.sources[source].enabled
+        }
+        if disabled:
+            names = ", ".join(sorted(disabled))
+            raise ValueError(f"optimization.required_sources must be enabled: {names}")
+        return self
+
+
 class Configuration(BaseModel):
     """Validated settings needed to start the service."""
 
@@ -69,6 +140,18 @@ class Configuration(BaseModel):
     solver: SolverConfiguration
     home_assistant: HomeAssistantConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
+    orchestration: OrchestrationConfiguration | None = None
+
+    @model_validator(mode="after")
+    def validate_orchestration_persistence(self) -> "Configuration":
+        """Ensure scheduled collection has the durable store it promises to use."""
+        if (
+            self.orchestration is not None
+            and self.orchestration.enabled
+            and self.persistence is None
+        ):
+            raise ValueError("persistence is required when orchestration is enabled")
+        return self
 
     def is_configured_household_load_source(
         self,
