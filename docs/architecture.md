@@ -125,9 +125,11 @@ passed to the application or optimizer.
 The Home Assistant household-load adapter is the first concrete provider slice.
 `HomeAssistantLoadImporter` owns the Home Assistant REST request, bearer-token
 authentication, history mapping, W-to-kW conversion, hourly normalization, and
-freshness checks. It returns `HouseholdLoadData` and does not start polling,
-schedule requests, cache results, persist data, or invoke the API layer. A later
-orchestration layer selects the requested period and history lookback.
+observation metadata. It returns `HouseholdLoadData` and exposes an optional
+freshness health check, but does not start polling, schedule requests, cache
+results, persist data, or invoke the API layer. A later orchestration layer
+selects the requested period, history lookback, and polling cadence. Historical
+retention is independent of polling freshness.
 
 ### Optimization
 

@@ -652,7 +652,7 @@ def household_load_request() -> dict[str, object]:
             "entity_id": "sensor.household_load",
         },
         "retrieved_at": "2026-01-01T00:00:00+00:00",
-        "expires_at": "2026-01-01T02:00:00+00:00",
+        "latest_observation_at": "2026-01-01T01:00:00+00:00",
     }
 
 
@@ -885,7 +885,7 @@ solver:
             "entity_id": "sensor.household_load",
         },
         "retrieved_at": "2026-01-01T00:00:00Z",
-        "expires_at": "2026-01-01T02:00:00Z",
+        "latest_observation_at": "2026-01-01T01:00:00Z",
     }
 
 
@@ -916,7 +916,7 @@ solver:
     assert response.json()["source"] is None
 
 
-def test_household_load_contract_returns_freshness_metadata(
+def test_household_load_contract_returns_observation_metadata(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     configuration = tmp_path / "config.yaml"
@@ -939,10 +939,10 @@ solver:
 
     assert response.status_code == 200
     assert response.json()["retrieved_at"] == "2026-01-01T00:00:00Z"
-    assert response.json()["expires_at"] == "2026-01-01T02:00:00Z"
+    assert response.json()["latest_observation_at"] == "2026-01-01T01:00:00Z"
 
 
-def test_household_load_contract_rejects_invalid_freshness(
+def test_household_load_contract_rejects_naive_observation_timestamp(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     configuration = tmp_path / "config.yaml"
@@ -961,12 +961,11 @@ solver:
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
     invalid_requests = [
         (
-            {**household_load_request(), "retrieved_at": "2026-01-01T00:00:00"},
+            {
+                **household_load_request(),
+                "latest_observation_at": "2026-01-01T01:00:00",
+            },
             "timezone",
-        ),
-        (
-            {**household_load_request(), "expires_at": "2026-01-01T00:00:00+00:00"},
-            "expires_at",
         ),
     ]
 
@@ -1050,7 +1049,7 @@ solver:
                     f"{value}"  # JSON's non-standard numeric values exercise parsing.
                     '],"unit":"kW",'
                     '"retrieved_at":"2026-01-01T00:00:00+00:00",'
-                    '"expires_at":"2026-01-01T02:00:00+00:00"}'
+                    '"latest_observation_at":"2026-01-01T01:00:00+00:00"}'
                 ),
                 headers={"content-type": "application/json"},
             )

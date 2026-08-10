@@ -45,8 +45,7 @@ class HomeAssistantConfiguration(BaseModel):
     token: SecretStr
     household_load_entity_id: str = Field(min_length=1, max_length=255)
     timeout_seconds: float = Field(gt=0, le=120)
-    polling_interval_seconds: float = Field(gt=0)
-    max_data_age_seconds: float = Field(gt=0)
+    max_data_age_seconds: float | None = Field(default=None, gt=0)
 
 
 class Configuration(BaseModel):

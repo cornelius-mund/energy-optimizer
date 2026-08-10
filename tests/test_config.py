@@ -19,7 +19,6 @@ home_assistant:
   token: test-token
   household_load_entity_id: sensor.household_load
   timeout_seconds: 10
-  polling_interval_seconds: 300
   max_data_age_seconds: 7200
 """
 
@@ -36,7 +35,7 @@ def test_load_configuration_returns_typed_values(tmp_path: Path) -> None:
     assert configuration.home_assistant is not None
     assert configuration.home_assistant.base_url.host == "homeassistant.local"
     assert configuration.home_assistant.token.get_secret_value() == "test-token"
-    assert configuration.home_assistant.polling_interval_seconds == 300
+    assert configuration.home_assistant.max_data_age_seconds == 7200
 
 
 def test_load_configuration_rejects_missing_file(tmp_path: Path) -> None:
@@ -71,7 +70,7 @@ def test_load_configuration_allows_no_home_assistant_provider(
         VALID_CONFIGURATION.replace(
             "home_assistant:\n  base_url: http://homeassistant.local:8123\n"
             "  token: test-token\n  household_load_entity_id: sensor.household_load\n"
-            "  timeout_seconds: 10\n  polling_interval_seconds: 300\n"
+            "  timeout_seconds: 10\n"
             "  max_data_age_seconds: 7200\n",
             "",
         ),
@@ -94,3 +93,18 @@ def test_load_configuration_rejects_invalid_home_assistant_settings(
 
     with pytest.raises(ConfigurationError, match="home_assistant.timeout_seconds"):
         load_configuration(path)
+
+
+def test_load_configuration_allows_optional_freshness_threshold(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace("  max_data_age_seconds: 7200\n", ""),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert configuration.home_assistant.max_data_age_seconds is None

@@ -24,8 +24,8 @@ class HomeAssistantLoadImporter:
     """Retrieve and normalize household-load history from Home Assistant.
 
     The importer performs one bounded request per ``fetch`` call. Polling,
-    scheduling, caching, and persistence are intentionally owned by a later
-    orchestration layer.
+    scheduling, caching, persistence, and freshness policy enforcement are
+    intentionally owned by a later orchestration layer.
     """
 
     def __init__(
@@ -39,8 +39,8 @@ class HomeAssistantLoadImporter:
     def fetch(
         self,
         start_time: datetime,
-        end_time: datetime,
-        history_lookback_seconds: float,
+        end_time: datetime | None = None,
+        history_lookback_seconds: float = 0,
         *,
         now: datetime | None = None,
     ) -> HouseholdLoadData:
@@ -48,28 +48,20 @@ class HomeAssistantLoadImporter:
 
         ``history_lookback_seconds`` requests an earlier state so a value can
         be carried forward when the first requested hour has no state change.
+        When ``end_time`` is omitted, the period ends at the latest completed
+        UTC hour.
         """
-        self._validate_period(start_time, end_time, history_lookback_seconds)
         retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
+        effective_end_time = end_time or self._latest_completed_hour(retrieved_at)
+        self._validate_period(start_time, effective_end_time, history_lookback_seconds)
         query_start = start_time - timedelta(seconds=history_lookback_seconds)
-        url = self._history_url(query_start, end_time)
+        url = self._history_url(query_start, effective_end_time)
         response = self._request(url)
         records = self._parse_history(response)
-        values, latest_observation, unit = self._normalize_records(
-            records, start_time, end_time
+        values, latest_observation = self._normalize_records(
+            records, start_time, effective_end_time
         )
 
-        age_seconds = (retrieved_at - latest_observation).total_seconds()
-        if age_seconds >= self.configuration.max_data_age_seconds:
-            raise HomeAssistantError(
-                "household-load data is stale: the latest usable value is "
-                f"{age_seconds:.0f} seconds old, exceeding the configured "
-                f"maximum of {self.configuration.max_data_age_seconds:.0f} seconds"
-            )
-
-        expires_at = latest_observation + timedelta(
-            seconds=self.configuration.max_data_age_seconds
-        )
         return HouseholdLoadData(
             schema_version="1",
             start_time=self._as_utc(start_time),
@@ -81,8 +73,22 @@ class HomeAssistantLoadImporter:
                 entity_id=self.configuration.household_load_entity_id,
             ),
             retrieved_at=retrieved_at,
-            expires_at=expires_at,
+            latest_observation_at=latest_observation,
         )
+
+    def is_fresh(
+        self,
+        data: HouseholdLoadData,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Check whether a poll result is within the configured age threshold."""
+        threshold = self.configuration.max_data_age_seconds
+        if threshold is None:
+            return True
+        current_time = self._as_utc(now or datetime.now(timezone.utc))
+        age_seconds = (current_time - data.latest_observation_at).total_seconds()
+        return age_seconds < threshold
 
     def _history_url(self, start_time: datetime, end_time: datetime) -> str:
         base_url = str(self.configuration.base_url).rstrip("/")
@@ -101,7 +107,11 @@ class HomeAssistantLoadImporter:
         }
         try:
             if self._client is not None:
-                response = self._client.get(url, headers=headers)
+                response = self._client.get(
+                    url,
+                    headers=headers,
+                    timeout=self.configuration.timeout_seconds,
+                )
             else:
                 with httpx.Client(timeout=self.configuration.timeout_seconds) as client:
                     response = client.get(url, headers=headers)
@@ -165,7 +175,7 @@ class HomeAssistantLoadImporter:
         records: list[dict[str, Any]],
         start_time: datetime,
         end_time: datetime,
-    ) -> tuple[list[float], datetime, str]:
+    ) -> tuple[list[float], datetime]:
         parsed: list[tuple[datetime, float, str]] = []
         for record in records:
             timestamp = self._parse_timestamp(
@@ -242,7 +252,7 @@ class HomeAssistantLoadImporter:
                 "Home Assistant household-load history has no usable value in the "
                 "requested period"
             )
-        return values, latest_observation, unit
+        return values, latest_observation
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:
@@ -269,6 +279,11 @@ class HomeAssistantLoadImporter:
                 "Home Assistant import times must include a timezone"
             )
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _latest_completed_hour(value: datetime) -> datetime:
+        """Return the UTC boundary of the latest completed hourly interval."""
+        return value.replace(minute=0, second=0, microsecond=0)
 
     @staticmethod
     def _validate_period(

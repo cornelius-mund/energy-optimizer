@@ -702,11 +702,11 @@ components:
           format: date-time
           title: Retrieved At
           description: Time when the household-load data was retrieved
-        expires_at:
+        latest_observation_at:
           type: string
           format: date-time
-          title: Expires At
-          description: Time after which the household-load data is stale
+          title: Latest Observation At
+          description: Time of the latest source observation in the data
       additionalProperties: false
       type: object
       required:
@@ -716,7 +716,7 @@ components:
       - load_kw
       - unit
       - retrieved_at
-      - expires_at
+      - latest_observation_at
       title: HouseholdLoadRequest
       description: Versioned hourly household-load data at the API boundary.
     HouseholdLoadResponse:
@@ -754,10 +754,10 @@ components:
           type: string
           format: date-time
           title: Retrieved At
-        expires_at:
+        latest_observation_at:
           type: string
           format: date-time
-          title: Expires At
+          title: Latest Observation At
       additionalProperties: false
       type: object
       required:
@@ -768,7 +768,7 @@ components:
       - load_kw
       - unit
       - retrieved_at
-      - expires_at
+      - latest_observation_at
       title: HouseholdLoadResponse
       description: Response returned after household-load data passes validation.
     OptimizationResponse:

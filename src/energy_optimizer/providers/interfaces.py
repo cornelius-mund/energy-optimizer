@@ -24,7 +24,7 @@ class HouseholdLoadData:
     unit: Literal["kW"]
     source: SourceMetadata
     retrieved_at: datetime
-    expires_at: datetime
+    latest_observation_at: datetime
 
 
 class HouseholdLoadProvider(Protocol):
@@ -33,7 +33,17 @@ class HouseholdLoadProvider(Protocol):
     def fetch(
         self,
         start_time: datetime,
-        end_time: datetime,
-        history_lookback_seconds: float,
+        end_time: datetime | None = None,
+        history_lookback_seconds: float = 0,
+        *,
+        now: datetime | None = None,
     ) -> HouseholdLoadData:
         """Fetch hourly household load for the requested half-open period."""
+
+    def is_fresh(
+        self,
+        data: HouseholdLoadData,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Report whether data is within the configured polling age threshold."""

@@ -24,7 +24,6 @@ def configuration(**overrides: Any) -> HomeAssistantConfiguration:
         "token": "test-token",
         "household_load_entity_id": ENTITY_ID,
         "timeout_seconds": 5,
-        "polling_interval_seconds": 300,
         "max_data_age_seconds": 7200,
     }
     values.update(overrides)
@@ -69,6 +68,12 @@ def test_fetch_normalizes_watts_and_carries_forward_history() -> None:
         assert request.url.params["filter_entity_id"] == ENTITY_ID
         assert "minimal_response" in request.url.params
         assert request.headers["authorization"] == "Bearer test-token"
+        assert request.extensions["timeout"] == {
+            "connect": 5.0,
+            "read": 5.0,
+            "write": 5.0,
+            "pool": 5.0,
+        }
         return httpx.Response(200, json=history_payload())
 
     provider, client = importer(httpx.MockTransport(handler))
@@ -84,7 +89,7 @@ def test_fetch_normalizes_watts_and_carries_forward_history() -> None:
     assert data.source.provider == "home-assistant"
     assert data.source.entity_id == ENTITY_ID
     assert data.retrieved_at == NOW
-    assert data.expires_at == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    assert data.latest_observation_at == datetime(2026, 1, 1, 3, tzinfo=timezone.utc)
 
 
 def test_fetch_accepts_values_already_reported_in_kw() -> None:
@@ -98,6 +103,49 @@ def test_fetch_accepts_values_already_reported_in_kw() -> None:
         client.close()
 
     assert data.load_kw == (0.5, 1.0, 2.0, 3.0)
+
+
+def test_fetch_defaults_to_latest_completed_hour() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["end_time"] == "2026-01-01T03:00:00+00:00"
+        return httpx.Response(200, json=history_payload())
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        data = provider.fetch(START, now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (0.5, 1.0, 2.0)
+
+
+def test_freshness_is_a_polling_health_check() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=history_payload())
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        data = provider.fetch(START, END, 3600, now=NOW)
+        assert provider.is_fresh(data, now=NOW)
+
+        provider.configuration = configuration(max_data_age_seconds=60)
+        assert not provider.is_fresh(data, now=NOW)
+    finally:
+        client.close()
+
+
+def test_freshness_check_is_disabled_without_a_threshold() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=history_payload())
+
+    provider, client = importer(httpx.MockTransport(handler))
+    provider.configuration = configuration(max_data_age_seconds=None)
+    try:
+        data = provider.fetch(START, END, 3600, now=NOW)
+    finally:
+        client.close()
+
+    assert provider.is_fresh(data, now=datetime(2036, 1, 1, tzinfo=timezone.utc))
 
 
 @pytest.mark.parametrize(
@@ -182,19 +230,20 @@ def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
         client.close()
 
 
-def test_fetch_reports_stale_data() -> None:
+def test_fetch_does_not_reject_historical_data_as_stale() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=history_payload())
 
     provider, client = importer(
         httpx.MockTransport(handler),
     )
-    provider.configuration = configuration(max_data_age_seconds=60)
     try:
-        with pytest.raises(HomeAssistantError, match="stale"):
-            provider.fetch(START, END, 3600, now=NOW)
+        data = provider.fetch(START, END, 3600, now=NOW)
     finally:
         client.close()
+
+    provider.configuration = configuration(max_data_age_seconds=60)
+    assert not provider.is_fresh(data, now=NOW)
 
 
 def test_fetch_requires_more_history_when_first_hour_has_no_value() -> None:
