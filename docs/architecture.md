@@ -139,9 +139,11 @@ rejects any failed or incomplete contribution before returning
 logical `household_load` entity identity, regardless of how many Home Assistant
 entities contribute to it. The importer exposes an optional freshness health
 check, but does not start polling, schedule requests, cache results, persist
-results, or invoke the API layer. A later orchestration layer selects the
-requested period, history lookback, and polling cadence. Historical retention is
-independent of polling freshness.
+results, or invoke the API layer. The orchestration layer selects the requested
+period, history lookback, and polling cadence. An empty household-load store
+requests 87,672 hourly values through the latest completed UTC hour. Later
+requests begin at the final persisted hour so overlapping values can correct
+history. Historical retention is independent of polling freshness.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model
@@ -149,7 +151,10 @@ directly, not raw vendor responses or optimizer snapshots. Records are keyed by
 data type, provider, and entity identifier. Atomic replacement, validation on
 read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
-submissions remain request-scoped.
+submissions remain request-scoped. Household-load records are merged by hourly
+timestamp before atomic replacement, incoming values take precedence, and the
+oldest points are discarded above the 87,672-value ten-year limit. Scheduled
+and API persistence use the same merge behavior.
 
 ### Optimization
 

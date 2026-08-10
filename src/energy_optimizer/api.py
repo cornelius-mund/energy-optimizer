@@ -606,6 +606,7 @@ def household_load(
     """Validate a versioned hourly household-load data series."""
     configuration = request.app.state.configuration
     store = request.app.state.provider_data_store
+    persisted_provider_data: HouseholdLoadData | None = None
     if (
         store is not None
         and data.source is not None
@@ -632,7 +633,9 @@ def household_load(
             latest_observation_at=data.latest_observation_at,
         )
         try:
-            store.save(key, HOUSEHOLD_LOAD_ADAPTER, provider_data)
+            persisted_provider_data = store.save(
+                key, HOUSEHOLD_LOAD_ADAPTER, provider_data
+            )
         except ProviderDataStoreError as error:
             raise HTTPException(
                 status_code=503,
@@ -642,13 +645,36 @@ def household_load(
     return HouseholdLoadResponse(
         status="validated",
         schema_version=data.schema_version,
-        start_time=data.start_time,
+        start_time=(
+            persisted_provider_data.start_time
+            if persisted_provider_data is not None
+            else data.start_time
+        ),
         interval_minutes=data.interval_minutes,
-        load_kw=data.load_kw,
+        load_kw=(
+            list(persisted_provider_data.load_kw)
+            if persisted_provider_data is not None
+            else data.load_kw
+        ),
         unit=data.unit,
-        source=data.source,
-        retrieved_at=data.retrieved_at,
-        latest_observation_at=data.latest_observation_at,
+        source=(
+            SourceMetadata(
+                provider=persisted_provider_data.source.provider,
+                entity_id=persisted_provider_data.source.entity_id,
+            )
+            if persisted_provider_data is not None
+            else data.source
+        ),
+        retrieved_at=(
+            persisted_provider_data.retrieved_at
+            if persisted_provider_data is not None
+            else data.retrieved_at
+        ),
+        latest_observation_at=(
+            persisted_provider_data.latest_observation_at
+            if persisted_provider_data is not None
+            else data.latest_observation_at
+        ),
     )
 
 

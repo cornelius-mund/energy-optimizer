@@ -721,6 +721,36 @@ def test_household_load_provider_data_is_persisted_and_retrieved_after_restart(
     assert restarted_response.json() == read_response.json()
 
 
+def test_household_load_provider_data_is_merged_on_persistence(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+    first = household_load_request()
+    second = household_load_request()
+    second.update(
+        {
+            "start_time": "2026-01-01T01:00:00+00:00",
+            "load_kw": [9.0, 3.0],
+            "retrieved_at": "2026-01-01T02:00:00+00:00",
+            "latest_observation_at": "2026-01-01T02:00:00+00:00",
+        }
+    )
+
+    with TestClient(app) as client:
+        first_response = client.post("/api/v1/household-load", json=first)
+        second_response = client.post("/api/v1/household-load", json=second)
+        read_response = client.get("/api/v1/household-load")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert read_response.status_code == 200
+    assert second_response.json()["start_time"] == "2026-01-01T00:00:00Z"
+    assert second_response.json()["load_kw"] == [1.2, 9.0, 3.0]
+    assert read_response.json() == second_response.json()
+
+
 def test_household_load_direct_submission_is_not_persisted(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Literal, Protocol
 
 HOUSEHOLD_LOAD_SOURCE_ID = "household_load"
+HOUSEHOLD_LOAD_MAX_VALUES = 87_672
 
 
 @dataclass(frozen=True)
