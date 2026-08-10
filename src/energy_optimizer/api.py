@@ -1,5 +1,6 @@
 """HTTP API for the Energy Optimizer service."""
 
+import asyncio
 import math
 import os
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from pydantic import (
 
 from energy_optimizer import __version__
 from energy_optimizer.config import load_configuration
+from energy_optimizer.orchestration import build_configured_orchestrator
 from energy_optimizer.providers.interfaces import (
     HouseholdLoadData,
 )
@@ -510,7 +512,24 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         if configuration.persistence is not None
         else None
     )
-    yield
+    application.state.orchestrator = build_configured_orchestrator(
+        configuration,
+        application.state.provider_data_store,
+    )
+    stop_event = asyncio.Event()
+    application.state.orchestration_stop_event = stop_event
+    application.state.orchestration_task = None
+    if application.state.orchestrator is not None:
+        application.state.orchestration_task = asyncio.create_task(
+            application.state.orchestrator.run_forever(stop_event)
+        )
+    try:
+        yield
+    finally:
+        stop_event.set()
+        task = application.state.orchestration_task
+        if task is not None:
+            await task
 
 
 app = FastAPI(title="Energy Optimizer", version=__version__, lifespan=lifespan)
