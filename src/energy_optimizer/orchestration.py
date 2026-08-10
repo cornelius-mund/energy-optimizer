@@ -439,7 +439,7 @@ def build_configured_orchestrator(
                     ProviderDataKey(
                         data_type="household-load",
                         provider="home-assistant",
-                        entity_id=home_assistant.household_load_entity_id,
+                        entity_id=home_assistant.household_load_source_id,
                     ),
                     TypeAdapter(HouseholdLoadData),
                 ),

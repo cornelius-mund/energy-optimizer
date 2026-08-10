@@ -677,7 +677,7 @@ def persisted_household_load(request: Request) -> HouseholdLoadResponse:
 
     source = SourceMetadata(
         provider="home-assistant",
-        entity_id=configuration.home_assistant.household_load_entity_id,
+        entity_id=configuration.home_assistant.household_load_source_id,
     )
     key = ProviderDataKey(
         data_type="household-load",

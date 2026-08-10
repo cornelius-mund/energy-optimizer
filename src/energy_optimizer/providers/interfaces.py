@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
 
+HOUSEHOLD_LOAD_SOURCE_ID = "household_load"
+
 
 @dataclass(frozen=True)
 class SourceMetadata:

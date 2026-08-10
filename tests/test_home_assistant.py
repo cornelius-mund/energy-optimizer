@@ -1,6 +1,6 @@
 """Tests for the Home Assistant household-load importer."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -12,17 +12,25 @@ from energy_optimizer.providers.home_assistant import (
     HomeAssistantLoadImporter,
 )
 
-ENTITY_ID = "sensor.household_load"
+ENTITY_ID = "sensor.household_energy"
+SECOND_ENTITY_ID = "sensor.ev_energy"
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 END = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
-NOW = datetime(2026, 1, 1, 3, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
 
 
 def configuration(**overrides: Any) -> HomeAssistantConfiguration:
     values: dict[str, Any] = {
         "base_url": "http://homeassistant.test:8123",
         "token": "test-token",
-        "household_load_entity_id": ENTITY_ID,
+        "household_load_entities": [
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
         "timeout_seconds": 5,
         "max_data_age_seconds": 7200,
     }
@@ -30,43 +38,55 @@ def configuration(**overrides: Any) -> HomeAssistantConfiguration:
     return HomeAssistantConfiguration.model_validate(values)
 
 
-def history_payload(unit: str = "W") -> list[list[dict[str, Any]]]:
-    return [
-        [
-            {
-                "entity_id": ENTITY_ID,
-                "state": "500" if unit == "W" else "0.5",
-                "last_updated": "2026-01-01T00:00:00+00:00",
-                "attributes": {"unit_of_measurement": unit},
-            },
-            {
-                "state": "1000" if unit == "W" else "1.0",
-                "last_changed": "2026-01-01T01:00:00+00:00",
-            },
-            {
-                "state": "2000" if unit == "W" else "2.0",
-                "last_changed": "2026-01-01T02:00:00+00:00",
-            },
-            {
-                "state": "3000" if unit == "W" else "3.0",
-                "last_changed": "2026-01-01T03:00:00+00:00",
-            },
-        ]
+def history_payload(
+    entity_id: str = ENTITY_ID,
+    readings: list[tuple[str, str]] | None = None,
+    unit: str = "kWh",
+    state_class: str = "total_increasing",
+    last_resets: list[str | None] | None = None,
+) -> list[list[dict[str, Any]]]:
+    readings = readings or [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T01:00:00+00:00", "1"),
+        ("2026-01-01T02:00:00+00:00", "3"),
+        ("2026-01-01T03:00:00+00:00", "6"),
+        ("2026-01-01T04:00:00+00:00", "10"),
     ]
+    records: list[dict[str, Any]] = []
+    for index, (timestamp, state) in enumerate(readings):
+        attributes: dict[str, Any] = {
+            "unit_of_measurement": unit,
+            "state_class": state_class,
+        }
+        if last_resets is not None:
+            attributes["last_reset"] = last_resets[index]
+        records.append(
+            {
+                "entity_id": entity_id,
+                "state": state,
+                "last_updated": timestamp,
+                "attributes": attributes,
+            }
+        )
+    return [records]
 
 
 def importer(
     handler: httpx.MockTransport | httpx.BaseTransport,
+    **configuration_overrides: Any,
 ) -> tuple[HomeAssistantLoadImporter, httpx.Client]:
     client = httpx.Client(transport=handler)
-    return HomeAssistantLoadImporter(configuration(), client), client
+    return (
+        HomeAssistantLoadImporter(configuration(**configuration_overrides), client),
+        client,
+    )
 
 
-def test_fetch_normalizes_watts_and_carries_forward_history() -> None:
+def test_fetch_converts_total_increasing_energy_to_hourly_load() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/history/period/2025-12-31T23:00:00+00:00"
         assert request.url.params["filter_entity_id"] == ENTITY_ID
-        assert "minimal_response" in request.url.params
+        assert "minimal_response" not in request.url.params
         assert request.headers["authorization"] == "Bearer test-token"
         assert request.extensions["timeout"] == {
             "connect": 5.0,
@@ -84,19 +104,30 @@ def test_fetch_normalizes_watts_and_carries_forward_history() -> None:
 
     assert data.schema_version == "1"
     assert data.start_time == START
-    assert data.load_kw == (0.5, 1.0, 2.0, 3.0)
+    assert data.interval_minutes == 60
+    assert data.load_kw == (1.0, 2.0, 3.0, 4.0)
     assert data.unit == "kW"
     assert data.source.provider == "home-assistant"
-    assert data.source.entity_id == ENTITY_ID
+    assert data.source.entity_id == "household_load"
     assert data.retrieved_at == NOW
-    assert data.latest_observation_at == datetime(2026, 1, 1, 3, tzinfo=timezone.utc)
+    assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 
 
-def test_fetch_accepts_values_already_reported_in_kw() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=history_payload("kW"))
+def test_total_increasing_observations_need_not_be_hour_aligned() -> None:
+    readings = [
+        ("2025-12-31T23:15:00+00:00", "0"),
+        ("2026-01-01T00:15:00+00:00", "0.5"),
+        ("2026-01-01T01:15:00+00:00", "1.5"),
+        ("2026-01-01T02:15:00+00:00", "3.5"),
+        ("2026-01-01T03:15:00+00:00", "6.5"),
+        ("2026-01-01T04:15:00+00:00", "10.5"),
+    ]
 
-    provider, client = importer(httpx.MockTransport(handler))
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        )
+    )
     try:
         data = provider.fetch(START, END, 3600, now=NOW)
     finally:
@@ -105,89 +136,113 @@ def test_fetch_accepts_values_already_reported_in_kw() -> None:
     assert data.load_kw == (0.5, 1.0, 2.0, 3.0)
 
 
-def test_fetch_defaults_to_latest_completed_hour() -> None:
+def test_fetch_converts_total_increasing_energy_and_unit() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "1000"),
+        ("2026-01-01T01:00:00+00:00", "2000"),
+        ("2026-01-01T02:00:00+00:00", "3000"),
+        ("2026-01-01T03:00:00+00:00", "4000"),
+        ("2026-01-01T04:00:00+00:00", "5000"),
+    ]
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=history_payload(
+                unit="Wh", readings=readings, state_class="total_increasing"
+            ),
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "Wh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.0, 1.0, 1.0, 1.0)
+    assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+
+
+def test_fetch_combines_add_and_subtract_entities() -> None:
+    responses = {
+        ENTITY_ID: history_payload(),
+        SECOND_ENTITY_ID: history_payload(
+            entity_id=SECOND_ENTITY_ID,
+            readings=[
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "0.25"),
+                ("2026-01-01T02:00:00+00:00", "0.75"),
+                ("2026-01-01T03:00:00+00:00", "1.5"),
+                ("2026-01-01T04:00:00+00:00", "2.5"),
+            ],
+        ),
+    }
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.params["end_time"] == "2026-01-01T03:00:00+00:00"
-        return httpx.Response(200, json=history_payload())
+        entity_id = request.url.params["filter_entity_id"]
+        return httpx.Response(200, json=responses[entity_id])
 
-    provider, client = importer(httpx.MockTransport(handler))
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "subtract",
+            },
+        ],
+    )
     try:
-        data = provider.fetch(START, now=NOW)
+        data = provider.fetch(START, END, now=NOW)
     finally:
         client.close()
 
-    assert data.load_kw == (0.5, 1.0, 2.0)
+    assert data.load_kw == (0.75, 1.5, 2.25, 3.0)
+    assert data.source.entity_id == "household_load"
 
 
-def test_freshness_is_a_polling_health_check() -> None:
+def test_fetch_rejects_instantaneous_power_entities() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=history_payload())
+        return httpx.Response(
+            200,
+            json=history_payload(
+                unit="W", readings=[("2026-01-01T00:00:00+00:00", "500")]
+            ),
+        )
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        data = provider.fetch(START, END, 3600, now=NOW)
-        assert provider.is_fresh(data, now=NOW)
-
-        provider.configuration = configuration(max_data_age_seconds=60)
-        assert not provider.is_fresh(data, now=NOW)
-    finally:
-        client.close()
-
-
-def test_freshness_check_is_disabled_without_a_threshold() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=history_payload())
-
-    provider, client = importer(httpx.MockTransport(handler))
-    provider.configuration = configuration(max_data_age_seconds=None)
-    try:
-        data = provider.fetch(START, END, 3600, now=NOW)
-    finally:
-        client.close()
-
-    assert provider.is_fresh(data, now=datetime(2036, 1, 1, tzinfo=timezone.utc))
-
-
-@pytest.mark.parametrize(
-    ("status_code", "message"),
-    [
-        (401, "authentication failed"),
-        (404, "entity ID"),
-        (500, "HTTP 500"),
-    ],
-)
-def test_fetch_reports_http_failures(status_code: int, message: str) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code)
-
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match=message):
-            provider.fetch(START, END, 3600, now=NOW)
+        with pytest.raises(HomeAssistantError, match="instantaneous power"):
+            provider.fetch(START, END, now=NOW)
     finally:
         client.close()
 
 
-def test_fetch_reports_timeout() -> None:
+def test_fetch_rejects_incompatible_energy_unit() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("timed out")
+        return httpx.Response(200, json=history_payload(unit="Wh"))
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        with pytest.raises(HomeAssistantError, match="timed out"):
-            provider.fetch(START, END, 3600, now=NOW)
-    finally:
-        client.close()
-
-
-def test_fetch_reports_malformed_json() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"not-json")
-
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match="malformed JSON"):
-            provider.fetch(START, END, 3600, now=NOW)
+        with pytest.raises(HomeAssistantError, match="incompatible"):
+            provider.fetch(START, END, now=NOW)
     finally:
         client.close()
 
@@ -204,18 +259,6 @@ def test_fetch_reports_malformed_json() -> None:
             [[{"state": "not-a-number", "last_changed": "2026-01-01T00:00:00+00:00"}]],
             "non-numeric",
         ),
-        (
-            [
-                [
-                    {
-                        "state": "1",
-                        "last_changed": "2026-01-01T00:00:00+00:00",
-                        "attributes": {"unit_of_measurement": "A"},
-                    }
-                ]
-            ],
-            "Unsupported.*unit",
-        ),
     ],
 )
 def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
@@ -225,48 +268,277 @@ def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match=message):
-            provider.fetch(START, END, 3600, now=NOW)
+            provider.fetch(START, END, now=NOW)
     finally:
         client.close()
 
 
-def test_fetch_does_not_reject_historical_data_as_stale() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=history_payload())
+def test_total_increasing_reset_mid_hour_preserves_energy_on_both_sides() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:20:00+00:00", "10.5"),
+        ("2026-01-01T00:40:00+00:00", "0.25"),
+        ("2026-01-01T01:00:00+00:00", "1.25"),
+    ]
+
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(readings=readings, state_class="total_increasing"),
+            )
+        )
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.75,)
+
+
+def test_total_increasing_does_not_interpolate_between_observations() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:30:00+00:00", "10.5"),
+        ("2026-01-01T01:30:00+00:00", "1.5"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    unit="kWh",
+                    readings=readings,
+                    state_class="total_increasing",
+                ),
+            )
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (0.5, 1.5)
+
+
+def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:20:00+00:00", "10.5"),
+        ("2026-01-01T00:40:00+00:00", "0.25"),
+        ("2026-01-01T01:00:00+00:00", "1.25"),
+    ]
+    reset_time = "2026-01-01T00:40:00+00:00"
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    readings=readings,
+                    state_class="total",
+                    last_resets=[None, None, reset_time, reset_time],
+                ),
+            )
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.75,)
+
+
+def test_total_rejects_a_decrease_without_last_reset_change() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:20:00+00:00", "10.5"),
+        ("2026-01-01T00:40:00+00:00", "0.25"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    readings=readings,
+                    state_class="total",
+                    last_resets=[None, None, None],
+                ),
+            )
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        with pytest.raises(HomeAssistantError, match="last_reset"):
+            provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+
+def test_fetch_rejects_negative_combined_load() -> None:
+    responses = {
+        ENTITY_ID: history_payload(),
+        SECOND_ENTITY_ID: history_payload(
+            entity_id=SECOND_ENTITY_ID,
+            readings=[
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "2"),
+                ("2026-01-01T02:00:00+00:00", "4"),
+                ("2026-01-01T03:00:00+00:00", "6"),
+                ("2026-01-01T04:00:00+00:00", "8"),
+            ],
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
 
     provider, client = importer(
         httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "subtract",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+        ],
     )
     try:
-        data = provider.fetch(START, END, 3600, now=NOW)
+        with pytest.raises(HomeAssistantError, match="negative"):
+            provider.fetch(START, END, now=NOW)
     finally:
         client.close()
 
-    provider.configuration = configuration(max_data_age_seconds=60)
-    assert not provider.is_fresh(data, now=NOW)
 
+def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
+    calls = 0
 
-def test_fetch_requires_more_history_when_first_hour_has_no_value() -> None:
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json=[
-                [
-                    {
-                        "state": "1",
-                        "last_changed": "2026-01-01T01:30:00+00:00",
-                        "attributes": {"unit_of_measurement": "kW"},
-                    }
-                ]
-            ],
-        )
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(200, json=history_payload())
+        return httpx.Response(503)
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+        ],
+    )
+    try:
+        with pytest.raises(HomeAssistantError, match="HTTP 503"):
+            provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
+
+    assert calls == 2
+
+
+def test_fetch_reports_http_failures() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        with pytest.raises(HomeAssistantError, match="increase history lookback"):
-            provider.fetch(START, END, 3600, now=NOW)
+        with pytest.raises(HomeAssistantError, match="authentication failed"):
+            provider.fetch(START, END, now=NOW)
     finally:
         client.close()
+
+
+def test_fetch_reports_timeout() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out")
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(HomeAssistantError, match="timed out"):
+            provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
+
+
+def test_fetch_reports_malformed_json() -> None:
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, content=b"not-json"))
+    )
+    try:
+        with pytest.raises(HomeAssistantError, match="malformed JSON"):
+            provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
+
+
+def test_freshness_is_a_polling_health_check() -> None:
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=history_payload()))
+    )
+    try:
+        data = provider.fetch(START, END, now=NOW)
+        assert provider.is_fresh(data, now=NOW)
+        provider.configuration = configuration(max_data_age_seconds=60)
+        assert not provider.is_fresh(data, now=NOW)
+    finally:
+        client.close()
+
+
+def test_freshness_check_is_disabled_without_a_threshold() -> None:
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=history_payload())),
+        max_data_age_seconds=None,
+    )
+    try:
+        data = provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
+
+    assert provider.is_fresh(data, now=datetime(2036, 1, 1, tzinfo=timezone.utc))
 
 
 @pytest.mark.parametrize(

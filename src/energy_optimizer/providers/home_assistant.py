@@ -9,8 +9,12 @@ from urllib.parse import quote
 
 import httpx
 
-from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.config import (
+    HomeAssistantConfiguration,
+    HouseholdLoadEntityConfiguration,
+)
 from energy_optimizer.providers.interfaces import (
+    HOUSEHOLD_LOAD_SOURCE_ID,
     HouseholdLoadData,
     SourceMetadata,
 )
@@ -54,13 +58,45 @@ class HomeAssistantLoadImporter:
         retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
         effective_end_time = end_time or self._latest_completed_hour(retrieved_at)
         self._validate_period(start_time, effective_end_time, history_lookback_seconds)
-        query_start = start_time - timedelta(seconds=history_lookback_seconds)
-        url = self._history_url(query_start, effective_end_time)
-        response = self._request(url)
-        records = self._parse_history(response)
-        values, latest_observation = self._normalize_records(
-            records, start_time, effective_end_time
-        )
+        start = self._as_utc(start_time)
+        end = self._as_utc(effective_end_time)
+        contributions: list[tuple[list[float], str]] = []
+        observations: list[datetime] = []
+        for entity in self.configuration.household_load_entities or []:
+            query_start = start - timedelta(seconds=history_lookback_seconds)
+            response = self._request(
+                self._history_url(query_start, end, entity.entity_id), entity
+            )
+            records = self._parse_history(response, entity)
+            values, latest_observation = self._normalize_records(
+                records, start, end, entity
+            )
+            contributions.append((values, entity.operation))
+            observations.append(latest_observation)
+
+        if not contributions:
+            raise HomeAssistantError(
+                "no Home Assistant household-load energy entities are configured"
+            )
+        value_count = len(contributions[0][0])
+        if any(len(values) != value_count for values, _ in contributions):
+            raise HomeAssistantError(
+                "Home Assistant household-load entities returned misaligned hourly "
+                "series"
+            )
+        values = [0.0] * value_count
+        for contribution, operation in contributions:
+            sign = 1.0 if operation == "add" else -1.0
+            for index, value in enumerate(contribution):
+                values[index] += sign * value
+        for index, value in enumerate(values):
+            if not math.isfinite(value) or value < -1e-9:
+                raise HomeAssistantError(
+                    "combined Home Assistant household-load data contains a "
+                    f"negative or non-finite value at hour {index}; check add and "
+                    "subtract operations"
+                )
+            values[index] = max(0.0, value)
 
         return HouseholdLoadData(
             schema_version="1",
@@ -70,10 +106,10 @@ class HomeAssistantLoadImporter:
             unit="kW",
             source=SourceMetadata(
                 provider="home-assistant",
-                entity_id=self.configuration.household_load_entity_id,
+                entity_id=HOUSEHOLD_LOAD_SOURCE_ID,
             ),
             retrieved_at=retrieved_at,
-            latest_observation_at=latest_observation,
+            latest_observation_at=min(observations),
         )
 
     def is_fresh(
@@ -90,17 +126,18 @@ class HomeAssistantLoadImporter:
         age_seconds = (current_time - data.latest_observation_at).total_seconds()
         return age_seconds < threshold
 
-    def _history_url(self, start_time: datetime, end_time: datetime) -> str:
+    def _history_url(
+        self, start_time: datetime, end_time: datetime, entity_id: str
+    ) -> str:
         base_url = str(self.configuration.base_url).rstrip("/")
         encoded_start = quote(self._as_utc(start_time).isoformat(), safe="")
         return (
             f"{base_url}/api/history/period/{encoded_start}"
             f"?end_time={quote(self._as_utc(end_time).isoformat(), safe='')}"
-            f"&filter_entity_id={quote(self.configuration.household_load_entity_id)}"
-            "&minimal_response"
+            f"&filter_entity_id={quote(entity_id)}"
         )
 
-    def _request(self, url: str) -> Any:
+    def _request(self, url: str, entity: HouseholdLoadEntityConfiguration) -> Any:
         headers = {
             "Authorization": f"Bearer {self.configuration.token.get_secret_value()}",
             "Accept": "application/json",
@@ -130,8 +167,8 @@ class HomeAssistantLoadImporter:
             )
         if response.status_code == 404:
             raise HomeAssistantError(
-                "Home Assistant household-load history was not found; check the "
-                "configured entity ID and endpoint"
+                "Home Assistant household-load history was not found for "
+                f"{entity.entity_id}; check the configured entity ID and endpoint"
             )
         if response.is_error:
             raise HomeAssistantError(
@@ -145,28 +182,34 @@ class HomeAssistantLoadImporter:
                 "Home Assistant returned malformed JSON for household-load history"
             ) from error
 
-    def _parse_history(self, payload: Any) -> list[dict[str, Any]]:
+    def _parse_history(
+        self, payload: Any, entity: HouseholdLoadEntityConfiguration
+    ) -> list[dict[str, Any]]:
         if not isinstance(payload, list):
             raise HomeAssistantError(
-                "Home Assistant household-load history must contain one entity series"
+                f"Home Assistant history for {entity.entity_id} must contain one "
+                "entity series"
             )
         if not payload or (len(payload) == 1 and not payload[0]):
             raise HomeAssistantError(
-                "Home Assistant returned no household-load history for the configured "
-                "entity"
+                f"Home Assistant returned no household-load history for "
+                f"{entity.entity_id}"
             )
         if len(payload) != 1:
             raise HomeAssistantError(
-                "Home Assistant household-load history must contain one entity series"
+                f"Home Assistant history for {entity.entity_id} must contain one "
+                "entity series"
             )
         series = payload[0]
         if not isinstance(series, list):
             raise HomeAssistantError(
-                "Home Assistant household-load history must contain a list of records"
+                f"Home Assistant history for {entity.entity_id} must contain a list "
+                "of records"
             )
         if not all(isinstance(record, dict) for record in series):
             raise HomeAssistantError(
-                "Home Assistant household-load history contains an invalid record"
+                f"Home Assistant history for {entity.entity_id} contains an invalid "
+                "record"
             )
         return series
 
@@ -175,28 +218,37 @@ class HomeAssistantLoadImporter:
         records: list[dict[str, Any]],
         start_time: datetime,
         end_time: datetime,
+        entity: HouseholdLoadEntityConfiguration,
     ) -> tuple[list[float], datetime]:
-        parsed: list[tuple[datetime, float, str]] = []
+        raw_records: list[tuple[datetime, dict[str, Any]]] = []
         for record in records:
             timestamp = self._parse_timestamp(
                 record.get("last_updated", record.get("last_changed"))
             )
+            raw_records.append((timestamp, record))
+
+        raw_records.sort(key=lambda record: record[0])
+        parsed: list[tuple[datetime, float, datetime | None]] = []
+        previous_unit: str | None = None
+        previous_reset: datetime | None = None
+        previous_state_class: str | None = None
+        for timestamp, record in raw_records:
             state = record.get("state")
             if not isinstance(state, str) or state in {"unknown", "unavailable"}:
                 raise HomeAssistantError(
-                    "Home Assistant household-load history contains an unavailable "
-                    f"value at {timestamp.isoformat()}"
+                    f"Home Assistant entity {entity.entity_id} contains an "
+                    f"unavailable value at {timestamp.isoformat()}"
                 )
             try:
                 value = float(state)
             except (TypeError, ValueError) as error:
                 raise HomeAssistantError(
-                    "Home Assistant household-load history contains a non-numeric "
-                    f"value at {timestamp.isoformat()}: {state!r}"
+                    f"Home Assistant entity {entity.entity_id} contains a "
+                    f"non-numeric value at {timestamp.isoformat()}: {state!r}"
                 ) from error
             if not math.isfinite(value) or value < 0:
                 raise HomeAssistantError(
-                    "Home Assistant household-load history contains an invalid "
+                    f"Home Assistant entity {entity.entity_id} contains an invalid "
                     f"value at {timestamp.isoformat()}: {state!r}"
                 )
             attributes = record.get("attributes")
@@ -204,54 +256,115 @@ class HomeAssistantLoadImporter:
                 attributes.get("unit_of_measurement"), str
             ):
                 normalized_unit = attributes["unit_of_measurement"].strip()
-            elif parsed:
-                normalized_unit = parsed[-1][2]
+            elif previous_unit is not None:
+                normalized_unit = previous_unit
             else:
                 raise HomeAssistantError(
-                    "Home Assistant household-load history is missing "
+                    f"Home Assistant entity {entity.entity_id} is missing "
                     "unit_of_measurement"
                 )
-            if normalized_unit not in {"W", "kW"}:
+            if isinstance(attributes, dict) and "state_class" in attributes:
+                normalized_state_class = attributes["state_class"]
+                if not isinstance(normalized_state_class, str):
+                    raise HomeAssistantError(
+                        f"Home Assistant entity {entity.entity_id} has an invalid "
+                        "state_class"
+                    )
+            elif previous_state_class is not None:
+                normalized_state_class = previous_state_class
+            else:
+                normalized_state_class = entity.state_class
+            if normalized_state_class != entity.state_class:
                 raise HomeAssistantError(
-                    "Unsupported Home Assistant household-load unit "
-                    f"{normalized_unit!r}; expected 'W' or 'kW'"
+                    f"Home Assistant entity {entity.entity_id} reports state_class "
+                    f"{normalized_state_class!r}; expected {entity.state_class!r}"
                 )
-            parsed.append((timestamp, value, normalized_unit))
+            if isinstance(attributes, dict) and "last_reset" in attributes:
+                raw_reset = attributes["last_reset"]
+                if raw_reset is None:
+                    normalized_reset = None
+                elif isinstance(raw_reset, str):
+                    normalized_reset = self._parse_timestamp(raw_reset)
+                else:
+                    raise HomeAssistantError(
+                        f"Home Assistant entity {entity.entity_id} has an invalid "
+                        "last_reset timestamp"
+                    )
+            else:
+                normalized_reset = previous_reset
+            if normalized_unit in {"W", "kW"}:
+                raise HomeAssistantError(
+                    f"Home Assistant entity {entity.entity_id} reports "
+                    f"{normalized_unit}, an instantaneous power unit; configure an "
+                    "energy entity reported in Wh, kWh, or MWh"
+                )
+            if normalized_unit != entity.unit:
+                raise HomeAssistantError(
+                    f"Home Assistant entity {entity.entity_id} reports incompatible "
+                    f"unit {normalized_unit!r}; expected {entity.unit!r}"
+                )
+            parsed.append((timestamp, value, normalized_reset))
+            previous_unit = normalized_unit
+            previous_reset = normalized_reset
+            previous_state_class = normalized_state_class
 
-        parsed.sort(key=lambda record: record[0])
-        units = {record[2] for record in parsed}
-        if len(units) != 1:
+        if not parsed:
             raise HomeAssistantError(
-                "Home Assistant household-load history changes units between records"
+                f"Home Assistant returned no usable history for {entity.entity_id}"
             )
-        unit = units.pop()
         start = self._as_utc(start_time)
         end = self._as_utc(end_time)
         hour_count = int((end - start).total_seconds() // 3600)
-        values: list[float] = []
-        record_index = 0
-        current: tuple[datetime, float, str] | None = None
-        for hour in range(hour_count):
-            bucket_start = start + timedelta(hours=hour)
-            while (
-                record_index < len(parsed) and parsed[record_index][0] <= bucket_start
-            ):
-                current = parsed[record_index]
-                record_index += 1
-            if current is None:
-                raise HomeAssistantError(
-                    "Home Assistant household-load history has no value at "
-                    f"{bucket_start.isoformat()}; increase history lookback"
-                )
-            value = current[1] / 1000 if unit == "W" else current[1]
-            values.append(value)
-
-        latest_observation = current[0] if current is not None else None
-        if latest_observation is None:
+        factor = {"Wh": 0.001, "kWh": 1.0, "MWh": 1000.0}[entity.unit]
+        timestamps = [timestamp for timestamp, _, _ in parsed]
+        if len(timestamps) != len(set(timestamps)):
             raise HomeAssistantError(
-                "Home Assistant household-load history has no usable value in the "
-                "requested period"
+                f"Home Assistant entity {entity.entity_id} contains duplicate "
+                "timestamps"
             )
+        baseline_index = (
+            next(
+                (
+                    index
+                    for index, (timestamp, _, _) in enumerate(parsed)
+                    if timestamp > start
+                ),
+                len(parsed),
+            )
+            - 1
+        )
+        if baseline_index < 0:
+            raise HomeAssistantError(
+                f"Home Assistant cumulative energy entity {entity.entity_id} has no "
+                f"usable value at or before {start.isoformat()}; increase history "
+                "lookback"
+            )
+        baseline = parsed[baseline_index]
+        values = [0.0] * hour_count
+        previous_value = baseline[1]
+        previous_reset = baseline[2]
+        latest_observation = baseline[0]
+        for timestamp, value, reset in parsed[baseline_index + 1 :]:
+            if timestamp > end:
+                break
+            if value >= previous_value:
+                delta = value - previous_value
+            elif entity.state_class == "total_increasing":
+                delta = value
+            elif reset != previous_reset:
+                delta = value
+            else:
+                raise HomeAssistantError(
+                    f"Home Assistant total entity {entity.entity_id} decreased "
+                    "without a changed last_reset timestamp"
+                )
+            elapsed_seconds = (timestamp - start).total_seconds()
+            if elapsed_seconds > 0:
+                hour = math.ceil(elapsed_seconds / 3600) - 1
+                values[hour] += delta * factor
+            previous_value = value
+            previous_reset = reset
+            latest_observation = timestamp
         return values, latest_observation
 
     @staticmethod

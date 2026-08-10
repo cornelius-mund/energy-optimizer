@@ -9,15 +9,21 @@ import pytest
 from pydantic import TypeAdapter
 
 from energy_optimizer.config import (
+    Configuration,
     DataSourceScheduleConfiguration,
+    GridConfiguration,
+    HomeAssistantConfiguration,
     OptimizationTriggerConfiguration,
     OrchestrationConfiguration,
+    PersistenceConfiguration,
+    SolverConfiguration,
 )
 from energy_optimizer.orchestration import (
     OrchestrationError,
     ProviderDataSnapshot,
     ProviderOrchestrator,
     ProviderRegistration,
+    build_configured_orchestrator,
 )
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
@@ -27,7 +33,10 @@ ADAPTER = TypeAdapter(HouseholdLoadData)
 
 
 def data(
-    now: datetime, value: float = 1.0, source: str = "household_load"
+    now: datetime,
+    value: float = 1.0,
+    source: str = "household_load",
+    entity_id: str | None = None,
 ) -> HouseholdLoadData:
     return HouseholdLoadData(
         schema_version="1",
@@ -35,7 +44,9 @@ def data(
         interval_minutes=60,
         load_kw=(value,),
         unit="kW",
-        source=SourceMetadata(provider=source, entity_id=f"sensor.{source}"),
+        source=SourceMetadata(
+            provider=source, entity_id=entity_id or f"sensor.{source}"
+        ),
         retrieved_at=now,
         latest_observation_at=now,
     )
@@ -376,3 +387,69 @@ def test_orchestrator_rejects_unregistered_configured_source(tmp_path: Path) -> 
 
     with pytest.raises(OrchestrationError, match="unknown"):
         ProviderOrchestrator(configured, [], ProviderDataStore(tmp_path))
+
+
+def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeHomeAssistantImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            history_lookback_seconds: float = 0,
+            *,
+            now: datetime | None = None,
+        ) -> HouseholdLoadData:
+            del end_time, history_lookback_seconds
+            return data(
+                now or start_time,
+                source="home-assistant",
+                entity_id="household_load",
+            )
+
+        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
+        FakeHomeAssistantImporter,
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "household_load_entities": [
+                    {
+                        "entity_id": "sensor.household_energy",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=configuration(),
+    )
+    store = ProviderDataStore(tmp_path)
+
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+
+    assert orchestrator is not None
+    cycle = orchestrator.run_due(START)
+    assert cycle.provider_runs[0].status == "success"
+    persisted = store.load(
+        ProviderDataKey("household-load", "home-assistant", "household_load"),
+        ADAPTER,
+    )
+    assert persisted is not None
+    assert persisted.source.entity_id == "household_load"
