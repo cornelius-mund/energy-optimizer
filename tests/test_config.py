@@ -14,6 +14,12 @@ grid:
 solver:
   name: highs
   time_limit_seconds: 30
+home_assistant:
+  base_url: http://homeassistant.local:8123
+  token: test-token
+  household_load_entity_id: sensor.household_load
+  timeout_seconds: 10
+  max_data_age_seconds: 7200
 """
 
 
@@ -26,6 +32,10 @@ def test_load_configuration_returns_typed_values(tmp_path: Path) -> None:
     assert configuration.time_resolution_minutes == 60
     assert configuration.grid.maximum_export_kw == 5
     assert configuration.solver.name == "highs"
+    assert configuration.home_assistant is not None
+    assert configuration.home_assistant.base_url.host == "homeassistant.local"
+    assert configuration.home_assistant.token.get_secret_value() == "test-token"
+    assert configuration.home_assistant.max_data_age_seconds == 7200
 
 
 def test_load_configuration_rejects_missing_file(tmp_path: Path) -> None:
@@ -50,3 +60,51 @@ def test_load_configuration_rejects_malformed_yaml(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="Invalid YAML"):
         load_configuration(path)
+
+
+def test_load_configuration_allows_no_home_assistant_provider(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "home_assistant:\n  base_url: http://homeassistant.local:8123\n"
+            "  token: test-token\n  household_load_entity_id: sensor.household_load\n"
+            "  timeout_seconds: 10\n"
+            "  max_data_age_seconds: 7200\n",
+            "",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is None
+
+
+def test_load_configuration_rejects_invalid_home_assistant_settings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace("timeout_seconds: 10", "timeout_seconds: 0"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="home_assistant.timeout_seconds"):
+        load_configuration(path)
+
+
+def test_load_configuration_allows_optional_freshness_threshold(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace("  max_data_age_seconds: 7200\n", ""),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert configuration.home_assistant.max_data_age_seconds is None

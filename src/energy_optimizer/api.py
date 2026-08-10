@@ -303,6 +303,12 @@ class HouseholdLoadRequest(BaseModel):
         default=None,
         description="Optional source metadata for externally supplied data",
     )
+    retrieved_at: datetime = Field(
+        description="Time when the household-load data was retrieved"
+    )
+    latest_observation_at: datetime = Field(
+        description="Time of the latest source observation in the data"
+    )
 
     @field_validator("load_kw", mode="before")
     @classmethod
@@ -317,9 +323,13 @@ class HouseholdLoadRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_start_time(self) -> "HouseholdLoadRequest":
-        """Require timestamps that identify an unambiguous hourly series."""
-        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
-            raise ValueError("start_time must include a timezone")
+        """Require unambiguous timestamps for the load series metadata."""
+        timestamps = (self.start_time, self.retrieved_at, self.latest_observation_at)
+        if any(
+            timestamp.tzinfo is None or timestamp.utcoffset() is None
+            for timestamp in timestamps
+        ):
+            raise ValueError("timestamps must include a timezone")
         return self
 
 
@@ -335,6 +345,8 @@ class HouseholdLoadResponse(BaseModel):
     load_kw: list[float]
     unit: Literal["kW"]
     source: SourceMetadata | None = None
+    retrieved_at: datetime
+    latest_observation_at: datetime
 
 
 class PvGenerationRequest(BaseModel):
@@ -547,6 +559,8 @@ def household_load(request: HouseholdLoadRequest) -> HouseholdLoadResponse:
         load_kw=request.load_kw,
         unit=request.unit,
         source=request.source,
+        retrieved_at=request.retrieved_at,
+        latest_observation_at=request.latest_observation_at,
     )
 
 

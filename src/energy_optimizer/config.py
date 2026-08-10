@@ -4,7 +4,14 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+)
 
 
 class ConfigurationError(ValueError):
@@ -29,6 +36,18 @@ class SolverConfiguration(BaseModel):
     time_limit_seconds: float = Field(gt=0)
 
 
+class HomeAssistantConfiguration(BaseModel):
+    """Connection and mapping settings for the Home Assistant provider."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: AnyHttpUrl
+    token: SecretStr
+    household_load_entity_id: str = Field(min_length=1, max_length=255)
+    timeout_seconds: float = Field(gt=0, le=120)
+    max_data_age_seconds: float | None = Field(default=None, gt=0)
+
+
 class Configuration(BaseModel):
     """Validated settings needed to start the service."""
 
@@ -37,6 +56,7 @@ class Configuration(BaseModel):
     time_resolution_minutes: int = Field(gt=0)
     grid: GridConfiguration
     solver: SolverConfiguration
+    home_assistant: HomeAssistantConfiguration | None = None
 
 
 def load_configuration(path: Path) -> Configuration:

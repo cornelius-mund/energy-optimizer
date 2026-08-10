@@ -697,6 +697,16 @@ components:
           - $ref: '#/components/schemas/SourceMetadata'
           - type: 'null'
           description: Optional source metadata for externally supplied data
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+          description: Time when the household-load data was retrieved
+        latest_observation_at:
+          type: string
+          format: date-time
+          title: Latest Observation At
+          description: Time of the latest source observation in the data
       additionalProperties: false
       type: object
       required:
@@ -705,6 +715,8 @@ components:
       - interval_minutes
       - load_kw
       - unit
+      - retrieved_at
+      - latest_observation_at
       title: HouseholdLoadRequest
       description: Versioned hourly household-load data at the API boundary.
     HouseholdLoadResponse:
@@ -738,6 +750,14 @@ components:
           anyOf:
           - $ref: '#/components/schemas/SourceMetadata'
           - type: 'null'
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+        latest_observation_at:
+          type: string
+          format: date-time
+          title: Latest Observation At
       additionalProperties: false
       type: object
       required:
@@ -747,6 +767,8 @@ components:
       - interval_minutes
       - load_kw
       - unit
+      - retrieved_at
+      - latest_observation_at
       title: HouseholdLoadResponse
       description: Response returned after household-load data passes validation.
     OptimizationResponse:

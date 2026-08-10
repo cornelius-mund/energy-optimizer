@@ -8,3 +8,13 @@ grid:
 solver:
   name: highs
   time_limit_seconds: 60
+
+# Optional Home Assistant provider settings. The token should be a long-lived
+# access token and must not be committed to source control.
+home_assistant:
+  base_url: http://homeassistant.local:8123
+  token: replace-with-a-long-lived-access-token
+  household_load_entity_id: sensor.household_load
+  timeout_seconds: 10
+  # Optional polling health threshold; it does not limit historical retention.
+  max_data_age_seconds: 7200
