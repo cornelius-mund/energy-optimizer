@@ -47,12 +47,12 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
             "  household_load_entity_id: sensor.household_load\n",
             "  household_load_entities:\n"
             "    - entity_id: sensor.household_energy\n"
-            "      reading_type: cumulative\n"
+            "      state_class: total_increasing\n"
             "      unit: kWh\n"
             "      operation: add\n"
             "    - entity_id: sensor.ev_energy\n"
-            "      reading_type: interval\n"
-            "      unit: Wh\n"
+            "      state_class: total\n"
+            "      unit: kWh\n"
             "      operation: subtract\n",
         ),
         encoding="utf-8",
@@ -62,11 +62,11 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
 
     assert configuration.home_assistant is not None
     assert [
-        (entity.entity_id, entity.reading_type, entity.unit, entity.operation)
+        (entity.entity_id, entity.state_class, entity.unit, entity.operation)
         for entity in configuration.home_assistant.household_load_entities or []
     ] == [
-        ("sensor.household_energy", "cumulative", "kWh", "add"),
-        ("sensor.ev_energy", "interval", "Wh", "subtract"),
+        ("sensor.household_energy", "total_increasing", "kWh", "add"),
+        ("sensor.ev_energy", "total", "kWh", "subtract"),
     ]
     assert configuration.home_assistant.household_load_source_id == "household_load"
 
@@ -84,8 +84,8 @@ def test_load_configuration_migrates_legacy_single_entity_to_energy_mapping(
         "sensor.household_load"
     )
     assert configuration.home_assistant.household_load_entities is not None
-    assert configuration.home_assistant.household_load_entities[0].reading_type == (
-        "cumulative"
+    assert configuration.home_assistant.household_load_entities[0].state_class == (
+        "total_increasing"
     )
     assert configuration.home_assistant.household_load_entities[0].unit == "kWh"
     assert configuration.home_assistant.household_load_source_id == "household_load"

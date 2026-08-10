@@ -188,25 +188,30 @@ avoid duplicate plans.
 REST history API. It retrieves one requested half-open hourly period and returns
 provider-independent household-load data with `load_kw`, `unit: "kW"`, source
 metadata, retrieval time, and the latest source observation time. Household-load
-sources must be energy entities configured with `reading_type` (`cumulative` or
-`interval`), `unit` (`Wh`, `kWh`, or `MWh`), and `operation` (`add` or
-`subtract`). The importer converts each contribution to hourly kW-equivalent
-values and combines all contributions into one logical `household_load` record.
+sources must be energy entities configured with Home Assistant's `state_class`
+(`total` or `total_increasing`), `unit` (`Wh`, `kWh`, or `MWh`), and `operation`
+(`add` or `subtract`). The importer converts each cumulative counter's observed
+increases into hourly kW-equivalent values and combines all contributions into
+one logical `household_load` record.
 Instantaneous power entities reported in `W` or `kW` are rejected and are never
 implicitly converted to energy.
 
 Configure the Home Assistant URL, bearer token, one or more household-load energy
 entities, and request timeout in `config.yaml`. An optional
 `max_data_age_seconds` setting enables a polling health check; it does not
-invalidate historical data. Cumulative entities are differenced at hourly
-boundaries and counter resets fail the complete import. Interval entities must
-provide one reading for every requested hour. All entities must align to the
-same hourly series; missing, unavailable, malformed, non-finite, incompatible,
-or failed entity data rejects the complete aggregate rather than producing a
-partial dataset. The token is a secret and must not be committed to source
-control. The importer raises actionable errors for authentication failures,
-missing or unavailable entities, malformed or non-numeric values, unsupported
-power units, counter resets, and request failures.
+invalidate historical data. No interpolation is performed: the latest observed
+counter value is carried forward until the next observation. For
+`total_increasing`, a decrease starts a new meter cycle and the new value is
+added as post-reset energy. For `total`, a decrease is accepted only when
+Home Assistant's `last_reset` timestamp changes. Every observed increase within
+an hour is summed, so a reset in the middle of an hour preserves energy from
+both sides of the reset. Missing, unavailable, malformed, non-finite,
+incompatible, or failed entity data rejects the complete aggregate rather than
+producing a partial dataset. The token is a secret and must not be committed to
+source control. The importer raises actionable errors for authentication
+failures, missing or unavailable entities, malformed or non-numeric values,
+unsupported power units, invalid state classes, unmarked total resets, and
+request failures.
 
 For example, a household meter can be added while an EV meter is subtracted:
 
@@ -216,12 +221,12 @@ home_assistant:
   token: replace-with-a-long-lived-access-token
   household_load_entities:
     - entity_id: sensor.household_energy
-      reading_type: cumulative
+      state_class: total_increasing
       unit: kWh
       operation: add
     - entity_id: sensor.ev_energy
-      reading_type: interval
-      unit: Wh
+      state_class: total
+      unit: kWh
       operation: subtract
   timeout_seconds: 10
 ```
@@ -231,10 +236,11 @@ identity `home-assistant/household_load`, so storage, freshness evaluation, and
 orchestration consumers receive one coherent household-load dataset.
 
 The legacy `household_load_entity_id` setting is still accepted as an explicit
-migration path. It is treated as one cumulative `kWh` entity with an `add`
-operation and is persisted under the new logical `household_load` identity.
-Update the configuration to `household_load_entities` so the entity's energy
-semantics are visible and power sensors cannot be configured accidentally.
+migration path. It is treated as one `kWh` entity with `state_class:
+total_increasing` and an `add` operation, and is persisted under the new logical
+`household_load` identity. Update the configuration to
+`household_load_entities` so the entity's Home Assistant state class is visible
+and power sensors cannot be configured accidentally.
 
 Call `fetch(start_time, end_time, history_lookback_seconds)` for a requested
 period. `end_time` may be omitted to fetch through the latest completed UTC

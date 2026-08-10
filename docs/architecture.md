@@ -130,10 +130,12 @@ passed to the application or optimizer.
 
 The Home Assistant household-load adapter is the first concrete provider slice.
 `HomeAssistantLoadImporter` owns the Home Assistant REST request, bearer-token
-authentication, energy-unit conversion, cumulative differencing, interval
-validation, add/subtract aggregation, hourly normalization, and observation
-metadata. It rejects instantaneous power entities and any failed or incomplete
-contribution before returning `HouseholdLoadData`. The aggregate uses the
+authentication, energy-unit conversion, cumulative counter validation,
+reset-aware delta accumulation, add/subtract aggregation, hourly
+normalization, and observation metadata. It follows Home Assistant's `total`
+and `total_increasing` state classes, rejects instantaneous power entities, and
+rejects any failed or incomplete contribution before returning
+`HouseholdLoadData`. The aggregate uses the
 logical `household_load` entity identity, regardless of how many Home Assistant
 entities contribute to it. The importer exposes an optional freshness health
 check, but does not start polling, schedule requests, cache results, persist

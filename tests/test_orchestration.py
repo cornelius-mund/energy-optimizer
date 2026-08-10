@@ -429,7 +429,7 @@ def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
                 "household_load_entities": [
                     {
                         "entity_id": "sensor.household_energy",
-                        "reading_type": "cumulative",
+                        "state_class": "total_increasing",
                         "unit": "kWh",
                         "operation": "add",
                     }

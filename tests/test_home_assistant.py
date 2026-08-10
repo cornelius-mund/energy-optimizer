@@ -1,6 +1,6 @@
 """Tests for the Home Assistant household-load importer."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -26,7 +26,7 @@ def configuration(**overrides: Any) -> HomeAssistantConfiguration:
         "household_load_entities": [
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "add",
             }
@@ -42,6 +42,8 @@ def history_payload(
     entity_id: str = ENTITY_ID,
     readings: list[tuple[str, str]] | None = None,
     unit: str = "kWh",
+    state_class: str = "total_increasing",
+    last_resets: list[str | None] | None = None,
 ) -> list[list[dict[str, Any]]]:
     readings = readings or [
         ("2026-01-01T00:00:00+00:00", "0"),
@@ -50,17 +52,23 @@ def history_payload(
         ("2026-01-01T03:00:00+00:00", "6"),
         ("2026-01-01T04:00:00+00:00", "10"),
     ]
-    return [
-        [
+    records: list[dict[str, Any]] = []
+    for index, (timestamp, state) in enumerate(readings):
+        attributes: dict[str, Any] = {
+            "unit_of_measurement": unit,
+            "state_class": state_class,
+        }
+        if last_resets is not None:
+            attributes["last_reset"] = last_resets[index]
+        records.append(
             {
                 "entity_id": entity_id,
                 "state": state,
                 "last_updated": timestamp,
-                "attributes": {"unit_of_measurement": unit},
+                "attributes": attributes,
             }
-            for timestamp, state in readings
-        ]
-    ]
+        )
+    return [records]
 
 
 def importer(
@@ -74,11 +82,11 @@ def importer(
     )
 
 
-def test_fetch_converts_cumulative_energy_to_hourly_load() -> None:
+def test_fetch_converts_total_increasing_energy_to_hourly_load() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/history/period/2025-12-31T23:00:00+00:00"
         assert request.url.params["filter_entity_id"] == ENTITY_ID
-        assert "minimal_response" in request.url.params
+        assert "minimal_response" not in request.url.params
         assert request.headers["authorization"] == "Bearer test-token"
         assert request.extensions["timeout"] == {
             "connect": 5.0,
@@ -105,7 +113,7 @@ def test_fetch_converts_cumulative_energy_to_hourly_load() -> None:
     assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 
 
-def test_cumulative_observations_need_not_be_hour_aligned() -> None:
+def test_total_increasing_observations_need_not_be_hour_aligned() -> None:
     readings = [
         ("2025-12-31T23:15:00+00:00", "0"),
         ("2026-01-01T00:15:00+00:00", "0.5"),
@@ -128,23 +136,29 @@ def test_cumulative_observations_need_not_be_hour_aligned() -> None:
     assert data.load_kw == (0.5, 1.0, 2.0, 3.0)
 
 
-def test_fetch_converts_interval_energy_and_unit() -> None:
+def test_fetch_converts_total_increasing_energy_and_unit() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "1000"),
         ("2026-01-01T01:00:00+00:00", "2000"),
         ("2026-01-01T02:00:00+00:00", "3000"),
         ("2026-01-01T03:00:00+00:00", "4000"),
+        ("2026-01-01T04:00:00+00:00", "5000"),
     ]
 
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=history_payload(unit="Wh", readings=readings))
+        return httpx.Response(
+            200,
+            json=history_payload(
+                unit="Wh", readings=readings, state_class="total_increasing"
+            ),
+        )
 
     provider, client = importer(
         httpx.MockTransport(handler),
         household_load_entities=[
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "interval",
+                "state_class": "total_increasing",
                 "unit": "Wh",
                 "operation": "add",
             }
@@ -155,8 +169,8 @@ def test_fetch_converts_interval_energy_and_unit() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (1.0, 2.0, 3.0, 4.0)
-    assert data.latest_observation_at == datetime(2026, 1, 1, 3, tzinfo=timezone.utc)
+    assert data.load_kw == (1.0, 1.0, 1.0, 1.0)
+    assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 
 
 def test_fetch_combines_add_and_subtract_entities() -> None:
@@ -183,13 +197,13 @@ def test_fetch_combines_add_and_subtract_entities() -> None:
         household_load_entities=[
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "add",
             },
             {
                 "entity_id": SECOND_ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "subtract",
             },
@@ -259,75 +273,129 @@ def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
         client.close()
 
 
-def test_fetch_rejects_counter_resets() -> None:
+def test_total_increasing_reset_mid_hour_preserves_energy_on_both_sides() -> None:
     readings = [
-        ("2026-01-01T00:00:00+00:00", "0"),
-        ("2026-01-01T01:00:00+00:00", "2"),
-        ("2026-01-01T02:00:00+00:00", "1"),
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:20:00+00:00", "10.5"),
+        ("2026-01-01T00:40:00+00:00", "0.25"),
+        ("2026-01-01T01:00:00+00:00", "1.25"),
     ]
 
     provider, client = importer(
         httpx.MockTransport(
-            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(readings=readings, state_class="total_increasing"),
+            )
         )
     )
     try:
-        with pytest.raises(HomeAssistantError, match="reset"):
-            provider.fetch(START, END, now=NOW)
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
     finally:
         client.close()
 
+    assert data.load_kw == (1.75,)
 
-def test_fetch_rejects_missing_interval() -> None:
+
+def test_total_increasing_does_not_interpolate_between_observations() -> None:
     readings = [
-        ("2026-01-01T00:00:00+00:00", "1"),
-        ("2026-01-01T02:00:00+00:00", "1"),
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:30:00+00:00", "10.5"),
+        ("2026-01-01T01:30:00+00:00", "1.5"),
     ]
     provider, client = importer(
         httpx.MockTransport(
             lambda _: httpx.Response(
-                200, json=history_payload(unit="kWh", readings=readings)
+                200,
+                json=history_payload(
+                    unit="kWh",
+                    readings=readings,
+                    state_class="total_increasing",
+                ),
             )
         ),
         household_load_entities=[
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "interval",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "add",
             }
         ],
     )
     try:
-        with pytest.raises(HomeAssistantError, match="missing an interval"):
-            provider.fetch(START, END, now=NOW)
+        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
     finally:
         client.close()
 
+    assert data.load_kw == (0.5, 1.5)
 
-def test_fetch_rejects_misaligned_interval() -> None:
+
+def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
     readings = [
-        ("2026-01-01T00:15:00+00:00", "1"),
-        ("2026-01-01T01:15:00+00:00", "1"),
-        ("2026-01-01T02:15:00+00:00", "1"),
-        ("2026-01-01T03:15:00+00:00", "1"),
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:20:00+00:00", "10.5"),
+        ("2026-01-01T00:40:00+00:00", "0.25"),
+        ("2026-01-01T01:00:00+00:00", "1.25"),
     ]
+    reset_time = "2026-01-01T00:40:00+00:00"
     provider, client = importer(
         httpx.MockTransport(
-            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    readings=readings,
+                    state_class="total",
+                    last_resets=[None, None, reset_time, reset_time],
+                ),
+            )
         ),
         household_load_entities=[
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "interval",
+                "state_class": "total",
                 "unit": "kWh",
                 "operation": "add",
             }
         ],
     )
     try:
-        with pytest.raises(HomeAssistantError, match="misaligned"):
-            provider.fetch(START, END, now=NOW)
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.75,)
+
+
+def test_total_rejects_a_decrease_without_last_reset_change() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:20:00+00:00", "10.5"),
+        ("2026-01-01T00:40:00+00:00", "0.25"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    readings=readings,
+                    state_class="total",
+                    last_resets=[None, None, None],
+                ),
+            )
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        with pytest.raises(HomeAssistantError, match="last_reset"):
+            provider.fetch(START, START + timedelta(hours=1), now=NOW)
     finally:
         client.close()
 
@@ -357,13 +425,13 @@ def test_fetch_rejects_negative_combined_load() -> None:
         household_load_entities=[
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "subtract",
             },
             {
                 "entity_id": SECOND_ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "add",
             },
@@ -391,13 +459,13 @@ def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
         household_load_entities=[
             {
                 "entity_id": ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "add",
             },
             {
                 "entity_id": SECOND_ENTITY_ID,
-                "reading_type": "cumulative",
+                "state_class": "total_increasing",
                 "unit": "kWh",
                 "operation": "add",
             },

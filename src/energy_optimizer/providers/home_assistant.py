@@ -135,7 +135,6 @@ class HomeAssistantLoadImporter:
             f"{base_url}/api/history/period/{encoded_start}"
             f"?end_time={quote(self._as_utc(end_time).isoformat(), safe='')}"
             f"&filter_entity_id={quote(entity_id)}"
-            "&minimal_response"
         )
 
     def _request(self, url: str, entity: HouseholdLoadEntityConfiguration) -> Any:
@@ -221,12 +220,19 @@ class HomeAssistantLoadImporter:
         end_time: datetime,
         entity: HouseholdLoadEntityConfiguration,
     ) -> tuple[list[float], datetime]:
-        parsed: list[tuple[datetime, float]] = []
-        previous_unit: str | None = None
+        raw_records: list[tuple[datetime, dict[str, Any]]] = []
         for record in records:
             timestamp = self._parse_timestamp(
                 record.get("last_updated", record.get("last_changed"))
             )
+            raw_records.append((timestamp, record))
+
+        raw_records.sort(key=lambda record: record[0])
+        parsed: list[tuple[datetime, float, datetime | None]] = []
+        previous_unit: str | None = None
+        previous_reset: datetime | None = None
+        previous_state_class: str | None = None
+        for timestamp, record in raw_records:
             state = record.get("state")
             if not isinstance(state, str) or state in {"unknown", "unavailable"}:
                 raise HomeAssistantError(
@@ -257,6 +263,35 @@ class HomeAssistantLoadImporter:
                     f"Home Assistant entity {entity.entity_id} is missing "
                     "unit_of_measurement"
                 )
+            if isinstance(attributes, dict) and "state_class" in attributes:
+                normalized_state_class = attributes["state_class"]
+                if not isinstance(normalized_state_class, str):
+                    raise HomeAssistantError(
+                        f"Home Assistant entity {entity.entity_id} has an invalid "
+                        "state_class"
+                    )
+            elif previous_state_class is not None:
+                normalized_state_class = previous_state_class
+            else:
+                normalized_state_class = entity.state_class
+            if normalized_state_class != entity.state_class:
+                raise HomeAssistantError(
+                    f"Home Assistant entity {entity.entity_id} reports state_class "
+                    f"{normalized_state_class!r}; expected {entity.state_class!r}"
+                )
+            if isinstance(attributes, dict) and "last_reset" in attributes:
+                raw_reset = attributes["last_reset"]
+                if raw_reset is None:
+                    normalized_reset = None
+                elif isinstance(raw_reset, str):
+                    normalized_reset = self._parse_timestamp(raw_reset)
+                else:
+                    raise HomeAssistantError(
+                        f"Home Assistant entity {entity.entity_id} has an invalid "
+                        "last_reset timestamp"
+                    )
+            else:
+                normalized_reset = previous_reset
             if normalized_unit in {"W", "kW"}:
                 raise HomeAssistantError(
                     f"Home Assistant entity {entity.entity_id} reports "
@@ -268,10 +303,11 @@ class HomeAssistantLoadImporter:
                     f"Home Assistant entity {entity.entity_id} reports incompatible "
                     f"unit {normalized_unit!r}; expected {entity.unit!r}"
                 )
-            parsed.append((timestamp, value))
+            parsed.append((timestamp, value, normalized_reset))
             previous_unit = normalized_unit
+            previous_reset = normalized_reset
+            previous_state_class = normalized_state_class
 
-        parsed.sort(key=lambda record: record[0])
         if not parsed:
             raise HomeAssistantError(
                 f"Home Assistant returned no usable history for {entity.entity_id}"
@@ -280,76 +316,56 @@ class HomeAssistantLoadImporter:
         end = self._as_utc(end_time)
         hour_count = int((end - start).total_seconds() // 3600)
         factor = {"Wh": 0.001, "kWh": 1.0, "MWh": 1000.0}[entity.unit]
-        timestamps = [timestamp for timestamp, _ in parsed]
+        timestamps = [timestamp for timestamp, _, _ in parsed]
         if len(timestamps) != len(set(timestamps)):
             raise HomeAssistantError(
                 f"Home Assistant entity {entity.entity_id} contains duplicate "
                 "timestamps"
             )
-        if entity.reading_type == "interval" and any(
-            timestamp.minute or timestamp.second or timestamp.microsecond
-            for timestamp in timestamps
-        ):
-            raise HomeAssistantError(
-                f"Home Assistant entity {entity.entity_id} has misaligned "
-                "timestamps; energy readings must be hourly"
-            )
-
-        values_by_timestamp = {timestamp: value * factor for timestamp, value in parsed}
-        if entity.reading_type == "interval":
-            expected_timestamps = [
-                start + timedelta(hours=hour) for hour in range(hour_count)
-            ]
-            missing = [
-                timestamp
-                for timestamp in expected_timestamps
-                if timestamp not in values_by_timestamp
-            ]
-            if missing:
-                raise HomeAssistantError(
-                    f"Home Assistant entity {entity.entity_id} is missing an "
-                    f"interval at {missing[0].isoformat()}"
-                )
-            return (
-                [values_by_timestamp[timestamp] for timestamp in expected_timestamps],
-                max(
-                    timestamp
-                    for timestamp in timestamps
-                    if timestamp in expected_timestamps
+        baseline_index = (
+            next(
+                (
+                    index
+                    for index, (timestamp, _, _) in enumerate(parsed)
+                    if timestamp > start
                 ),
+                len(parsed),
             )
-
-        for previous, following in zip(parsed, parsed[1:]):
-            if following[1] < previous[1]:
+            - 1
+        )
+        if baseline_index < 0:
+            raise HomeAssistantError(
+                f"Home Assistant cumulative energy entity {entity.entity_id} has no "
+                f"usable value at or before {start.isoformat()}; increase history "
+                "lookback"
+            )
+        baseline = parsed[baseline_index]
+        values = [0.0] * hour_count
+        previous_value = baseline[1]
+        previous_reset = baseline[2]
+        latest_observation = baseline[0]
+        for timestamp, value, reset in parsed[baseline_index + 1 :]:
+            if timestamp > end:
+                break
+            if value >= previous_value:
+                delta = value - previous_value
+            elif entity.state_class == "total_increasing":
+                delta = value
+            elif reset != previous_reset:
+                delta = value
+            else:
                 raise HomeAssistantError(
-                    f"Home Assistant cumulative energy entity {entity.entity_id} "
-                    f"reset between {previous[0].isoformat()} and "
-                    f"{following[0].isoformat()}"
+                    f"Home Assistant total entity {entity.entity_id} decreased "
+                    "without a changed last_reset timestamp"
                 )
-        expected_boundaries = [
-            start + timedelta(hours=hour) for hour in range(hour_count + 1)
-        ]
-        boundary_values: list[float] = []
-        boundary_observations: list[datetime] = []
-        record_index = 0
-        current_boundary: tuple[datetime, float] | None = None
-        for boundary in expected_boundaries:
-            while record_index < len(parsed) and parsed[record_index][0] <= boundary:
-                current_boundary = parsed[record_index]
-                record_index += 1
-            if current_boundary is None:
-                raise HomeAssistantError(
-                    f"Home Assistant cumulative energy entity {entity.entity_id} is "
-                    f"missing a usable value at {boundary.isoformat()}; increase "
-                    "history lookback or history coverage"
-                )
-            boundary_values.append(current_boundary[1] * factor)
-            boundary_observations.append(current_boundary[0])
-        values = [
-            later - earlier
-            for earlier, later in zip(boundary_values, boundary_values[1:])
-        ]
-        return values, max(boundary_observations)
+            elapsed_seconds = (timestamp - start).total_seconds()
+            if elapsed_seconds > 0:
+                hour = math.ceil(elapsed_seconds / 3600) - 1
+                values[hour] += delta * factor
+            previous_value = value
+            previous_reset = reset
+            latest_observation = timestamp
+        return values, latest_observation
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:

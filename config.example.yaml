@@ -39,12 +39,12 @@ home_assistant:
   token: replace-with-a-long-lived-access-token
   household_load_entities:
     - entity_id: sensor.household_energy
-      reading_type: cumulative
+      state_class: total_increasing
       unit: kWh
       operation: add
     - entity_id: sensor.ev_energy
-      reading_type: interval
-      unit: Wh
+      state_class: total
+      unit: kWh
       operation: subtract
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.

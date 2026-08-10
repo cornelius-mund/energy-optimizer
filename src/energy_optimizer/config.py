@@ -46,7 +46,7 @@ class HouseholdLoadEntityConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entity_id: str = Field(min_length=1, max_length=255)
-    reading_type: Literal["cumulative", "interval"]
+    state_class: Literal["total", "total_increasing"]
     unit: Literal["Wh", "kWh", "MWh"]
     operation: Literal["add", "subtract"]
 
@@ -77,12 +77,12 @@ class HomeAssistantConfiguration(BaseModel):
             if self.household_load_entity_id is None:
                 raise ValueError(
                     "household_load_entities is required; configure at least one "
-                    "energy entity with reading_type, unit, and operation"
+                    "energy entity with state_class, unit, and operation"
                 )
             self.household_load_entities = [
                 HouseholdLoadEntityConfiguration(
                     entity_id=self.household_load_entity_id,
-                    reading_type="cumulative",
+                    state_class="total_increasing",
                     unit="kWh",
                     operation="add",
                 )

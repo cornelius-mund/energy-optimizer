@@ -674,7 +674,7 @@ home_assistant:
   token: test-token
   household_load_entities:
     - entity_id: sensor.household_energy
-      reading_type: cumulative
+      state_class: total_increasing
       unit: kWh
       operation: add
   timeout_seconds: 10
