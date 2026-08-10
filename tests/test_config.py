@@ -108,3 +108,37 @@ def test_load_configuration_allows_optional_freshness_threshold(
 
     assert configuration.home_assistant is not None
     assert configuration.home_assistant.max_data_age_seconds is None
+
+
+def test_load_configuration_returns_persistence_directory(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION + "persistence:\n  directory: /var/lib/provider-data\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.persistence is not None
+    assert configuration.persistence.directory == Path("/var/lib/provider-data")
+
+
+def test_load_configuration_allows_persistence_without_provider(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "home_assistant:\n  base_url: http://homeassistant.local:8123\n"
+            "  token: test-token\n  household_load_entity_id: sensor.household_load\n"
+            "  timeout_seconds: 10\n  max_data_age_seconds: 7200\n",
+            "",
+        )
+        + "persistence:\n  directory: provider-data\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.persistence is not None
+    assert configuration.home_assistant is None

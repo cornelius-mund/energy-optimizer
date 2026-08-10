@@ -9,6 +9,11 @@ solver:
   name: highs
   time_limit_seconds: 60
 
+# Persist validated normalized data returned by configured providers. Mount
+# /app/data as a durable volume in container deployments.
+persistence:
+  directory: /app/data/provider-data
+
 # Optional Home Assistant provider settings. The token should be a long-lived
 # access token and must not be committed to source control.
 home_assistant:

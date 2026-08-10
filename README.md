@@ -111,11 +111,15 @@ contains `config.example.yaml` as a safe default:
 docker run --detach --name energy-optimizer \
   --publish 8000:8000 \
   --volume "$PWD/config.yaml:/app/config.yaml:ro" \
+  --volume energy-optimizer-data:/app/data \
   energy-optimizer
 ```
 
 The container listens on port `8000`, runs as a non-root user, and uses
 `ENERGY_OPTIMIZER_CONFIG` to select a different configuration path when needed.
+The example configuration stores normalized provider data under
+`/app/data/provider-data`; mount `/app/data` as a durable volume so data survives
+container replacement.
 The image healthcheck calls the service health endpoint. Check it directly with:
 
 ```bash
@@ -141,6 +145,26 @@ External data provider modules may support:
 
 External providers should be configurable and isolated from the optimization model. Provider data must be validated before use.
 
+### Normalized provider-data persistence
+
+When the optional `persistence.directory` setting is configured, the service
+stores the validated normalized data model returned by a configured provider.
+It does not store raw provider responses, client-only submissions, or optimizer
+snapshots. The normalized model is stored directly as JSON and is keyed by its
+data type, provider, and entity identifier. A temporary file is flushed and
+synced before atomic replacement; the previous valid value is retained as a
+backup. If the primary file is invalid after a restart, the backup is validated
+and restored. If neither copy is valid, retrieval returns a service-unavailable
+error and the invalid files are not silently accepted.
+
+`POST /api/v1/household-load` persists data only when its source matches the
+configured Home Assistant household-load provider. Source-less submissions and
+other providers are validated and returned but are not persisted. `GET
+/api/v1/household-load` retrieves the latest persisted normalized provider data.
+Battery and electric-vehicle persistence will use the same store when their
+normalized provider contracts are available; optimizer-owned state transitions
+remain outside this persistence boundary.
+
 ### Home Assistant household-load importer
 
 `HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's
@@ -164,8 +188,7 @@ hour. The lookback asks Home Assistant for an earlier state so the importer can
 carry the last known value into the first requested hour. The caller owns the
 lookback and polling policy. Call `is_fresh(data)` when the optional freshness
 threshold is configured to assess polling health. Polling, scheduling, caching,
-persistence, and orchestration are intentionally outside this feature and will
-be added later.
+and orchestration remain outside this provider adapter.
 
 ## Development
 

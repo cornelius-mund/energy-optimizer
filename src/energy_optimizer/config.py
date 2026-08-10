@@ -48,6 +48,17 @@ class HomeAssistantConfiguration(BaseModel):
     max_data_age_seconds: float | None = Field(default=None, gt=0)
 
 
+class PersistenceConfiguration(BaseModel):
+    """Filesystem location for normalized provider data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    directory: Path = Field(
+        default=Path("/var/lib/energy-optimizer/provider-data"),
+        description="Directory containing persisted normalized provider data",
+    )
+
+
 class Configuration(BaseModel):
     """Validated settings needed to start the service."""
 
@@ -57,6 +68,19 @@ class Configuration(BaseModel):
     grid: GridConfiguration
     solver: SolverConfiguration
     home_assistant: HomeAssistantConfiguration | None = None
+    persistence: PersistenceConfiguration | None = None
+
+    def is_configured_household_load_source(
+        self,
+        provider: str,
+        entity_id: str | None,
+    ) -> bool:
+        """Return whether a source identifies the configured load provider."""
+        return (
+            self.home_assistant is not None
+            and provider == "home-assistant"
+            and entity_id == self.home_assistant.household_load_entity_id
+        )
 
 
 def load_configuration(path: Path) -> Configuration:

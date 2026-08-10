@@ -656,6 +656,109 @@ def household_load_request() -> dict[str, object]:
     }
 
 
+def persistence_configuration(tmp_path: Path) -> Path:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        f"""
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+persistence:
+  directory: {tmp_path / "provider-data"}
+home_assistant:
+  base_url: http://homeassistant.local:8123
+  token: test-token
+  household_load_entity_id: sensor.household_load
+  timeout_seconds: 10
+""",
+        encoding="utf-8",
+    )
+    return configuration
+
+
+def test_household_load_provider_data_is_persisted_and_retrieved_after_restart(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+
+    with TestClient(app) as client:
+        write_response = client.post(
+            "/api/v1/household-load", json=household_load_request()
+        )
+        read_response = client.get("/api/v1/household-load")
+
+    assert write_response.status_code == 200
+    assert read_response.status_code == 200
+    assert read_response.json() == {
+        "status": "validated",
+        "schema_version": "1",
+        "start_time": "2026-01-01T00:00:00Z",
+        "interval_minutes": 60,
+        "load_kw": [1.2, 1.0],
+        "unit": "kW",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "sensor.household_load",
+        },
+        "retrieved_at": "2026-01-01T00:00:00Z",
+        "latest_observation_at": "2026-01-01T01:00:00Z",
+    }
+
+    with TestClient(app) as restarted_client:
+        restarted_response = restarted_client.get("/api/v1/household-load")
+
+    assert restarted_response.status_code == 200
+    assert restarted_response.json() == read_response.json()
+
+
+def test_household_load_direct_submission_is_not_persisted(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+    request = household_load_request()
+    request.pop("source")
+
+    with TestClient(app) as client:
+        write_response = client.post("/api/v1/household-load", json=request)
+        read_response = client.get("/api/v1/household-load")
+
+    assert write_response.status_code == 200
+    assert read_response.status_code == 404
+
+
+def test_household_load_persistence_reports_missing_configuration(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/household-load")
+
+    assert response.status_code == 503
+    assert "persistence is not configured" in response.text
+
+
 def grid_flow_request() -> dict[str, object]:
     return {
         "schema_version": "1",

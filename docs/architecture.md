@@ -29,6 +29,7 @@ src/energy_optimizer/
 │   ├── prices.py             # Electricity-price adapters
 │   ├── forecasts.py          # PV and weather adapters
 │   └── normalization.py      # External data to domain data conversion
+├── storage.py                # Durable normalized provider-data storage
 └── optimization/
     ├── model.py              # Pyomo MILP model construction
     ├── solver.py             # HiGHS integration
@@ -53,6 +54,7 @@ api -> application -> domain
 providers adapters -> providers.interfaces + domain
 optimization -> domain
 config -> configuration libraries only
+storage -> validated provider-independent data models
 ```
 
 - `api` is the outer transport layer. It validates HTTP data, invokes the
@@ -130,6 +132,14 @@ freshness health check, but does not start polling, schedule requests, cache
 results, persist data, or invoke the API layer. A later orchestration layer
 selects the requested period, history lookback, and polling cadence. Historical
 retention is independent of polling freshness.
+
+Normalized provider data may be persisted after validation when persistence is
+configured. The storage component stores the normalized provider model
+directly, not raw vendor responses or optimizer snapshots. Records are keyed by
+data type, provider, and entity identifier. Atomic replacement, validation on
+read, and a backup copy allow recovery from interrupted or corrupted writes.
+Only data with a configured provider identity is persisted; source-less API
+submissions remain request-scoped.
 
 ### Optimization
 
