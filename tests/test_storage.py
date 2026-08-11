@@ -51,8 +51,11 @@ def test_store_initializes_and_returns_normalized_data(tmp_path: Path) -> None:
     assert store.load(KEY, ADAPTER) == saved
     primary, backup = paths(tmp_path)
     expected_json = json.loads(ADAPTER.dump_json(saved))
-    assert json.loads(primary.read_text()) == expected_json
-    assert json.loads(backup.read_text()) == expected_json
+    expected_payload = ADAPTER.dump_json(saved, indent=2).decode() + "\n"
+    for path in (primary, backup):
+        contents = path.read_text()
+        assert contents == expected_payload
+        assert json.loads(contents) == expected_json
     assert "snapshot" not in primary.read_text().lower()
 
 
