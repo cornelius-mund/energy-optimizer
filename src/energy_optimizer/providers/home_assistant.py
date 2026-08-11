@@ -68,8 +68,8 @@ class HomeAssistantLoadImporter:
                 now=now,
             )
         except Exception as error:
-            if isinstance(error, HomeAssistantError) and "unavailable value" in str(
-                error
+            if isinstance(error, HomeAssistantError) and any(
+                marker in str(error) for marker in ("unknown", "unavailable")
             ):
                 logger.warning(
                     "event=provider_data_degraded component=home_assistant "
@@ -78,15 +78,14 @@ class HomeAssistantLoadImporter:
                     len(self.configuration.household_load_entities or []),
                     error,
                 )
-            else:
-                logger.error(
-                    "event=provider_fetch_failed component=home_assistant "
-                    "operation=fetch "
-                    "error_type=%s entity_count=%s",
-                    error.__class__.__name__,
-                    len(self.configuration.household_load_entities or []),
-                    exc_info=True,
-                )
+            logger.error(
+                "event=provider_fetch_failed component=home_assistant "
+                "operation=fetch "
+                "error_type=%s entity_count=%s",
+                error.__class__.__name__,
+                len(self.configuration.household_load_entities or []),
+                exc_info=True,
+            )
             raise
         logger.info(
             "event=provider_fetch_succeeded component=home_assistant operation=fetch "

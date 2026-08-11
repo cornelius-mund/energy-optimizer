@@ -198,9 +198,15 @@ def test_provider_failure_log_excludes_token_and_raw_state(
         client.close()
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
+    provider_failures = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=provider_fetch_failed")
+    ]
+    assert len(provider_failures) == 1
+    assert provider_failures[0].levelno == logging.ERROR
     assert any(
-        record.levelno == logging.WARNING
-        and record.getMessage().startswith("event=provider_data_degraded")
+        record.levelno == logging.WARNING and "unavailable" in record.getMessage()
         for record in caplog.records
     )
     assert "secret-provider-token" not in messages
