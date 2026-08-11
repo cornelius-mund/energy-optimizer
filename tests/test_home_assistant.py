@@ -297,6 +297,76 @@ def test_total_increasing_reset_mid_hour_preserves_energy_on_both_sides() -> Non
     assert data.load_kw == (1.75,)
 
 
+def test_total_increasing_skips_unavailable_observations_without_fabricating_energy(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:30:00+00:00", "unavailable"),
+        ("2026-01-01T01:30:00+00:00", "11.5"),
+        ("2026-01-01T02:30:00+00:00", "12.5"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    readings=readings,
+                    unit="kWh",
+                    state_class="total_increasing",
+                ),
+            )
+        )
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (0.0, 1.5)
+    assert "skipped them without assigning energy" in caplog.text
+    assert ENTITY_ID in caplog.text
+
+
+def test_total_increasing_skips_unknown_observations() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:30:00+00:00", "unknown"),
+        ("2026-01-01T01:00:00+00:00", "11.5"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        )
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.5,)
+
+
+def test_skips_unavailable_samples_outside_requested_window() -> None:
+    readings = [
+        ("2025-12-31T23:30:00+00:00", "unavailable"),
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T01:00:00+00:00", "11"),
+        ("2026-01-01T01:30:00+00:00", "unavailable"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        )
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.0, 0.0)
+
+
 def test_total_increasing_does_not_interpolate_between_observations() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
@@ -478,6 +548,47 @@ def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
         client.close()
 
     assert calls == 2
+
+
+def test_fetch_does_not_return_partial_data_when_entity_has_no_usable_history() -> None:
+    responses = {
+        ENTITY_ID: history_payload(),
+        SECOND_ENTITY_ID: history_payload(
+            entity_id=SECOND_ENTITY_ID,
+            readings=[
+                ("2026-01-01T00:00:00+00:00", "unavailable"),
+                ("2026-01-01T01:00:00+00:00", "unknown"),
+            ],
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+        ],
+    )
+    try:
+        with pytest.raises(HomeAssistantError, match="no usable history"):
+            provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
 
 
 def test_fetch_reports_http_failures() -> None:

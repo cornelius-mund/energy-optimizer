@@ -209,13 +209,16 @@ counter value is carried forward until the next observation. For
 added as post-reset energy. For `total`, a decrease is accepted only when
 Home Assistant's `last_reset` timestamp changes. Every observed increase within
 an hour is summed, so a reset in the middle of an hour preserves energy from
-both sides of the reset. Missing, unavailable, malformed, non-finite,
-incompatible, or failed entity data rejects the complete aggregate rather than
-producing a partial dataset. The token is a secret and must not be committed to
-source control. The importer raises actionable errors for authentication
-failures, missing or unavailable entities, malformed or non-numeric values,
-unsupported power units, invalid state classes, unmarked total resets, and
-request failures.
+both sides of the reset. `unknown` and `unavailable` history samples are
+skipped without assigning energy, and the importer logs the affected entity
+and time range. The next valid cumulative observation determines the delta;
+the delta is assigned to that observation's hour rather than interpolated
+across the skipped sample. An entity with no usable observations still rejects
+the complete aggregate, as do malformed, non-finite, incompatible, or failed
+entity responses. The token is a secret and must not be committed to source
+control. The importer raises actionable errors for authentication failures,
+missing history, malformed or non-numeric values, unsupported power units,
+invalid state classes, unmarked total resets, and request failures.
 
 For example, a household meter can be added while an EV meter is subtracted:
 
