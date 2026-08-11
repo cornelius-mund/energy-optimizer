@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
+
+from energy_optimizer.providers.interfaces import (
+    HOUSEHOLD_LOAD_MAX_VALUES,
+    HouseholdLoadData,
+)
 
 
 class ProviderDataStoreError(RuntimeError):
@@ -59,6 +66,15 @@ class ProviderDataStore:
             raise ProviderDataStoreError(
                 "normalized provider data failed validation before storage"
             ) from error
+
+        if isinstance(model, HouseholdLoadData):
+            _household_load_points(model)
+            existing = self.load(key, adapter)
+            if isinstance(existing, HouseholdLoadData):
+                model = cast(
+                    ModelT,
+                    merge_household_load_history(existing, model),
+                )
 
         payload = adapter.dump_json(model)
         primary_path, backup_path = self._paths(key)
@@ -152,3 +168,70 @@ class ProviderDataStore:
                 f"could not atomically write normalized provider data to {path}: "
                 f"{error}"
             ) from error
+
+
+def merge_household_load_history(
+    existing: HouseholdLoadData,
+    incoming: HouseholdLoadData,
+) -> HouseholdLoadData:
+    """Merge hourly household-load data, preferring the incoming values."""
+    existing_points = _household_load_points(existing)
+    incoming_points = _household_load_points(incoming)
+    points = existing_points | incoming_points
+    ordered_points = sorted(points.items())
+    if len(ordered_points) > HOUSEHOLD_LOAD_MAX_VALUES:
+        ordered_points = ordered_points[-HOUSEHOLD_LOAD_MAX_VALUES:]
+
+    timestamps = [timestamp for timestamp, _ in ordered_points]
+    if not timestamps or any(
+        later - earlier != _HOUR for earlier, later in zip(timestamps, timestamps[1:])
+    ):
+        raise ProviderDataStoreError(
+            "household-load history must contain contiguous hourly timestamps"
+        )
+
+    return HouseholdLoadData(
+        schema_version=incoming.schema_version,
+        start_time=timestamps[0],
+        interval_minutes=60,
+        load_kw=tuple(value for _, value in ordered_points),
+        unit=incoming.unit,
+        source=incoming.source,
+        retrieved_at=_as_utc(incoming.retrieved_at),
+        latest_observation_at=_as_utc(incoming.latest_observation_at),
+    )
+
+
+def _household_load_points(data: HouseholdLoadData) -> dict[datetime, float]:
+    """Validate and index one normalized hourly household-load series."""
+    start_time = _as_utc(data.start_time)
+    if start_time.minute or start_time.second or start_time.microsecond:
+        raise ProviderDataStoreError(
+            "household-load start_time must be aligned to the UTC hour"
+        )
+    if data.interval_minutes != 60 or data.unit != "kW":
+        raise ProviderDataStoreError("household-load data must use hourly kW values")
+    _as_utc(data.retrieved_at)
+    _as_utc(data.latest_observation_at)
+    if not data.load_kw:
+        raise ProviderDataStoreError("household-load history must not be empty")
+    points: dict[datetime, float] = {}
+    for index, value in enumerate(data.load_kw):
+        if not math.isfinite(value) or value < 0:
+            raise ProviderDataStoreError(
+                "household-load values must be finite and non-negative"
+            )
+        points[start_time + (index * _HOUR)] = float(value)
+    return points
+
+
+_HOUR = timedelta(hours=1)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Return a timezone-aware timestamp in UTC."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ProviderDataStoreError(
+            "household-load timestamps must include a timezone"
+        )
+    return value.astimezone(timezone.utc)

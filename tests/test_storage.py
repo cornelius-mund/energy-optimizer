@@ -1,12 +1,13 @@
 """Tests for durable normalized provider-data storage."""
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from pydantic import TypeAdapter
 
-from energy_optimizer.providers.interfaces import HouseholdLoadData
+from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import (
     ProviderDataKey,
     ProviderDataStore,
@@ -118,3 +119,62 @@ def test_invalid_write_does_not_replace_existing_data(tmp_path: Path) -> None:
 
 def test_missing_data_returns_none(tmp_path: Path) -> None:
     assert ProviderDataStore(tmp_path).load(KEY, ADAPTER) is None
+
+
+def household_load_data(
+    start_time: datetime,
+    values: list[float],
+    retrieved_at: datetime | None = None,
+) -> HouseholdLoadData:
+    retrieved = retrieved_at or start_time
+    return HouseholdLoadData(
+        schema_version="1",
+        start_time=start_time,
+        interval_minutes=60,
+        load_kw=tuple(values),
+        unit="kW",
+        source=SourceMetadata(provider="home-assistant", entity_id="household_load"),
+        retrieved_at=retrieved,
+        latest_observation_at=retrieved,
+    )
+
+
+def test_store_merges_hourly_history_and_incoming_values_win(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0, 3.0]))
+
+    merged = store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(
+            start + timedelta(hours=2),
+            [30.0, 4.0],
+            retrieved_at=start + timedelta(hours=4),
+        ),
+    )
+
+    assert merged.start_time == start
+    assert merged.load_kw == (1.0, 2.0, 30.0, 4.0)
+    assert merged.retrieved_at == start + timedelta(hours=4)
+
+
+def test_store_retains_only_the_newest_ten_years_of_household_load(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    values = [1.0] * 87_672
+    store.save(KEY, ADAPTER, household_load_data(start, values))
+
+    merged = store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start + timedelta(hours=87_671), [2.0, 3.0]),
+    )
+
+    assert len(merged.load_kw) == 87_672
+    assert merged.start_time == start + timedelta(hours=1)
+    assert merged.load_kw[-2:] == (2.0, 3.0)

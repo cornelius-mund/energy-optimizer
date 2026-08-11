@@ -19,6 +19,7 @@ from energy_optimizer.config import (
 )
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.interfaces import (
+    HOUSEHOLD_LOAD_MAX_VALUES,
     HouseholdLoadData,
     SourceMetadata,
 )
@@ -416,7 +417,18 @@ def build_configured_orchestrator(
             schedule: DataSourceScheduleConfiguration,
         ) -> HouseholdLoadData:
             end_time = now.replace(minute=0, second=0, microsecond=0)
-            start_time = end_time - timedelta(hours=schedule.horizon_hours)
+            key = ProviderDataKey(
+                data_type="household-load",
+                provider="home-assistant",
+                entity_id=home_assistant.household_load_source_id,
+            )
+            persisted = store.load(key, TypeAdapter(HouseholdLoadData))
+            if persisted is None:
+                start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
+            else:
+                start_time = persisted.start_time + timedelta(
+                    hours=len(persisted.load_kw) - 1
+                )
             return importer.fetch(
                 start_time,
                 end_time,

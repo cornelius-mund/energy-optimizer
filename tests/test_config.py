@@ -187,7 +187,6 @@ def test_load_configuration_returns_orchestration_settings(tmp_path: Path) -> No
         + "  sources:\n"
         + "    household_load:\n"
         + "      interval_seconds: 300\n"
-        + "      horizon_hours: 12\n"
         + "      history_lookback_seconds: 3600\n"
         + "  optimization:\n"
         + "    enabled: true\n"
@@ -201,11 +200,27 @@ def test_load_configuration_returns_orchestration_settings(tmp_path: Path) -> No
     assert configuration.orchestration.startup_fetch is False
     schedule = configuration.orchestration.sources["household_load"]
     assert schedule.interval_seconds == 300
-    assert schedule.horizon_hours == 12
     assert schedule.history_lookback_seconds == 3600
     assert configuration.orchestration.optimization.required_sources == [
         "household_load"
     ]
+
+
+def test_load_configuration_rejects_removed_horizon_setting(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION
+        + "persistence:\n  directory: provider-data\n"
+        + "orchestration:\n"
+        + "  sources:\n"
+        + "    household_load:\n"
+        + "      interval_seconds: 300\n"
+        + "      horizon_hours: 12\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="horizon_hours"):
+        load_configuration(path)
 
 
 def test_load_configuration_rejects_orchestration_without_persistence(

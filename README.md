@@ -159,7 +159,9 @@ error and the invalid files are not silently accepted.
 
 `POST /api/v1/household-load` persists data only when its source matches the
 configured Home Assistant household-load provider. Source-less submissions and
-other providers are validated and returned but are not persisted. `GET
+other providers are validated and returned but are not persisted. Matching
+household-load submissions merge by hourly timestamp, with incoming values
+overwriting duplicates and the oldest values removed beyond 87,672 hours. `GET
 /api/v1/household-load` retrieves the latest persisted normalized provider data.
 Battery and electric-vehicle persistence will use the same store when their
 normalized provider contracts are available; optimizer-owned state transitions
@@ -169,11 +171,13 @@ remain outside this persistence boundary.
 
 The optional `orchestration` configuration schedules registered providers without
 putting polling or scheduling behavior in provider adapters. Each source has an
-independent `interval_seconds`, requested `horizon_hours`, and optional history
-lookback. With `startup_fetch: true`, enabled sources are fetched when the service
-starts; failed attempts leave the last valid persisted data in place and are
-reported through service logs. Missed intervals are not replayed: the next run is
-scheduled from the completed attempt.
+independent `interval_seconds` and optional provider history lookback. With
+`startup_fetch: true`, enabled sources are fetched when the service starts; failed
+attempts leave the last valid persisted data in place and are reported through
+service logs. Missed intervals are not replayed: the next run is scheduled from
+the completed attempt. Household-load collection bootstraps with the API maximum
+of 87,672 hourly values and later requests begin at the final persisted hour,
+intentionally overlapping it for correction.
 
 Scheduled collection requires `persistence.directory`, so normalized data survives
 application restarts. Automatic plan generation is disabled until an optimization
@@ -403,7 +407,10 @@ HTTP 422 with field-level validation details.
 ### Household-load API
 
 `POST /api/v1/household-load` validates a normalized hourly household-load
-series. The versioned request contains:
+series. When the source matches the configured Home Assistant provider, its
+persisted history is merged by hourly timestamp with incoming values taking
+precedence and a maximum of 87,672 values retained. The versioned request
+contains:
 
 - `schema_version: "1"`
 - A timezone-aware `start_time`

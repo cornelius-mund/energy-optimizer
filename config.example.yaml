@@ -15,7 +15,8 @@ persistence:
   directory: /app/data/provider-data
 
 # Optional scheduled provider retrieval. The source name must match a registered
-# provider, and each source has its own polling interval.
+# provider, and each source has its own polling interval. Household-load history
+# bootstraps at ten years and then advances from the final persisted hour.
 orchestration:
   enabled: false
   startup_fetch: true
@@ -23,7 +24,6 @@ orchestration:
     household_load:
       enabled: true
       interval_seconds: 3600
-      horizon_hours: 24
       history_lookback_seconds: 3600
   optimization:
     # Enable after an optimization plan generator is available.

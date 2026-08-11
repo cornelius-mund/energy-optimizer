@@ -116,13 +116,12 @@ class PersistenceConfiguration(BaseModel):
 
 
 class DataSourceScheduleConfiguration(BaseModel):
-    """Polling and requested-period settings for one data source."""
+    """Polling and provider-history settings for one data source."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     interval_seconds: float = Field(gt=0)
-    horizon_hours: int = Field(default=24, gt=0, le=168)
     history_lookback_seconds: float = Field(default=0, ge=0)
 
 
