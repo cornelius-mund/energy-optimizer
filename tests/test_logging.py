@@ -1,6 +1,8 @@
 """Tests for operational logging configuration and safe log context."""
 
 import logging
+import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +20,11 @@ from energy_optimizer.config import (
     OrchestrationConfiguration,
     load_configuration,
 )
-from energy_optimizer.logging_config import configure_logging, resolve_log_level
+from energy_optimizer.logging_config import (
+    ConsistentFormatter,
+    configure_logging,
+    resolve_log_level,
+)
 from energy_optimizer.orchestration import ProviderOrchestrator, ProviderRegistration
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
@@ -49,6 +55,137 @@ def test_supported_log_levels_are_configurable(level: str) -> None:
 def test_invalid_log_level_is_a_configuration_error() -> None:
     with pytest.raises(ConfigurationError, match="Invalid ENERGY_OPTIMIZER_LOG_LEVEL"):
         resolve_log_level("TRACE")
+
+
+def test_log_formatter_starts_each_line_with_level_and_timestamp() -> None:
+    formatter = ConsistentFormatter()
+    record = logging.LogRecord(
+        name="test",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="first line\nsecond line",
+        args=(),
+        exc_info=None,
+    )
+    record.created = datetime(2026, 8, 11, 10, 42, 36, tzinfo=timezone.utc).timestamp()
+
+    rendered = formatter.format(record)
+
+    lines = rendered.splitlines()
+    assert len(lines) == 2
+    assert all(re.match(r"^WARNING 2026-08-11T10:42:36\+0000 ", line) for line in lines)
+    assert lines[0].endswith("first line")
+    assert lines[1].endswith("second line")
+
+
+def test_exception_traceback_lines_use_the_same_log_prefix() -> None:
+    formatter = ConsistentFormatter()
+    try:
+        raise RuntimeError("provider offline")
+    except RuntimeError:
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname=__file__,
+            lineno=1,
+            msg="request failed",
+            args=(),
+            exc_info=sys.exc_info(),
+        )
+
+    rendered = formatter.format(record)
+
+    assert all(
+        re.match(r"^ERROR \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4} ", line)
+        for line in rendered.splitlines()
+    )
+    assert "RuntimeError: provider offline" in rendered
+
+
+def test_third_party_loggers_use_one_handler_and_formatter(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("INFO")
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    httpx_logger = logging.getLogger("httpx")
+
+    uvicorn_logger.info("server ready")
+    httpx_logger.info("HTTP Request: GET /health")
+
+    output = capsys.readouterr().out.splitlines()
+    assert len(output) == 2
+    assert all(
+        re.match(r"^INFO \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4} ", line)
+        for line in output
+    )
+    assert output[0].endswith("server ready")
+    assert output[1].endswith("HTTP Request: GET /health")
+    assert (
+        len(
+            [
+                handler
+                for handler in logging.getLogger().handlers
+                if getattr(handler, "_energy_optimizer_handler", False)
+            ]
+        )
+        == 1
+    )
+
+
+def test_configure_logging_is_idempotent() -> None:
+    configure_logging("INFO")
+    configure_logging("DEBUG")
+
+    owned_handlers = [
+        handler
+        for handler in logging.getLogger().handlers
+        if getattr(handler, "_energy_optimizer_handler", False)
+    ]
+    assert len(owned_handlers) == 1
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_module_entrypoint_bootstraps_logging_before_starting_uvicorn(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import energy_optimizer.__main__ as entrypoint
+
+    calls: list[tuple[str, object]] = []
+
+    def bootstrap() -> None:
+        calls.append(("bootstrap", None))
+
+    def run(application: str, **options: object) -> None:
+        calls.append(("run", (application, options)))
+
+    monkeypatch.setattr(
+        entrypoint,
+        "bootstrap_logging",
+        bootstrap,
+    )
+    monkeypatch.setattr(
+        "uvicorn.run",
+        run,
+    )
+
+    entrypoint.main()
+
+    assert calls == [
+        ("bootstrap", None),
+        (
+            "run",
+            (
+                "energy_optimizer.api:app",
+                {
+                    "host": "0.0.0.0",
+                    "port": 8000,
+                    "log_config": None,
+                    "access_log": False,
+                },
+            ),
+        ),
+    ]
 
 
 def test_invalid_environment_log_level_fails_startup(

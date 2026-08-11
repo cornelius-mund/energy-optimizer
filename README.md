@@ -86,8 +86,9 @@ Set `ENERGY_OPTIMIZER_LOG_LEVEL` to `DEBUG`, `INFO`, `WARNING`, `ERROR`,
 `CRITICAL`, or `NOTSET` to override the default `INFO` minimum log level. The
 service writes structured, container-friendly logs to standard output and
 includes the event, component, operation, status, request ID, and relevant
-time or record-count context. Invalid log-level values stop startup with a
-configuration error.
+time or record-count context. Every Python log uses the format
+`LEVEL TIMESTAMP MESSAGE`, including Uvicorn and HTTP client records. Invalid
+log-level values stop startup with a configuration error.
 
 Request completion is logged once by the service with an `X-Request-ID`
 response header. Uvicorn access logging is disabled to avoid duplicate access
@@ -314,10 +315,11 @@ The service validates the YAML structure and types during startup. Missing,
 malformed, or invalid configuration stops startup with an error identifying the
 file and invalid fields.
 
-Start the service with Uvicorn:
+Start the service through the package entrypoint so logging is configured
+before Uvicorn starts:
 
 ```bash
-uv run uvicorn energy_optimizer.api:app --host 0.0.0.0 --port 8000
+uv run python -m energy_optimizer
 ```
 
 Check that it is running:
