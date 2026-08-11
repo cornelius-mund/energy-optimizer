@@ -1,6 +1,7 @@
 """Tests for durable normalized provider-data storage."""
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -98,6 +99,29 @@ def test_store_recovers_primary_after_restart(tmp_path: Path) -> None:
     current = restarted_store.load(KEY, ADAPTER)
     assert current is not None
     assert current.load_kw == (1.2, 1.0)
+
+
+def test_store_logs_ndjson_parse_timing_without_payload(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.storage"):
+        loaded = store.load(KEY, ADAPTER)
+
+    assert loaded is not None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=persistence_load_started" in messages
+    assert "event=persistence_ndjson_read_started" in messages
+    assert "event=persistence_ndjson_parsed" in messages
+    assert "event=persistence_load_completed" in messages
+    assert "format=ndjson" in messages
+    assert "record_count=2" in messages
+    assert "retained_count=2" in messages
+    assert "duration_seconds=" in messages
+    assert "load_kw" not in messages
 
 
 def test_store_recovers_invalid_primary_from_backup(tmp_path: Path) -> None:

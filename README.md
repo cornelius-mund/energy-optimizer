@@ -100,6 +100,13 @@ response header. Uvicorn access logging is disabled to avoid duplicate access
 records. Logs never include authorization headers, Home Assistant tokens, raw
 provider responses, complete request bodies, or complete energy series.
 
+Startup diagnostics are emitted at `INFO` level. The `service_*` events identify
+configuration loading, persistence-store creation, orchestrator construction, and
+service readiness. When scheduled orchestration restores persisted data,
+`orchestration_restore_*` events identify the logical source and duration.
+Household-load persistence emits `persistence_ndjson_*` events with parse status,
+record counts, file size, and duration, without logging stored values.
+
 Configuration is expected to contain parameters such as:
 
 - Time resolution

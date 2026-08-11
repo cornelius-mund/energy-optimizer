@@ -15,10 +15,14 @@ from pytest import LogCaptureFixture, MonkeyPatch
 
 from energy_optimizer.api import app
 from energy_optimizer.config import (
+    Configuration,
     ConfigurationError,
     DataSourceScheduleConfiguration,
+    GridConfiguration,
     HomeAssistantConfiguration,
     OrchestrationConfiguration,
+    PersistenceConfiguration,
+    SolverConfiguration,
     load_configuration,
 )
 from energy_optimizer.logging_config import (
@@ -26,7 +30,11 @@ from energy_optimizer.logging_config import (
     configure_logging,
     resolve_log_level,
 )
-from energy_optimizer.orchestration import ProviderOrchestrator, ProviderRegistration
+from energy_optimizer.orchestration import (
+    ProviderOrchestrator,
+    ProviderRegistration,
+    build_configured_orchestrator,
+)
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
@@ -351,6 +359,82 @@ def test_api_request_log_contains_request_context_and_not_request_body(
     assert "event=service_started" in messages
     assert "event=service_stopping" in messages
     assert "event=service_stopped" in messages
+
+
+def test_api_startup_logs_each_lifecycle_phase(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(MINIMAL_CONFIGURATION, encoding="utf-8")
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    expected_events = (
+        "service_lifespan_entered",
+        "service_logging_configured",
+        "service_configuration_load_started",
+        "service_configuration_loaded",
+        "service_persistence_store_initializing",
+        "service_persistence_store_initialized",
+        "service_orchestrator_build_started",
+        "service_orchestrator_built",
+        "service_started",
+    )
+    for event in expected_events:
+        assert f"event={event}" in messages
+    assert "path=config.yaml" in messages
+
+
+def test_orchestrator_restore_logs_duration_and_logical_source(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    configuration = HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "secret-provider-token",
+            "household_load_entities": [
+                {
+                    "entity_id": "sensor.household_energy",
+                    "state_class": "total_increasing",
+                    "unit": "kWh",
+                    "operation": "add",
+                }
+            ],
+            "timeout_seconds": 5,
+        }
+    )
+    orchestration = OrchestrationConfiguration(
+        enabled=True,
+        sources={
+            "household_load": DataSourceScheduleConfiguration(
+                interval_seconds=300,
+            )
+        },
+    )
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
+        build_configured_orchestrator(
+            configuration=Configuration(
+                time_resolution_minutes=60,
+                grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+                solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+                home_assistant=configuration,
+                persistence=PersistenceConfiguration(directory=tmp_path),
+                orchestration=orchestration,
+            ),
+            store=ProviderDataStore(tmp_path),
+        )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=orchestration_restore_started" in messages
+    assert "event=orchestration_restore_completed" in messages
+    assert "source=household_load" in messages
+    assert "duration_seconds=" in messages
+    assert "secret-provider-token" not in messages
 
 
 def test_api_failure_log_uses_error_level_without_payload(

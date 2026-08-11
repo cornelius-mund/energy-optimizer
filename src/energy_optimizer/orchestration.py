@@ -8,6 +8,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any, Callable, Literal, Mapping
 
 from pydantic import TypeAdapter
@@ -129,25 +130,36 @@ class ProviderOrchestrator:
         self._history: deque[OrchestrationCycle] = deque(maxlen=100)
         for registration in self.registrations:
             if registration.load is not None:
+                restore_started_at = perf_counter()
+                logger.info(
+                    "event=orchestration_restore_started component=orchestration "
+                    "operation=restore source=%s",
+                    registration.name,
+                )
                 try:
                     data = registration.load()
                 except Exception as error:
                     logger.error(
                         "event=orchestration_restore_failed component=orchestration "
-                        "operation=restore source=%s error_type=%s error=%s",
+                        "operation=restore source=%s error_type=%s error=%s "
+                        "duration_seconds=%.3f",
                         registration.name,
                         error.__class__.__name__,
                         error,
+                        perf_counter() - restore_started_at,
                         exc_info=True,
                     )
                 else:
                     if data is not None:
                         self._latest_data[registration.name] = data
-                        logger.info(
-                            "event=orchestration_source_restored "
-                            "component=orchestration operation=restore source=%s",
-                            registration.name,
-                        )
+                    logger.info(
+                        "event=orchestration_restore_completed "
+                        "component=orchestration operation=restore source=%s "
+                        "status=%s duration_seconds=%.3f",
+                        registration.name,
+                        "restored" if data is not None else "empty",
+                        perf_counter() - restore_started_at,
+                    )
         logger.info(
             "event=orchestration_configured component=orchestration operation=startup "
             "source_count=%s optimization_enabled=%s",

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+
 from energy_optimizer.logging_config import bootstrap_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     """Configure logging before starting Uvicorn."""
     bootstrap_logging()
+    logger.info(
+        "event=process_logging_bootstrapped component=process operation=startup"
+    )
 
     import uvicorn
 
