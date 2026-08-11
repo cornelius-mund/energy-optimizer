@@ -119,7 +119,7 @@ class HomeAssistantLoadImporter:
         self._validate_period(start_time, effective_end_time, history_lookback_seconds)
         start = self._as_utc(start_time)
         end = self._as_utc(effective_end_time)
-        contributions: list[tuple[list[float], str]] = []
+        contributions: list[tuple[list[float], str, datetime]] = []
         observations: list[datetime] = []
         for entity in self.configuration.household_load_entities or []:
             query_start = start - timedelta(seconds=history_lookback_seconds)
@@ -140,26 +140,34 @@ class HomeAssistantLoadImporter:
                 entity.entity_id,
                 len(records),
             )
-            values, latest_observation = self._normalize_records(
+            values, entity_start, latest_observation = self._normalize_records(
                 records, start, end, entity
             )
-            contributions.append((values, entity.operation))
+            contributions.append((values, entity.operation, entity_start))
             observations.append(latest_observation)
 
         if not contributions:
             raise HomeAssistantError(
                 "no Home Assistant household-load energy entities are configured"
             )
-        value_count = len(contributions[0][0])
-        if any(len(values) != value_count for values, _ in contributions):
+        aggregate_start = max(start for _, _, start in contributions)
+        if aggregate_start >= end:
             raise HomeAssistantError(
-                "Home Assistant household-load entities returned misaligned hourly "
-                "series"
+                "Home Assistant household-load entities have no complete hourly "
+                "history in the requested period"
             )
+        value_count = int((end - aggregate_start).total_seconds() // 3600)
         values = [0.0] * value_count
-        for contribution, operation in contributions:
+        for contribution, operation, contribution_start in contributions:
+            offset = int((aggregate_start - contribution_start).total_seconds() // 3600)
+            aligned = contribution[offset : offset + value_count]
+            if len(aligned) != value_count:
+                raise HomeAssistantError(
+                    "Home Assistant household-load entities returned misaligned "
+                    "hourly series"
+                )
             sign = 1.0 if operation == "add" else -1.0
-            for index, value in enumerate(contribution):
+            for index, value in enumerate(aligned):
                 values[index] += sign * value
         for index, value in enumerate(values):
             if not math.isfinite(value) or value < -1e-9:
@@ -172,7 +180,7 @@ class HomeAssistantLoadImporter:
 
         return HouseholdLoadData(
             schema_version="1",
-            start_time=self._as_utc(start_time),
+            start_time=aggregate_start,
             interval_minutes=60,
             load_kw=tuple(values),
             unit="kW",
@@ -291,7 +299,7 @@ class HomeAssistantLoadImporter:
         start_time: datetime,
         end_time: datetime,
         entity: HouseholdLoadEntityConfiguration,
-    ) -> tuple[list[float], datetime]:
+    ) -> tuple[list[float], datetime, datetime]:
         raw_records: list[tuple[datetime, dict[str, Any]]] = []
         skipped_records: list[datetime] = []
         for record in records:
@@ -408,7 +416,6 @@ class HomeAssistantLoadImporter:
             )
         start = self._as_utc(start_time)
         end = self._as_utc(end_time)
-        hour_count = int((end - start).total_seconds() // 3600)
         factor = {"Wh": 0.001, "kWh": 1.0, "MWh": 1000.0}[entity.unit]
         timestamps = [timestamp for timestamp, _, _ in parsed]
         if len(timestamps) != len(set(timestamps)):
@@ -427,13 +434,25 @@ class HomeAssistantLoadImporter:
             )
             - 1
         )
+        effective_start = start
         if baseline_index < 0:
-            raise HomeAssistantError(
-                f"Home Assistant cumulative energy entity {entity.entity_id} has no "
-                f"usable value at or before {start.isoformat()}; increase history "
-                "lookback"
+            baseline_index = 0
+            effective_start = self._first_complete_hour(parsed[baseline_index][0])
+            logger.info(
+                "event=provider_history_truncated component=home_assistant "
+                "operation=normalize entity_id=%s requested_start=%s "
+                "available_start=%s",
+                entity.entity_id,
+                start,
+                effective_start,
             )
         baseline = parsed[baseline_index]
+        hour_count = int((end - effective_start).total_seconds() // 3600)
+        if hour_count <= 0:
+            raise HomeAssistantError(
+                f"Home Assistant entity {entity.entity_id} has no complete hourly "
+                "history after its earliest usable observation"
+            )
         values = [0.0] * hour_count
         previous_value = baseline[1]
         previous_reset = baseline[2]
@@ -452,14 +471,14 @@ class HomeAssistantLoadImporter:
                     f"Home Assistant total entity {entity.entity_id} decreased "
                     "without a changed last_reset timestamp"
                 )
-            elapsed_seconds = (timestamp - start).total_seconds()
+            elapsed_seconds = (timestamp - effective_start).total_seconds()
             if elapsed_seconds > 0:
                 hour = math.ceil(elapsed_seconds / 3600) - 1
                 values[hour] += delta * factor
             previous_value = value
             previous_reset = reset
             latest_observation = timestamp
-        return values, latest_observation
+        return values, effective_start, latest_observation
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:
@@ -491,6 +510,17 @@ class HomeAssistantLoadImporter:
     def _latest_completed_hour(value: datetime) -> datetime:
         """Return the UTC boundary of the latest completed hourly interval."""
         return value.replace(minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _next_hour(value: datetime) -> datetime:
+        """Return the first UTC hour that starts after an observation."""
+        return value.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+    @classmethod
+    def _first_complete_hour(cls, value: datetime) -> datetime:
+        """Return the first aligned hour that follows an unbootstrapped baseline."""
+        aligned = value.replace(minute=0, second=0, microsecond=0)
+        return aligned if value == aligned else cls._next_hour(value)
 
     @staticmethod
     def _validate_period(

@@ -143,9 +143,11 @@ entities contribute to it. The importer exposes an optional freshness health
 check, but does not start polling, schedule requests, cache results, persist
 results, or invoke the API layer. The orchestration layer selects the requested
 period, history lookback, and polling cadence. An empty household-load store
-requests 87,672 hourly values through the latest completed UTC hour. Later
-requests begin at the final persisted hour so overlapping values can correct
-history. Historical retention is independent of polling freshness.
+requests up to 87,672 hourly values through the latest completed UTC hour; when
+Home Assistant retains less history, normalization starts at the earliest safely
+derivable hour instead of fabricating older values. Later requests begin at the
+final persisted hour so overlapping values can correct history. Historical
+retention is independent of polling freshness.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model

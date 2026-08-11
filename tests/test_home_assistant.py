@@ -136,6 +136,70 @@ def test_total_increasing_observations_need_not_be_hour_aligned() -> None:
     assert data.load_kw == (0.5, 1.0, 2.0, 3.0)
 
 
+def test_fetch_uses_available_history_when_requested_start_predates_retention() -> None:
+    requested_start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=history_payload()))
+    )
+    try:
+        data = provider.fetch(requested_start, end, now=NOW)
+    finally:
+        client.close()
+
+    assert data.start_time == START
+    assert data.load_kw == (1.0, 2.0, 3.0, 4.0)
+
+
+def test_fetch_aligns_entities_to_the_latest_available_start() -> None:
+    responses = {
+        ENTITY_ID: history_payload(),
+        SECOND_ENTITY_ID: history_payload(
+            entity_id=SECOND_ENTITY_ID,
+            readings=[
+                ("2026-01-01T00:30:00+00:00", "0.25"),
+                ("2026-01-01T01:30:00+00:00", "0.75"),
+                ("2026-01-01T02:30:00+00:00", "1.5"),
+                ("2026-01-01T03:30:00+00:00", "2.5"),
+            ],
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        return httpx.Response(200, json=responses[entity_id])
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "subtract",
+            },
+        ],
+    )
+    try:
+        data = provider.fetch(
+            datetime(2025, 1, 1, tzinfo=timezone.utc),
+            datetime(2026, 1, 1, 4, tzinfo=timezone.utc),
+            now=NOW,
+        )
+    finally:
+        client.close()
+
+    assert data.start_time == datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+    assert data.load_kw == (1.5, 2.25, 3.0)
+
+
 def test_fetch_converts_total_increasing_energy_and_unit() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "1000"),
