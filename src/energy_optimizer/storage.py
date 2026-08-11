@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ from energy_optimizer.providers.interfaces import (
 
 class ProviderDataStoreError(RuntimeError):
     """Raised when normalized provider data cannot be stored or recovered."""
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,9 +64,23 @@ class ProviderDataStore:
         data: object,
     ) -> ModelT:
         """Validate and atomically save one normalized provider data model."""
+        logger.debug(
+            "event=persistence_save_started component=storage operation=save "
+            "data_type=%s provider=%s entity_id=%s",
+            key.data_type,
+            key.provider,
+            key.entity_id,
+        )
         try:
             model = adapter.validate_python(data)
         except ValidationError as error:
+            logger.error(
+                "event=persistence_save_failed component=storage operation=save "
+                "data_type=%s provider=%s entity_id=%s error_type=ValidationError",
+                key.data_type,
+                key.provider,
+                key.entity_id,
+            )
             raise ProviderDataStoreError(
                 "normalized provider data failed validation before storage"
             ) from error
@@ -81,6 +99,13 @@ class ProviderDataStore:
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
         except OSError as error:
+            logger.error(
+                "event=persistence_save_failed component=storage operation=save "
+                "data_type=%s provider=%s entity_id=%s error_type=OSError",
+                key.data_type,
+                key.provider,
+                key.entity_id,
+            )
             raise ProviderDataStoreError(
                 f"could not create normalized provider-data directory "
                 f"{self.directory}: {error}"
@@ -89,10 +114,51 @@ class ProviderDataStore:
         current = self._read_valid(primary_path, adapter)
         backup = self._read_valid(backup_path, adapter)
         if current is not None:
-            self._atomic_write(backup_path, current[0])
+            try:
+                self._atomic_write(backup_path, current[0])
+            except ProviderDataStoreError:
+                logger.error(
+                    "event=persistence_save_failed component=storage operation=save "
+                    "data_type=%s provider=%s entity_id=%s error_type=WriteError",
+                    key.data_type,
+                    key.provider,
+                    key.entity_id,
+                    exc_info=True,
+                )
+                raise
         elif backup is None:
-            self._atomic_write(backup_path, payload)
-        self._atomic_write(primary_path, payload)
+            try:
+                self._atomic_write(backup_path, payload)
+            except ProviderDataStoreError:
+                logger.error(
+                    "event=persistence_save_failed component=storage operation=save "
+                    "data_type=%s provider=%s entity_id=%s error_type=WriteError",
+                    key.data_type,
+                    key.provider,
+                    key.entity_id,
+                    exc_info=True,
+                )
+                raise
+        try:
+            self._atomic_write(primary_path, payload)
+        except ProviderDataStoreError:
+            logger.error(
+                "event=persistence_save_failed component=storage operation=save "
+                "data_type=%s provider=%s entity_id=%s error_type=WriteError",
+                key.data_type,
+                key.provider,
+                key.entity_id,
+                exc_info=True,
+            )
+            raise
+        logger.info(
+            "event=persistence_succeeded component=storage operation=save "
+            "data_type=%s provider=%s entity_id=%s record_count=%s",
+            key.data_type,
+            key.provider,
+            key.entity_id,
+            len(model.load_kw) if isinstance(model, HouseholdLoadData) else "unknown",
+        )
         return model
 
     def load(
@@ -101,6 +167,13 @@ class ProviderDataStore:
         adapter: TypeAdapter[ModelT],
     ) -> ModelT | None:
         """Load and validate a normalized model, recovering a damaged primary."""
+        logger.debug(
+            "event=persistence_load_started component=storage operation=load "
+            "data_type=%s provider=%s entity_id=%s",
+            key.data_type,
+            key.provider,
+            key.entity_id,
+        )
         primary_path, backup_path = self._paths(key)
         primary = self._read_valid(primary_path, adapter)
         if primary is not None:
@@ -108,12 +181,38 @@ class ProviderDataStore:
 
         backup = self._read_valid(backup_path, adapter)
         if backup is not None:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            self._atomic_write(primary_path, backup[0])
+            logger.warning(
+                "event=persistence_recovered component=storage operation=load "
+                "data_type=%s provider=%s entity_id=%s source=backup",
+                key.data_type,
+                key.provider,
+                key.entity_id,
+            )
+            try:
+                self.directory.mkdir(parents=True, exist_ok=True)
+                self._atomic_write(primary_path, backup[0])
+            except OSError, ProviderDataStoreError:
+                logger.error(
+                    "event=persistence_recovery_failed component=storage "
+                    "operation=load "
+                    "data_type=%s provider=%s entity_id=%s error_type=WriteError",
+                    key.data_type,
+                    key.provider,
+                    key.entity_id,
+                    exc_info=True,
+                )
+                raise
             return backup[1]
 
         if not primary_path.exists() and not backup_path.exists():
             return None
+        logger.error(
+            "event=persistence_recovery_failed component=storage operation=load "
+            "data_type=%s provider=%s entity_id=%s error_type=InvalidData",
+            key.data_type,
+            key.provider,
+            key.entity_id,
+        )
         raise ProviderDataStoreError(
             f"normalized provider data is invalid and cannot be recovered for "
             f"{key.data_type}/{key.provider}/{key.entity_id or 'default'}"
@@ -136,6 +235,11 @@ class ProviderDataStore:
         except FileNotFoundError:
             return None
         except OSError as error:
+            logger.error(
+                "event=persistence_read_failed component=storage operation=read "
+                "path=%s error_type=OSError",
+                path,
+            )
             raise ProviderDataStoreError(
                 f"could not read normalized provider data from {path}: {error}"
             ) from error
@@ -178,6 +282,13 @@ def merge_household_load_history(
     existing_points = _household_load_points(existing)
     incoming_points = _household_load_points(incoming)
     points = existing_points | incoming_points
+    logger.debug(
+        "event=persistence_merge component=storage operation=merge "
+        "existing_count=%s incoming_count=%s merged_count=%s",
+        len(existing_points),
+        len(incoming_points),
+        len(points),
+    )
     ordered_points = sorted(points.items())
     if len(ordered_points) > HOUSEHOLD_LOAD_MAX_VALUES:
         ordered_points = ordered_points[-HOUSEHOLD_LOAD_MAX_VALUES:]

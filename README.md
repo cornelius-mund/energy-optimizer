@@ -82,6 +82,18 @@ Runtime and system configuration is loaded from `config.yaml` at startup. Set
 `ENERGY_OPTIMIZER_CONFIG` to use a different file. A complete example is
 provided in [`config.example.yaml`](config.example.yaml).
 
+Set `ENERGY_OPTIMIZER_LOG_LEVEL` to `DEBUG`, `INFO`, `WARNING`, `ERROR`,
+`CRITICAL`, or `NOTSET` to override the default `INFO` minimum log level. The
+service writes structured, container-friendly logs to standard output and
+includes the event, component, operation, status, request ID, and relevant
+time or record-count context. Invalid log-level values stop startup with a
+configuration error.
+
+Request completion is logged once by the service with an `X-Request-ID`
+response header. Uvicorn access logging is disabled to avoid duplicate access
+records. Logs never include authorization headers, Home Assistant tokens, raw
+provider responses, complete request bodies, or complete energy series.
+
 Configuration is expected to contain parameters such as:
 
 - Time resolution

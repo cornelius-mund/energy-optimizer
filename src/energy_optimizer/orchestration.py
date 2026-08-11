@@ -132,14 +132,28 @@ class ProviderOrchestrator:
                 try:
                     data = registration.load()
                 except Exception as error:
-                    logger.warning(
-                        "could not load persisted orchestration source %s: %s",
+                    logger.error(
+                        "event=orchestration_restore_failed component=orchestration "
+                        "operation=restore source=%s error_type=%s error=%s",
                         registration.name,
+                        error.__class__.__name__,
                         error,
+                        exc_info=True,
                     )
                 else:
                     if data is not None:
                         self._latest_data[registration.name] = data
+                        logger.info(
+                            "event=orchestration_source_restored "
+                            "component=orchestration operation=restore source=%s",
+                            registration.name,
+                        )
+        logger.info(
+            "event=orchestration_configured component=orchestration operation=startup "
+            "source_count=%s optimization_enabled=%s",
+            len(self.configuration.sources),
+            self.configuration.optimization.enabled,
+        )
 
     @property
     def history(self) -> tuple[OrchestrationCycle, ...]:
@@ -169,6 +183,10 @@ class ProviderOrchestrator:
         started_at = self._as_utc(current_time)
         cycle_clock = (lambda: started_at) if explicit_time else self.clock
         if not self._cycle_lock.acquire(blocking=False):
+            logger.warning(
+                "event=orchestration_cycle_skipped component=orchestration "
+                "operation=cycle reason=concurrent_cycle"
+            )
             cycle = OrchestrationCycle(
                 started_at=started_at,
                 completed_at=started_at,
@@ -208,6 +226,11 @@ class ProviderOrchestrator:
             if schedule is None or not schedule.enabled:
                 continue
             if not force and not self._is_due(registration.name, now, schedule):
+                logger.warning(
+                    "event=provider_refresh_skipped component=orchestration "
+                    "operation=refresh source=%s reason=not_due",
+                    registration.name,
+                )
                 provider_runs.append(
                     ProviderRun(
                         source=registration.name,
@@ -248,10 +271,13 @@ class ProviderOrchestrator:
                         error=error,
                     )
                 )
-                logger.info(
-                    "provider orchestration source %s: %s",
+                log_method = logger.warning if status == "stale" else logger.info
+                log_method(
+                    "event=provider_refresh_completed component=orchestration "
+                    "operation=refresh source=%s status=%s duration_seconds=%.3f",
                     registration.name,
                     status,
+                    (attempt_completed - attempt_started).total_seconds(),
                 )
             except Exception as error:
                 attempt_completed = self._as_utc(cycle_clock())
@@ -268,10 +294,13 @@ class ProviderOrchestrator:
                         error=message,
                     )
                 )
-                logger.warning(
-                    "provider orchestration source %s failed: %s",
+                logger.error(
+                    "event=provider_refresh_failed component=orchestration "
+                    "operation=refresh source=%s error_type=%s error=%s",
                     registration.name,
+                    error.__class__.__name__,
                     message,
+                    exc_info=True,
                 )
 
         blocked_sources = {
@@ -287,6 +316,14 @@ class ProviderOrchestrator:
             plan_error=plan_error,
         )
         self._history.append(cycle)
+        logger.info(
+            "event=orchestration_cycle_completed component=orchestration "
+            "operation=cycle provider_run_count=%s plan_status=%s "
+            "duration_seconds=%.3f",
+            len(provider_runs),
+            plan_status,
+            (completed_at - now).total_seconds(),
+        )
         return cycle
 
     def _trigger_plan(
@@ -299,16 +336,33 @@ class ProviderOrchestrator:
         if not optimization.enabled:
             return "disabled", None
         if not fresh_data:
+            logger.warning(
+                "event=optimization_skipped component=orchestration operation=plan "
+                "reason=no_refreshed_provider_data"
+            )
             return "not-ready", "no provider data was refreshed in this cycle"
         latest_data = dict(self._latest_data)
         latest_data.update(fresh_data)
         required_sources = optimization.required_sources
         required = set(required_sources)
         if required & blocked_sources:
+            logger.warning(
+                "event=optimization_skipped component=orchestration operation=plan "
+                "reason=required_source_blocked source_count=%s",
+                len(required & blocked_sources),
+            )
             return "not-ready", "a required source failed or returned stale data"
         if not required.issubset(fresh_data):
+            logger.warning(
+                "event=optimization_skipped component=orchestration operation=plan "
+                "reason=required_source_not_refreshed"
+            )
             return "not-ready", "not all required sources refreshed successfully"
         if self.plan_generator is None:
+            logger.warning(
+                "event=optimization_unavailable component=orchestration operation=plan "
+                "reason=generator_not_configured"
+            )
             return "unavailable", "optimization plan generator is not configured"
 
         stale_sources = [
@@ -317,6 +371,11 @@ class ProviderOrchestrator:
             if not self._is_latest_data_fresh(source, latest_data[source], captured_at)
         ]
         if stale_sources:
+            logger.warning(
+                "event=optimization_skipped component=orchestration operation=plan "
+                "reason=required_source_stale source_count=%s",
+                len(stale_sources),
+            )
             return "not-ready", "required source data is stale"
 
         snapshot = ProviderDataSnapshot(
@@ -327,9 +386,19 @@ class ProviderOrchestrator:
             self.plan_generator(snapshot)
         except Exception as error:
             message = str(error) or error.__class__.__name__
-            logger.warning("optimization plan generation failed: %s", message)
+            logger.error(
+                "event=optimization_plan_failed component=orchestration "
+                "operation=plan error_type=%s error=%s",
+                error.__class__.__name__,
+                message,
+                exc_info=True,
+            )
             return "failed", message
-        logger.info("optimization plan generated from refreshed provider data")
+        logger.info(
+            "event=optimization_plan_created component=orchestration operation=plan "
+            "source_count=%s",
+            len(required_sources),
+        )
         return "created", None
 
     def _is_latest_data_fresh(
@@ -374,6 +443,9 @@ class ProviderOrchestrator:
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         """Run scheduled collection until the application requests shutdown."""
+        logger.info(
+            "event=orchestration_started component=orchestration operation=run_forever"
+        )
         while not stop_event.is_set():
             await asyncio.to_thread(self.run_due)
             try:
@@ -382,6 +454,9 @@ class ProviderOrchestrator:
                 )
             except TimeoutError:
                 pass
+        logger.info(
+            "event=orchestration_stopped component=orchestration operation=run_forever"
+        )
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
@@ -398,6 +473,9 @@ def build_configured_orchestrator(
     """Compose currently configured concrete providers into the orchestrator."""
     orchestration = configuration.orchestration
     if orchestration is None or not orchestration.enabled:
+        logger.debug(
+            "event=orchestration_disabled component=orchestration operation=compose"
+        )
         return None
     if store is None:
         raise OrchestrationError(
@@ -458,9 +536,15 @@ def build_configured_orchestrator(
             )
         )
 
-    return ProviderOrchestrator(
+    orchestrator = ProviderOrchestrator(
         configuration=orchestration,
         registrations=registrations,
         store=store,
         plan_generator=plan_generator,
     )
+    logger.info(
+        "event=orchestration_composed component=orchestration operation=compose "
+        "registration_count=%s",
+        len(registrations),
+    )
+    return orchestrator

@@ -1,5 +1,6 @@
 """Loading and validation of runtime configuration."""
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
@@ -16,6 +17,8 @@ from pydantic import (
 )
 
 from energy_optimizer.providers.interfaces import HOUSEHOLD_LOAD_SOURCE_ID
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigurationError(ValueError):
@@ -225,7 +228,17 @@ def load_configuration(path: Path) -> Configuration:
     A ``ConfigurationError`` includes the path and the relevant validation
     details so startup failures can be diagnosed without a traceback.
     """
+    logger.debug(
+        "event=configuration_load_started component=configuration operation=load "
+        "path=%s",
+        path,
+    )
     if not path.is_file():
+        logger.error(
+            "event=configuration_load_failed component=configuration operation=load "
+            "path=%s error_type=ConfigurationError",
+            path,
+        )
         raise ConfigurationError(f"Configuration file not found: {path}")
 
     try:
@@ -233,22 +246,52 @@ def load_configuration(path: Path) -> Configuration:
             document: Any = yaml.safe_load(configuration_file)
     except yaml.YAMLError as error:
         message = f"Invalid YAML in configuration file {path}: {error}"
+        logger.error(
+            "event=configuration_load_failed component=configuration operation=load "
+            "path=%s error_type=YAMLError",
+            path,
+        )
         raise ConfigurationError(message) from error
     except OSError as error:
         message = f"Could not read configuration file {path}: {error}"
+        logger.error(
+            "event=configuration_load_failed component=configuration operation=load "
+            "path=%s error_type=OSError",
+            path,
+        )
         raise ConfigurationError(message) from error
 
     if not isinstance(document, dict):
+        logger.error(
+            "event=configuration_load_failed component=configuration operation=load "
+            "path=%s error_type=ConfigurationError",
+            path,
+        )
         raise ConfigurationError(
             f"Configuration file {path} must contain a YAML mapping at the top level"
         )
 
     try:
-        return Configuration.model_validate(document)
+        configuration = Configuration.model_validate(document)
     except ValidationError as error:
         details = "; ".join(
             f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
             for issue in error.errors()
         )
         message = f"Invalid configuration in {path}: {details}"
+        logger.error(
+            "event=configuration_load_failed component=configuration operation=load "
+            "path=%s error_type=ValidationError",
+            path,
+        )
         raise ConfigurationError(message) from error
+    logger.info(
+        "event=configuration_loaded component=configuration operation=load "
+        "path=%s persistence_enabled=%s orchestration_enabled=%s "
+        "home_assistant_enabled=%s",
+        path,
+        configuration.persistence is not None,
+        configuration.orchestration is not None and configuration.orchestration.enabled,
+        configuration.home_assistant is not None,
+    )
+    return configuration

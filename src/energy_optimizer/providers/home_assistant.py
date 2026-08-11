@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -22,6 +23,9 @@ from energy_optimizer.providers.interfaces import (
 
 class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant data cannot be imported safely."""
+
+
+logger = logging.getLogger(__name__)
 
 
 class HomeAssistantLoadImporter:
@@ -48,6 +52,60 @@ class HomeAssistantLoadImporter:
         *,
         now: datetime | None = None,
     ) -> HouseholdLoadData:
+        logger.debug(
+            "event=provider_fetch_started component=home_assistant operation=fetch "
+            "start_time=%s end_time=%s history_lookback_seconds=%s entity_count=%s",
+            start_time,
+            end_time,
+            history_lookback_seconds,
+            len(self.configuration.household_load_entities or []),
+        )
+        try:
+            data = self._fetch(
+                start_time,
+                end_time,
+                history_lookback_seconds,
+                now=now,
+            )
+        except Exception as error:
+            if isinstance(error, HomeAssistantError) and "unavailable value" in str(
+                error
+            ):
+                logger.warning(
+                    "event=provider_data_degraded component=home_assistant "
+                    "operation=fetch error_type=%s entity_count=%s error=%s",
+                    error.__class__.__name__,
+                    len(self.configuration.household_load_entities or []),
+                    error,
+                )
+            else:
+                logger.error(
+                    "event=provider_fetch_failed component=home_assistant "
+                    "operation=fetch "
+                    "error_type=%s entity_count=%s",
+                    error.__class__.__name__,
+                    len(self.configuration.household_load_entities or []),
+                    exc_info=True,
+                )
+            raise
+        logger.info(
+            "event=provider_fetch_succeeded component=home_assistant operation=fetch "
+            "start_time=%s end_time=%s record_count=%s entity_count=%s",
+            data.start_time,
+            end_time,
+            len(data.load_kw),
+            len(self.configuration.household_load_entities or []),
+        )
+        return data
+
+    def _fetch(
+        self,
+        start_time: datetime,
+        end_time: datetime | None = None,
+        history_lookback_seconds: float = 0,
+        *,
+        now: datetime | None = None,
+    ) -> HouseholdLoadData:
         """Fetch hourly load for ``[start_time, end_time)``.
 
         ``history_lookback_seconds`` requests an earlier state so a value can
@@ -64,10 +122,23 @@ class HomeAssistantLoadImporter:
         observations: list[datetime] = []
         for entity in self.configuration.household_load_entities or []:
             query_start = start - timedelta(seconds=history_lookback_seconds)
+            logger.debug(
+                "event=provider_request_started component=home_assistant "
+                "operation=history_request entity_id=%s start_time=%s end_time=%s",
+                entity.entity_id,
+                query_start,
+                end,
+            )
             response = self._request(
                 self._history_url(query_start, end, entity.entity_id), entity
             )
             records = self._parse_history(response, entity)
+            logger.debug(
+                "event=provider_response_parsed component=home_assistant "
+                "operation=history_request entity_id=%s record_count=%s",
+                entity.entity_id,
+                len(records),
+            )
             values, latest_observation = self._normalize_records(
                 records, start, end, entity
             )
@@ -244,12 +315,12 @@ class HomeAssistantLoadImporter:
             except (TypeError, ValueError) as error:
                 raise HomeAssistantError(
                     f"Home Assistant entity {entity.entity_id} contains a "
-                    f"non-numeric value at {timestamp.isoformat()}: {state!r}"
+                    f"non-numeric value at {timestamp.isoformat()}"
                 ) from error
             if not math.isfinite(value) or value < 0:
                 raise HomeAssistantError(
                     f"Home Assistant entity {entity.entity_id} contains an invalid "
-                    f"value at {timestamp.isoformat()}: {state!r}"
+                    f"value at {timestamp.isoformat()}"
                 )
             attributes = record.get("attributes")
             if isinstance(attributes, dict) and isinstance(
