@@ -163,13 +163,24 @@ External providers should be configurable and isolated from the optimization mod
 When the optional `persistence.directory` setting is configured, the service
 stores the validated normalized data model returned by a configured provider.
 It does not store raw provider responses, client-only submissions, or optimizer
-snapshots. The normalized model is stored directly as human-readable JSON with
-two-space indentation and a trailing newline. It is keyed by its data type,
-provider, and entity identifier. A temporary file is flushed and synced before
+snapshots. It is keyed by its data type, provider, and entity identifier. A
+For replace-based JSON writes, a temporary file is flushed and synced before
 atomic replacement; the previous valid value is retained as a backup. If the
 primary file is invalid after a restart, the backup is validated and restored.
 If neither copy is valid, retrieval returns a service-unavailable error and the
 invalid files are not silently accepted.
+
+Household-load history is stored as human-readable newline-delimited JSON in
+`*.ndjson`, with one hourly observation per line. Each line contains the
+timestamp, load value, source identity, and retrieval metadata needed to rebuild
+the validated normalized model. New observations and overlapping corrections
+are appended; when a timestamp occurs more than once, the last line wins. Loads
+retain the newest 87,672 contiguous hourly values. Compaction runs when the
+physical record count exceeds the retention limit plus a small buffer, removing
+superseded and expired records through the same atomic replacement and backup
+path. An incomplete final line from an interrupted append is ignored. Existing
+household-load `*.json` and `*.json.bak` files are migrated to NDJSON on first
+access without losing valid primary or backup data.
 
 `POST /api/v1/household-load` persists data only when its source matches the
 configured Home Assistant household-load provider. Source-less submissions and

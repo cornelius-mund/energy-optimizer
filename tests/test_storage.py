@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
+from energy_optimizer import storage as storage_module
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import (
     ProviderDataKey,
@@ -40,6 +41,11 @@ def normalized_data(load_kw: list[float] | None = None) -> dict[str, object]:
 
 def paths(directory: Path) -> tuple[Path, Path]:
     filename = f"{KEY.data_type}-{KEY.digest()}"
+    return directory / f"{filename}.ndjson", directory / f"{filename}.ndjson.bak"
+
+
+def legacy_paths(directory: Path) -> tuple[Path, Path]:
+    filename = f"{KEY.data_type}-{KEY.digest()}"
     return directory / f"{filename}.json", directory / f"{filename}.json.bak"
 
 
@@ -51,11 +57,10 @@ def test_store_initializes_and_returns_normalized_data(tmp_path: Path) -> None:
     assert store.load(KEY, ADAPTER) == saved
     primary, backup = paths(tmp_path)
     expected_json = json.loads(ADAPTER.dump_json(saved))
-    expected_payload = ADAPTER.dump_json(saved, indent=2).decode() + "\n"
     for path in (primary, backup):
-        contents = path.read_text()
-        assert contents == expected_payload
-        assert json.loads(contents) == expected_json
+        lines = path.read_text().splitlines()
+        assert len(lines) == 2
+        assert all(json.loads(line)["unit"] == expected_json["unit"] for line in lines)
     assert "snapshot" not in primary.read_text().lower()
 
 
@@ -69,8 +74,20 @@ def test_store_update_keeps_previous_valid_data_as_backup(tmp_path: Path) -> Non
     current = store.load(KEY, ADAPTER)
     assert current is not None
     assert current.load_kw == (2.4, 2.0)
-    assert ADAPTER.validate_json(backup.read_bytes()).load_kw == (1.2, 1.0)
-    assert ADAPTER.validate_json(primary.read_bytes()).load_kw == (2.4, 2.0)
+    assert [
+        json.loads(line)["load_kw"] for line in backup.read_text().splitlines()
+    ] == [
+        1.2,
+        1.0,
+    ]
+    assert [
+        json.loads(line)["load_kw"] for line in primary.read_text().splitlines()
+    ] == [
+        1.2,
+        1.0,
+        2.4,
+        2.0,
+    ]
 
 
 def test_store_recovers_primary_after_restart(tmp_path: Path) -> None:
@@ -94,8 +111,18 @@ def test_store_recovers_invalid_primary_from_backup(tmp_path: Path) -> None:
 
     assert recovered is not None
     assert recovered.load_kw == (1.2, 1.0)
-    assert ADAPTER.validate_json(primary.read_bytes()).load_kw == (1.2, 1.0)
-    assert ADAPTER.validate_json(backup.read_bytes()).load_kw == (1.2, 1.0)
+    assert [
+        json.loads(line)["load_kw"] for line in primary.read_text().splitlines()
+    ] == [
+        1.2,
+        1.0,
+    ]
+    assert [
+        json.loads(line)["load_kw"] for line in backup.read_text().splitlines()
+    ] == [
+        1.2,
+        1.0,
+    ]
 
 
 def test_store_rejects_unrecoverable_invalid_state(tmp_path: Path) -> None:
@@ -162,6 +189,108 @@ def test_store_merges_hourly_history_and_incoming_values_win(
     assert merged.start_time == start
     assert merged.load_kw == (1.0, 2.0, 30.0, 4.0)
     assert merged.retrieved_at == start + timedelta(hours=4)
+    reloaded = store.load(KEY, ADAPTER)
+    assert reloaded == merged
+
+
+def test_store_appends_new_observations_without_rewriting_existing_lines(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, _ = paths(tmp_path)
+    before = primary.read_bytes()
+
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start + timedelta(hours=2), [3.0]),
+    )
+
+    after = primary.read_bytes()
+    assert after.startswith(before)
+    assert len(after.splitlines()) == 3
+
+
+def test_store_ignores_only_an_interrupted_final_append(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, _ = paths(tmp_path)
+    with primary.open("ab") as history_file:
+        history_file.write(b'{"timestamp":"2026-01-01T02:00:00+00:00"')
+
+    loaded = store.load(KEY, ADAPTER)
+
+    assert loaded is not None
+    assert loaded.load_kw == (1.0, 2.0)
+
+
+def test_store_rejects_malformed_final_record_without_a_newline(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, backup = paths(tmp_path)
+    backup.unlink()
+    primary.write_bytes(primary.read_bytes() + b"not-json")
+
+    with pytest.raises(ProviderDataStoreError, match="invalid and cannot be recovered"):
+        store.load(KEY, ADAPTER)
+
+
+def test_store_rejects_malformed_nonfinal_ndjson_record(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, backup = paths(tmp_path)
+    backup.unlink()
+    primary.write_bytes(primary.read_bytes() + b"not-json\n")
+
+    with pytest.raises(ProviderDataStoreError, match="invalid and cannot be recovered"):
+        store.load(KEY, ADAPTER)
+
+
+def test_store_rejects_mixed_household_load_sources(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, backup = paths(tmp_path)
+    mixed = household_load_data(start + timedelta(hours=2), [3.0])
+    mixed_record = json.loads(
+        storage_module._encode_household_records(
+            storage_module._household_load_records(mixed)
+        ).decode()
+    )
+    mixed_record["source"]["provider"] = "other-provider"
+    with primary.open("ab") as history_file:
+        history_file.write(json.dumps(mixed_record).encode() + b"\n")
+    backup.unlink()
+
+    with pytest.raises(ProviderDataStoreError, match="invalid and cannot be recovered"):
+        store.load(KEY, ADAPTER)
+
+
+def test_store_rejects_source_change_before_appending(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    incoming = HouseholdLoadData(
+        schema_version="1",
+        start_time=start + timedelta(hours=2),
+        interval_minutes=60,
+        load_kw=(3.0,),
+        unit="kW",
+        source=SourceMetadata(provider="other-provider", entity_id="household_load"),
+        retrieved_at=start,
+        latest_observation_at=start,
+    )
+
+    with pytest.raises(ProviderDataStoreError, match="source identity"):
+        store.save(KEY, ADAPTER, incoming)
+
+    primary, _ = paths(tmp_path)
+    assert len(primary.read_text().splitlines()) == 2
 
 
 def test_store_retains_only_the_newest_ten_years_of_household_load(
@@ -181,3 +310,177 @@ def test_store_retains_only_the_newest_ten_years_of_household_load(
     assert len(merged.load_kw) == 87_672
     assert merged.start_time == start + timedelta(hours=1)
     assert merged.load_kw[-2:] == (2.0, 3.0)
+
+
+def test_store_bounds_initial_oversized_household_load_save(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+    saved = store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start, [1.0] * (87_672 + 2)),
+    )
+
+    assert len(saved.load_kw) == 87_672
+    assert saved.start_time == start + timedelta(hours=2)
+
+
+def test_store_compacts_superseded_records_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "HOUSEHOLD_LOAD_COMPACTION_THRESHOLD", 4)
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start + timedelta(hours=2), [3.0, 4.0, 5.0]),
+    )
+
+    primary, backup = paths(tmp_path)
+    assert len(primary.read_text().splitlines()) == 5
+    assert len(backup.read_text().splitlines()) == 2
+    loaded = store.load(KEY, ADAPTER)
+    assert loaded is not None
+    assert loaded.load_kw == (1.0, 2.0, 3.0, 4.0, 5.0)
+
+
+def test_store_compaction_removes_superseded_corrections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "HOUSEHOLD_LOAD_COMPACTION_THRESHOLD", 2)
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start + timedelta(hours=1), [20.0]),
+    )
+
+    primary, _ = paths(tmp_path)
+    records = [json.loads(line) for line in primary.read_text().splitlines()]
+
+    assert len(records) == 2
+    assert [record["load_kw"] for record in records] == [1.0, 20.0]
+
+
+def test_store_migrates_legacy_json_primary_and_backup(tmp_path: Path) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    current = household_load_data(start, [2.0, 3.0])
+    previous = household_load_data(start, [1.0, 1.5])
+    primary, backup = legacy_paths(tmp_path)
+    tmp_path.mkdir(exist_ok=True)
+    primary.write_bytes(TypeAdapter(HouseholdLoadData).dump_json(current) + b"\n")
+    backup.write_bytes(TypeAdapter(HouseholdLoadData).dump_json(previous) + b"\n")
+
+    loaded = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+    assert loaded == current
+    ndjson_primary, ndjson_backup = paths(tmp_path)
+    assert ndjson_primary.exists()
+    assert ndjson_backup.exists()
+    assert not primary.exists()
+    assert not backup.exists()
+
+
+def test_store_migrates_valid_legacy_backup_when_primary_is_invalid(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    previous = household_load_data(start, [1.0, 1.5])
+    primary, backup = legacy_paths(tmp_path)
+    tmp_path.mkdir(exist_ok=True)
+    primary.write_text("invalid", encoding="utf-8")
+    backup.write_bytes(TypeAdapter(HouseholdLoadData).dump_json(previous) + b"\n")
+
+    loaded = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+    assert loaded == previous
+    ndjson_primary, ndjson_backup = paths(tmp_path)
+    assert ndjson_primary.exists()
+    assert ndjson_backup.exists()
+
+
+def test_store_recovers_invalid_ndjson_primary_from_backup(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, _ = paths(tmp_path)
+    primary.write_text("invalid\n", encoding="utf-8")
+
+    recovered = store.load(KEY, ADAPTER)
+
+    assert recovered is not None
+    assert recovered.load_kw == (1.0, 2.0)
+    assert len(primary.read_text().splitlines()) == 2
+
+
+def test_store_rebuilds_backup_when_invalid_before_primary_corruption(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, backup = paths(tmp_path)
+    backup.write_text("invalid\n", encoding="utf-8")
+
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start + timedelta(hours=2), [3.0]),
+    )
+    primary.write_text("invalid\n", encoding="utf-8")
+
+    recovered = store.load(KEY, ADAPTER)
+
+    assert recovered is not None
+    assert recovered.load_kw == (1.0, 2.0)
+
+
+@pytest.mark.parametrize("failure_target", ["backup", "primary"])
+def test_store_compaction_failure_keeps_recoverable_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_target: str,
+) -> None:
+    monkeypatch.setattr(storage_module, "HOUSEHOLD_LOAD_COMPACTION_THRESHOLD", 2)
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, backup = paths(tmp_path)
+    original_atomic_write = store._atomic_write
+
+    def fail_compaction_write(path: Path, payload: bytes) -> None:
+        if path == (backup if failure_target == "backup" else primary):
+            raise ProviderDataStoreError("simulated compaction failure")
+        original_atomic_write(path, payload)
+
+    monkeypatch.setattr(store, "_atomic_write", fail_compaction_write)
+    with pytest.raises(ProviderDataStoreError, match="simulated compaction failure"):
+        store.save(
+            KEY,
+            ADAPTER,
+            household_load_data(start + timedelta(hours=1), [20.0]),
+        )
+
+    assert all(json.loads(line) for line in primary.read_text().splitlines())
+    assert all(json.loads(line) for line in backup.read_text().splitlines())
+    primary.write_text("invalid\n", encoding="utf-8")
+    monkeypatch.undo()
+    recovered = store.load(KEY, ADAPTER)
+    assert recovered is not None
+    assert recovered.load_kw == (1.0, 2.0)
+
+
+def test_non_household_provider_data_remains_json(tmp_path: Path) -> None:
+    key = ProviderDataKey("electricity-prices", "test-provider")
+    adapter = TypeAdapter(dict[str, int])
+
+    ProviderDataStore(tmp_path).save(key, adapter, {"value": 1})
+
+    assert (tmp_path / f"electricity-prices-{key.digest()}.json").exists()
+    assert not (tmp_path / f"electricity-prices-{key.digest()}.ndjson").exists()
