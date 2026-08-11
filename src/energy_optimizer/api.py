@@ -1,12 +1,15 @@
 """HTTP API for the Energy Optimizer service."""
 
 import asyncio
+import logging
 import math
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, AsyncIterator, Literal
+from time import perf_counter
+from typing import Annotated, AsyncIterator, Awaitable, Callable, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import (
@@ -17,9 +20,11 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from starlette.responses import Response
 
 from energy_optimizer import __version__
-from energy_optimizer.config import load_configuration
+from energy_optimizer.config import ConfigurationError, load_configuration
+from energy_optimizer.logging_config import configure_logging
 from energy_optimizer.orchestration import build_configured_orchestrator
 from energy_optimizer.providers.interfaces import (
     HouseholdLoadData,
@@ -34,6 +39,19 @@ from energy_optimizer.storage import (
 )
 
 MAX_HORIZON_HOURS = 87_672
+logger = logging.getLogger(__name__)
+
+
+def _request_id(request: Request) -> str:
+    """Return a safe request ID for logs and the response header."""
+    candidate = request.headers.get("X-Request-ID", "")
+    if (
+        candidate
+        and len(candidate) <= 64
+        and all(character.isalnum() or character in "-_." for character in candidate)
+    ):
+        return candidate
+    return uuid4().hex
 
 
 class HourlyOptimizationRequest(BaseModel):
@@ -504,35 +522,134 @@ class OptimizationResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     """Load configuration before accepting requests."""
-    path = Path(os.environ.get("ENERGY_OPTIMIZER_CONFIG", "config.yaml"))
-    configuration = load_configuration(path)
-    application.state.configuration = configuration
-    application.state.provider_data_store = (
-        ProviderDataStore(configuration.persistence.directory)
-        if configuration.persistence is not None
-        else None
-    )
-    application.state.orchestrator = build_configured_orchestrator(
-        configuration,
-        application.state.provider_data_store,
-    )
-    stop_event = asyncio.Event()
-    application.state.orchestration_stop_event = stop_event
-    application.state.orchestration_task = None
-    if application.state.orchestrator is not None:
-        application.state.orchestration_task = asyncio.create_task(
-            application.state.orchestrator.run_forever(stop_event)
-        )
     try:
+        log_level = configure_logging()
+    except ConfigurationError:
+        logging.getLogger(__name__).critical(
+            "event=service_startup_failed component=logging operation=configure "
+            "error_type=ConfigurationError"
+        )
+        raise
+    path = Path(os.environ.get("ENERGY_OPTIMIZER_CONFIG", "config.yaml"))
+    logger.info(
+        "event=service_starting component=api operation=startup "
+        "log_level=%s configuration_path=%s",
+        logging.getLevelName(log_level),
+        path,
+    )
+    service_started = False
+    try:
+        try:
+            configuration = load_configuration(path)
+            application.state.configuration = configuration
+            application.state.provider_data_store = (
+                ProviderDataStore(configuration.persistence.directory)
+                if configuration.persistence is not None
+                else None
+            )
+            application.state.orchestrator = build_configured_orchestrator(
+                configuration,
+                application.state.provider_data_store,
+            )
+            stop_event = asyncio.Event()
+            application.state.orchestration_stop_event = stop_event
+            application.state.orchestration_task = None
+            if application.state.orchestrator is not None:
+                application.state.orchestration_task = asyncio.create_task(
+                    application.state.orchestrator.run_forever(stop_event)
+                )
+            logger.info(
+                "event=service_started component=api operation=startup "
+                "persistence_enabled=%s orchestration_enabled=%s "
+                "home_assistant_enabled=%s",
+                configuration.persistence is not None,
+                configuration.orchestration is not None
+                and configuration.orchestration.enabled,
+                configuration.home_assistant is not None,
+            )
+            service_started = True
+        except ConfigurationError as error:
+            logger.critical(
+                "event=service_startup_failed component=api operation=startup "
+                "error_type=%s",
+                error.__class__.__name__,
+                exc_info=True,
+            )
+            raise
+        except Exception as error:
+            logger.critical(
+                "event=service_startup_failed component=api operation=startup "
+                "error_type=%s",
+                error.__class__.__name__,
+                exc_info=True,
+            )
+            raise
         yield
     finally:
-        stop_event.set()
-        task = application.state.orchestration_task
-        if task is not None:
-            await task
+        if service_started:
+            logger.info("event=service_stopping component=api operation=shutdown")
+            configured_stop_event = getattr(
+                application.state, "orchestration_stop_event", None
+            )
+            task = getattr(application.state, "orchestration_task", None)
+            if configured_stop_event is not None:
+                configured_stop_event.set()
+            if task is not None:
+                try:
+                    await task
+                except Exception:
+                    logger.critical(
+                        "event=service_shutdown_failed component=orchestration "
+                        "operation=stop",
+                        exc_info=True,
+                    )
+                    raise
+            logger.info("event=service_stopped component=api operation=shutdown")
 
 
 app = FastAPI(title="Energy Optimizer", version=__version__, lifespan=lifespan)
+
+
+@app.middleware("http")
+async def log_requests(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """Log request outcomes without recording bodies or authorization headers."""
+    request_id = _request_id(request)
+    started = perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "event=request_failed component=api operation=request method=%s "
+            "path=%s request_id=%s duration_ms=%.2f",
+            request.method,
+            request.url.path,
+            request_id,
+            (perf_counter() - started) * 1000,
+        )
+        raise
+
+    duration_ms = (perf_counter() - started) * 1000
+    status_code = response.status_code
+    if status_code >= 500:
+        level = logging.ERROR
+    elif status_code >= 400:
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+    logger.log(
+        level,
+        "event=request_completed component=api operation=request method=%s "
+        "path=%s status=%s request_id=%s duration_ms=%.2f",
+        request.method,
+        request.url.path,
+        status_code,
+        request_id,
+        duration_ms,
+    )
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 
 @app.get("/health")
