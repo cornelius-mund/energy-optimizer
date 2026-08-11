@@ -150,15 +150,23 @@ final persisted hour so overlapping values can correct history. Historical
 retention is independent of polling freshness.
 
 Normalized provider data may be persisted after validation when persistence is
-configured. The storage component stores the normalized provider model
-directly, not raw vendor responses or optimizer snapshots. Records are keyed by
+configured. The storage component stores the normalized provider model or
+history, not raw vendor responses or optimizer snapshots. Records are keyed by
 data type, provider, and entity identifier. Atomic replacement, validation on
 read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
-submissions remain request-scoped. Household-load records are merged by hourly
-timestamp before atomic replacement, incoming values take precedence, and the
-oldest points are discarded above the 87,672-value ten-year limit. Scheduled
-and API persistence use the same merge behavior.
+submissions remain request-scoped. Non-household-load data remains a readable
+JSON model. Household-load history uses one self-contained hourly observation
+per line in an NDJSON file. Saves append new observations and overlapping
+corrections, and reads select the latest record for each timestamp before
+discarding values older than the 87,672-value ten-year limit. Compaction is
+triggered after the physical record count exceeds that limit plus a bounded
+buffer; it atomically replaces the primary and preserves the prior valid
+history as the backup. An incomplete final append line is ignored, while other
+malformed records follow the normal recovery error path. Existing monolithic
+household-load JSON primary and backup files are migrated to NDJSON on first
+access. Scheduled and API persistence use the same append and compaction
+behavior.
 
 ### Optimization
 
