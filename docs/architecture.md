@@ -135,7 +135,9 @@ reset-aware delta accumulation, add/subtract aggregation, hourly
 normalization, and observation metadata. It follows Home Assistant's `total`
 and `total_increasing` state classes, rejects instantaneous power entities, and
 rejects any failed or incomplete contribution before returning
-`HouseholdLoadData`. The aggregate uses the
+`HouseholdLoadData`. Unknown and unavailable history samples are skipped without
+assigning energy; the next valid counter observation owns the resulting delta,
+and an entity with no usable observations still fails. The aggregate uses the
 logical `household_load` entity identity, regardless of how many Home Assistant
 entities contribute to it. The importer exposes an optional freshness health
 check, but does not start polling, schedule requests, cache results, persist

@@ -454,6 +454,81 @@ def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
     assert persisted.source.entity_id == "household_load"
 
 
+def test_configured_home_assistant_failure_preserves_persisted_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeHomeAssistantImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            history_lookback_seconds: float = 0,
+            *,
+            now: datetime | None = None,
+        ) -> HouseholdLoadData:
+            del start_time, end_time, history_lookback_seconds, now
+            raise RuntimeError(
+                "Home Assistant entity sensor.household_energy has no usable "
+                "history after skipping unknown or unavailable records"
+            )
+
+        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
+        FakeHomeAssistantImporter,
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "household_load_entities": [
+                    {
+                        "entity_id": "sensor.household_energy",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=configuration(),
+    )
+    store = ProviderDataStore(tmp_path)
+    key = ProviderDataKey("household-load", "home-assistant", "household_load")
+    store.save(
+        key,
+        ADAPTER,
+        data(
+            START,
+            value=2.5,
+            source="home-assistant",
+            entity_id="household_load",
+        ),
+    )
+
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+    cycle = orchestrator.run_due(START + timedelta(hours=1))
+
+    assert cycle.provider_runs[0].status == "failed"
+    assert "no usable history" in (cycle.provider_runs[0].error or "")
+    persisted = store.load(key, ADAPTER)
+    assert persisted is not None
+    assert persisted.load_kw == (2.5,)
+
+
 def test_configured_home_assistant_fetch_bootstraps_to_ten_year_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

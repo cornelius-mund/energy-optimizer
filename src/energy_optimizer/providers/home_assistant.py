@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -18,6 +19,8 @@ from energy_optimizer.providers.interfaces import (
     HouseholdLoadData,
     SourceMetadata,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class HomeAssistantError(RuntimeError):
@@ -221,11 +224,28 @@ class HomeAssistantLoadImporter:
         entity: HouseholdLoadEntityConfiguration,
     ) -> tuple[list[float], datetime]:
         raw_records: list[tuple[datetime, dict[str, Any]]] = []
+        skipped_records: list[datetime] = []
         for record in records:
             timestamp = self._parse_timestamp(
                 record.get("last_updated", record.get("last_changed"))
             )
+            state = record.get("state")
+            if isinstance(state, str) and state in {"unknown", "unavailable"}:
+                skipped_records.append(timestamp)
+                continue
             raw_records.append((timestamp, record))
+
+        if skipped_records:
+            first_skipped = min(skipped_records)
+            last_skipped = max(skipped_records)
+            logger.warning(
+                "Home Assistant entity %s has %d unknown or unavailable history "
+                "samples between %s and %s; skipped them without assigning energy",
+                entity.entity_id,
+                len(skipped_records),
+                first_skipped.isoformat(),
+                last_skipped.isoformat(),
+            )
 
         raw_records.sort(key=lambda record: record[0])
         parsed: list[tuple[datetime, float, datetime | None]] = []
@@ -309,6 +329,11 @@ class HomeAssistantLoadImporter:
             previous_state_class = normalized_state_class
 
         if not parsed:
+            if skipped_records:
+                raise HomeAssistantError(
+                    f"Home Assistant entity {entity.entity_id} has no usable "
+                    "history after skipping unknown or unavailable records"
+                )
             raise HomeAssistantError(
                 f"Home Assistant returned no usable history for {entity.entity_id}"
             )
