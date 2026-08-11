@@ -94,7 +94,7 @@ class ProviderDataStore:
                     merge_household_load_history(existing, model),
                 )
 
-        payload = adapter.dump_json(model)
+        payload = adapter.dump_json(model, indent=2) + b"\n"
         primary_path, backup_path = self._paths(key)
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
