@@ -4,6 +4,7 @@ import logging
 import re
 import sys
 from datetime import datetime, timezone
+from io import StringIO
 from pathlib import Path
 
 import httpx
@@ -79,6 +80,43 @@ def test_log_formatter_starts_each_line_with_level_and_timestamp() -> None:
     assert lines[1].endswith("second line")
 
 
+def test_log_formatter_extracts_event_name_and_preserves_structured_fields() -> None:
+    formatter = ConsistentFormatter()
+    record = logging.LogRecord(
+        name="energy_optimizer.api",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="event=request_completed component=api status=200",
+        args=(),
+        exc_info=None,
+    )
+    record.created = datetime(2026, 8, 11, 10, 42, 36, tzinfo=timezone.utc).timestamp()
+
+    rendered = formatter.format(record)
+
+    assert rendered == (
+        "INFO 2026-08-11T10:42:36+0000 request_completed | "
+        "event=request_completed component=api status=200"
+    )
+
+
+def test_non_event_third_party_message_remains_readable() -> None:
+    formatter = ConsistentFormatter()
+    record = logging.LogRecord(
+        name="uvicorn.error",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="server ready",
+        args=(),
+        exc_info=None,
+    )
+    record.created = datetime(2026, 8, 11, 10, 42, 36, tzinfo=timezone.utc).timestamp()
+
+    assert formatter.format(record) == "INFO 2026-08-11T10:42:36+0000 server ready"
+
+
 def test_exception_traceback_lines_use_the_same_log_prefix() -> None:
     formatter = ConsistentFormatter()
     try:
@@ -144,6 +182,54 @@ def test_configure_logging_is_idempotent() -> None:
     ]
     assert len(owned_handlers) == 1
     assert logging.getLogger().level == logging.DEBUG
+
+
+def test_external_root_handler_is_reused_without_a_duplicate_output_path() -> None:
+    root = logging.getLogger()
+    stream = StringIO()
+    external_handler = logging.StreamHandler(stream)
+    root.addHandler(external_handler)
+
+    try:
+        configure_logging("INFO")
+        logging.getLogger("energy_optimizer").info(
+            "event=service_started component=api"
+        )
+
+        assert external_handler in root.handlers
+        assert not any(
+            getattr(handler, "_energy_optimizer_handler", False)
+            for handler in root.handlers
+        )
+        assert isinstance(external_handler.formatter, ConsistentFormatter)
+        assert len(stream.getvalue().splitlines()) == 1
+    finally:
+        root.removeHandler(external_handler)
+        external_handler.close()
+
+
+def test_external_uvicorn_style_root_configuration_formats_one_application_record() -> (
+    None
+):
+    root = logging.getLogger()
+    stream = StringIO()
+    external_handler = logging.StreamHandler(stream)
+    external_handler.setLevel(logging.INFO)
+    root.addHandler(external_handler)
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    uvicorn_logger.handlers.clear()
+    uvicorn_logger.propagate = False
+
+    try:
+        configure_logging("INFO")
+        uvicorn_logger.info("event=server_ready component=uvicorn")
+
+        assert len(stream.getvalue().splitlines()) == 1
+        rendered = stream.getvalue()
+        assert "server_ready | event=server_ready component=uvicorn" in rendered
+    finally:
+        root.removeHandler(external_handler)
+        external_handler.close()
 
 
 def test_module_entrypoint_bootstraps_logging_before_starting_uvicorn(

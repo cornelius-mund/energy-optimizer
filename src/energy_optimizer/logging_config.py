@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Final
@@ -21,6 +22,7 @@ LOG_LEVELS: Final[dict[str, int]] = {
 LOG_LEVEL_NAMES: Final[tuple[str, ...]] = tuple(LOG_LEVELS)
 _HANDLER_MARKER = "_energy_optimizer_handler"
 _LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
+_EVENT_PREFIX = re.compile(r"^event=(\S+)")
 _NORMALIZED_LOGGERS: Final[tuple[str, ...]] = (
     "uvicorn",
     "uvicorn.error",
@@ -42,8 +44,12 @@ class ConsistentFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         message = super().format(record)
+        lines = message.splitlines() or [""]
+        event_match = _EVENT_PREFIX.match(lines[0])
+        if event_match:
+            lines[0] = f"{event_match.group(1)} | {lines[0]}"
         prefix = f"{record.levelname} {self.formatTime(record, self.datefmt)} "
-        return "\n".join(prefix + line for line in message.splitlines() or [""])
+        return "\n".join(prefix + line for line in lines)
 
 
 def resolve_log_level(value: str | None = None) -> int:
@@ -83,19 +89,33 @@ def _configure_logging(level: int) -> int:
     for duplicate in handlers[1:]:
         root.removeHandler(duplicate)
         duplicate.close()
-    if (
-        handler is None
-        or not isinstance(handler, logging.StreamHandler)
-        or handler.stream is not sys.stdout
-    ):
+
+    external_handlers = [
+        candidate
+        for candidate in root.handlers
+        if not getattr(candidate, _HANDLER_MARKER, False)
+        and _is_external_handler(candidate)
+    ]
+    if external_handlers:
         if handler is not None:
             root.removeHandler(handler)
             handler.close()
-        handler = logging.StreamHandler(sys.stdout)
-        setattr(handler, _HANDLER_MARKER, True)
-        root.addHandler(handler)
-    handler.setLevel(logging.NOTSET)
-    handler.setFormatter(ConsistentFormatter())
+        for external_handler in external_handlers:
+            external_handler.setFormatter(ConsistentFormatter())
+    else:
+        if (
+            handler is None
+            or not isinstance(handler, logging.StreamHandler)
+            or handler.stream is not sys.stdout
+        ):
+            if handler is not None:
+                root.removeHandler(handler)
+                handler.close()
+            handler = logging.StreamHandler(sys.stdout)
+            setattr(handler, _HANDLER_MARKER, True)
+            root.addHandler(handler)
+        handler.setLevel(logging.NOTSET)
+        handler.setFormatter(ConsistentFormatter())
 
     application_logger = logging.getLogger("energy_optimizer")
     application_logger.setLevel(logging.NOTSET)
@@ -113,6 +133,18 @@ def _configure_logging(level: int) -> int:
     uvicorn_access.propagate = False
 
     return level
+
+
+def _is_external_handler(handler: logging.Handler) -> bool:
+    """Return whether a root handler is an application output destination.
+
+    Pytest installs capture handlers on the root logger while running tests.
+    They observe records but are not service destinations, so treating them as
+    an external logging configuration would disable the normal stdout fallback.
+    """
+    return not isinstance(handler, logging.NullHandler) and not (
+        handler.__class__.__module__ == "_pytest.logging"
+    )
 
 
 def bootstrap_logging() -> int:

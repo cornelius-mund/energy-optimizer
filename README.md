@@ -87,8 +87,13 @@ Set `ENERGY_OPTIMIZER_LOG_LEVEL` to `DEBUG`, `INFO`, `WARNING`, `ERROR`,
 service writes structured, container-friendly logs to standard output and
 includes the event, component, operation, status, request ID, and relevant
 time or record-count context. Every Python log uses the format
-`LEVEL TIMESTAMP MESSAGE`, including Uvicorn and HTTP client records. Invalid
-log-level values stop startup with a configuration error.
+`LEVEL TIMESTAMP MESSAGE`, including Uvicorn and HTTP client records. Structured
+records render their event name as the readable message and retain the original
+fields after a `|` separator, for example:
+`INFO 2026-08-11T11:51:51+0000 request_completed | event=request_completed component=api`.
+When Uvicorn is started with an external logging configuration, its root output
+handlers are reused and formatted rather than supplemented with another service
+handler. Invalid log-level values stop startup with a configuration error.
 
 Request completion is logged once by the service with an `X-Request-ID`
 response header. Uvicorn access logging is disabled to avoid duplicate access
