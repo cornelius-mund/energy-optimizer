@@ -16,7 +16,8 @@ persistence:
 
 # Optional scheduled provider retrieval. The source name must match a registered
 # provider, and each source has its own polling interval. Household-load history
-# bootstraps at ten years and then advances from the final persisted hour.
+# bootstraps with up to the ten-year maximum and uses available retained history
+# when Home Assistant has less than that.
 orchestration:
   enabled: false
   startup_fetch: true

@@ -187,9 +187,11 @@ independent `interval_seconds` and optional provider history lookback. With
 `startup_fetch: true`, enabled sources are fetched when the service starts; failed
 attempts leave the last valid persisted data in place and are reported through
 service logs. Missed intervals are not replayed: the next run is scheduled from
-the completed attempt. Household-load collection bootstraps with the API maximum
-of 87,672 hourly values and later requests begin at the final persisted hour,
-intentionally overlapping it for correction.
+the completed attempt. Household-load collection bootstraps with up to the API
+maximum of 87,672 hourly values. If Home Assistant retains less history, the
+provider starts at the earliest safely derivable hour instead of requiring the
+full maximum. Later requests begin at the final persisted hour, intentionally
+overlapping it for correction.
 
 Scheduled collection requires `persistence.directory`, so normalized data survives
 application restarts. Automatic plan generation is disabled until an optimization
@@ -201,7 +203,9 @@ avoid duplicate plans.
 ### Home Assistant household-load importer
 
 `HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's
-REST history API. It retrieves one requested half-open hourly period and returns
+REST history API. It retrieves one requested half-open hourly period, or the
+available retained subset when the requested start predates Home Assistant's
+history, and returns
 provider-independent household-load data with `load_kw`, `unit: "kW"`, source
 metadata, retrieval time, and the latest source observation time. Household-load
 sources must be energy entities configured with Home Assistant's `state_class`

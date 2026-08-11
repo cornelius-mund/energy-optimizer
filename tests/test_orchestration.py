@@ -601,6 +601,81 @@ def test_configured_home_assistant_fetch_bootstraps_to_ten_year_limit(
     ]
 
 
+def test_configured_home_assistant_persists_short_bootstrap_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    retained_start = datetime(2025, 12, 31, 22, tzinfo=timezone.utc)
+
+    class FakeHomeAssistantImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            history_lookback_seconds: float = 0,
+            *,
+            now: datetime | None = None,
+        ) -> HouseholdLoadData:
+            del start_time, end_time, history_lookback_seconds, now
+            return HouseholdLoadData(
+                schema_version="1",
+                start_time=retained_start,
+                interval_minutes=60,
+                load_kw=(1.0, 2.0),
+                unit="kW",
+                source=SourceMetadata(
+                    provider="home-assistant", entity_id="household_load"
+                ),
+                retrieved_at=START,
+                latest_observation_at=START,
+            )
+
+        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
+        FakeHomeAssistantImporter,
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "household_load_entities": [
+                    {
+                        "entity_id": "sensor.household_energy",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=configuration(),
+    )
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+
+    cycle = orchestrator.run_due(START)
+
+    assert cycle.provider_runs[0].status == "success"
+    key = ProviderDataKey("household-load", "home-assistant", "household_load")
+    persisted = store.load(key, ADAPTER)
+    assert persisted is not None
+    assert persisted.start_time == retained_start
+    assert persisted.load_kw == (1.0, 2.0)
+
+
 def test_configured_home_assistant_fetch_starts_at_persisted_final_hour(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
