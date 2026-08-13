@@ -178,12 +178,13 @@ invalid files are not silently accepted.
 Household-load history is stored as human-readable newline-delimited JSON in
 `*.ndjson`, with one hourly observation per line. Each line contains the
 timestamp, load value, source identity, and retrieval metadata needed to rebuild
-the validated normalized model. New observations and overlapping corrections
-are appended; when a timestamp occurs more than once, the last line wins. Loads
-retain the newest 87,672 contiguous hourly values. Compaction runs when the
-physical record count exceeds the retention limit plus a small buffer, removing
-superseded and expired records through the same atomic replacement and backup
-path. An incomplete final line from an interrupted append is ignored. Existing
+the validated normalized model. Overlapping API corrections are appended; when
+a timestamp occurs more than once, the last line wins. Scheduled collection
+does not append overlapping completed hours. Loads retain the newest 87,672
+contiguous hourly values. Compaction runs when the physical record count
+exceeds the retention limit plus a small buffer, removing superseded and
+expired records through the same atomic replacement and backup path. An
+incomplete final line from an interrupted append is ignored. Existing
 household-load `*.json` and `*.json.bak` files are migrated to NDJSON on first
 access without losing valid primary or backup data.
 
@@ -208,8 +209,10 @@ service logs. Missed intervals are not replayed: the next run is scheduled from
 the completed attempt. Household-load collection bootstraps with up to the API
 maximum of 87,672 hourly values. If Home Assistant retains less history, the
 provider starts at the earliest safely derivable hour instead of requiring the
-full maximum. Later requests begin at the final persisted hour, intentionally
-overlapping it for correction.
+full maximum. Later requests begin at the first hour after the final persisted
+hour, so scheduled collection never re-fetches completed hours already in the
+store. If no completed hour is missing, the scheduled cycle skips the provider
+request and persistence write.
 
 Scheduled collection requires `persistence.directory`, so normalized data survives
 application restarts. Automatic plan generation is disabled until an optimization

@@ -146,8 +146,10 @@ period, history lookback, and polling cadence. An empty household-load store
 requests up to 87,672 hourly values through the latest completed UTC hour; when
 Home Assistant retains less history, normalization starts at the earliest safely
 derivable hour instead of fabricating older values. Later requests begin at the
-final persisted hour so overlapping values can correct history. Historical
-retention is independent of polling freshness.
+first hour after the final persisted hour, so scheduled collection does not
+re-fetch completed persisted values. A cycle with no missing completed hour
+skips provider retrieval and persistence. Historical retention is independent of
+polling freshness.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or
@@ -157,9 +159,10 @@ read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
 JSON model. Household-load history uses one self-contained hourly observation
-per line in an NDJSON file. Saves append new observations and overlapping
-corrections, and reads select the latest record for each timestamp before
-discarding values older than the 87,672-value ten-year limit. Compaction is
+per line in an NDJSON file. API submissions may append overlapping corrections,
+and reads select the latest record for each timestamp before discarding values
+older than the 87,672-value ten-year limit. Scheduled collection requests only
+missing completed hours and does not append overlapping records. Compaction is
 triggered after the physical record count exceeds that limit plus a bounded
 buffer; it atomically replaces the primary and preserves the prior valid
 history as the backup. An incomplete final append line is ignored, while other

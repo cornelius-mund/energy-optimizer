@@ -520,7 +520,7 @@ def test_configured_home_assistant_failure_preserves_persisted_data(
 
     orchestrator = build_configured_orchestrator(runtime_configuration, store)
     assert orchestrator is not None
-    cycle = orchestrator.run_due(START + timedelta(hours=1))
+    cycle = orchestrator.run_due(START + timedelta(hours=2))
 
     assert cycle.provider_runs[0].status == "failed"
     assert "no usable history" in (cycle.provider_runs[0].error or "")
@@ -676,7 +676,7 @@ def test_configured_home_assistant_persists_short_bootstrap_history(
     assert persisted.load_kw == (1.0, 2.0)
 
 
-def test_configured_home_assistant_fetch_starts_at_persisted_final_hour(
+def test_configured_home_assistant_fetch_starts_after_persisted_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[datetime, datetime | None, float, datetime | None]] = []
@@ -747,8 +747,96 @@ def test_configured_home_assistant_fetch_starts_at_persisted_final_hour(
     orchestrator.run_due(now)
 
     assert calls[0] == (
-        datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 11, tzinfo=timezone.utc),
         datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
         0,
         now,
     )
+
+
+def test_configured_home_assistant_skips_when_all_completed_hours_are_persisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[datetime, datetime | None, float, datetime | None]] = []
+
+    class FakeHomeAssistantImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            history_lookback_seconds: float = 0,
+            *,
+            now: datetime | None = None,
+        ) -> HouseholdLoadData:
+            calls.append((start_time, end_time, history_lookback_seconds, now))
+            return data(
+                start_time,
+                source="home-assistant",
+                entity_id="household_load",
+            )
+
+        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
+        FakeHomeAssistantImporter,
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "household_load_entities": [
+                    {
+                        "entity_id": "sensor.household_energy",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=configuration(interval_seconds=300),
+    )
+    store = ProviderDataStore(tmp_path)
+    key = ProviderDataKey("household-load", "home-assistant", "household_load")
+    store.save(
+        key,
+        ADAPTER,
+        data(
+            datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
+            source="home-assistant",
+            entity_id="household_load",
+        ),
+    )
+    history_files = tuple(sorted(tmp_path.glob("*.ndjson*")))
+    before = {path: path.read_bytes() for path in history_files}
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+
+    first_cycle = orchestrator.run_due(datetime(2026, 1, 1, 11, tzinfo=timezone.utc))
+    not_due_cycle = orchestrator.run_due(
+        datetime(2026, 1, 1, 11, 4, tzinfo=timezone.utc)
+    )
+    second_cycle = orchestrator.run_due(
+        datetime(2026, 1, 1, 11, 5, tzinfo=timezone.utc)
+    )
+
+    assert calls == []
+    assert first_cycle.provider_runs[0].status == "skipped"
+    assert first_cycle.provider_runs[0].error == "no missing completed hours"
+    assert not_due_cycle.provider_runs[0].status == "skipped"
+    assert not_due_cycle.provider_runs[0].error == "source is not due"
+    assert second_cycle.provider_runs[0].status == "skipped"
+    assert second_cycle.provider_runs[0].error == "no missing completed hours"
+    assert {path: path.read_bytes() for path in history_files} == before
