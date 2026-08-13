@@ -138,7 +138,8 @@ The container listens on port `8000`, runs as a non-root user, and uses
 The example configuration stores normalized provider data under
 `/app/data/provider-data`; mount `/app/data` as a durable volume so data survives
 container replacement.
-The image healthcheck calls the service health endpoint. Check it directly with:
+The image healthcheck calls the service health endpoint once per minute. Check
+it directly with:
 
 ```bash
 curl http://localhost:8000/health
