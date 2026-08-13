@@ -55,7 +55,7 @@ class ProviderRegistration:
     name: str
     data_type: str
     adapter: TypeAdapter[Any]
-    fetch: Callable[[datetime, DataSourceScheduleConfiguration], object]
+    fetch: Callable[[datetime, DataSourceScheduleConfiguration], object | None]
     is_fresh: Callable[[object, datetime], bool]
     load: Callable[[], object | None] | None = None
 
@@ -245,6 +245,26 @@ class ProviderOrchestrator:
             attempt_started = self._as_utc(cycle_clock())
             try:
                 data = registration.fetch(now, schedule)
+                if data is None:
+                    attempt_completed = self._as_utc(cycle_clock())
+                    self._next_due[registration.name] = attempt_completed + timedelta(
+                        seconds=schedule.interval_seconds
+                    )
+                    provider_runs.append(
+                        ProviderRun(
+                            source=registration.name,
+                            status="skipped",
+                            started_at=attempt_started,
+                            completed_at=attempt_completed,
+                            error="no missing completed hours",
+                        )
+                    )
+                    logger.info(
+                        "event=provider_refresh_skipped component=orchestration "
+                        "operation=refresh source=%s reason=no_missing_completed_hours",
+                        registration.name,
+                    )
+                    continue
                 saved_data = self.store.save(
                     self._key_for(registration.data_type, data),
                     registration.adapter,
@@ -493,7 +513,7 @@ def build_configured_orchestrator(
         def fetch_household_load(
             now: datetime,
             schedule: DataSourceScheduleConfiguration,
-        ) -> HouseholdLoadData:
+        ) -> HouseholdLoadData | None:
             end_time = now.replace(minute=0, second=0, microsecond=0)
             key = ProviderDataKey(
                 data_type="household-load",
@@ -505,8 +525,10 @@ def build_configured_orchestrator(
                 start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
             else:
                 start_time = persisted.start_time + timedelta(
-                    hours=len(persisted.load_kw) - 1
+                    hours=len(persisted.load_kw)
                 )
+            if start_time >= end_time:
+                return None
             return importer.fetch(
                 start_time,
                 end_time,
