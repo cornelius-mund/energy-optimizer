@@ -1,5 +1,6 @@
 """Tests for the Home Assistant household-load importer."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -82,7 +83,11 @@ def importer(
     )
 
 
-def test_fetch_converts_total_increasing_energy_to_hourly_load() -> None:
+def test_fetch_converts_total_increasing_energy_to_hourly_load(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/history/period/2025-12-31T23:00:00+00:00"
         assert request.url.params["filter_entity_id"] == ENTITY_ID
@@ -111,6 +116,18 @@ def test_fetch_converts_total_increasing_energy_to_hourly_load() -> None:
     assert data.source.entity_id == "household_load"
     assert data.retrieved_at == NOW
     assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+    request_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_request")
+    ]
+    assert len(request_logs) == 1
+    message = request_logs[0].getMessage()
+    assert (
+        "entity_id=sensor.household_energy "
+        "start_time=2025-12-31T23:00:00+00:00 "
+        "end_time=2026-01-01T04:00:00+00:00 status=200 duration_ms="
+    ) in message
 
 
 def test_total_increasing_observations_need_not_be_hour_aligned() -> None:
@@ -655,7 +672,7 @@ def test_fetch_does_not_return_partial_data_when_entity_has_no_usable_history() 
         client.close()
 
 
-def test_fetch_reports_http_failures() -> None:
+def test_fetch_reports_http_failures(caplog: pytest.LogCaptureFixture) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(401)
 
@@ -666,8 +683,18 @@ def test_fetch_reports_http_failures() -> None:
     finally:
         client.close()
 
+    request_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_request")
+    ]
+    assert len(request_logs) == 1
+    assert "entity_id=sensor.household_energy" in request_logs[0].getMessage()
+    assert "status=401" in request_logs[0].getMessage()
+    assert "test-token" not in request_logs[0].getMessage()
 
-def test_fetch_reports_timeout() -> None:
+
+def test_fetch_reports_timeout(caplog: pytest.LogCaptureFixture) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out")
 
@@ -677,6 +704,15 @@ def test_fetch_reports_timeout() -> None:
             provider.fetch(START, END, now=NOW)
     finally:
         client.close()
+
+    request_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_request")
+    ]
+    assert len(request_logs) == 1
+    assert "status=timeout" in request_logs[0].getMessage()
+    assert "test-token" not in request_logs[0].getMessage()
 
 
 def test_fetch_reports_malformed_json() -> None:

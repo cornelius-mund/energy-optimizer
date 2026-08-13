@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 
@@ -25,9 +26,6 @@ logger = logging.getLogger(__name__)
 
 class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant data cannot be imported safely."""
-
-
-logger = logging.getLogger(__name__)
 
 
 class HomeAssistantLoadImporter:
@@ -123,23 +121,13 @@ class HomeAssistantLoadImporter:
         observations: list[datetime] = []
         for entity in self.configuration.household_load_entities or []:
             query_start = start - timedelta(seconds=history_lookback_seconds)
-            logger.debug(
-                "event=provider_request_started component=home_assistant "
-                "operation=history_request entity_id=%s start_time=%s end_time=%s",
-                entity.entity_id,
+            response = self._request(
+                self._history_url(query_start, end, entity.entity_id),
+                entity,
                 query_start,
                 end,
             )
-            response = self._request(
-                self._history_url(query_start, end, entity.entity_id), entity
-            )
             records = self._parse_history(response, entity)
-            logger.debug(
-                "event=provider_response_parsed component=home_assistant "
-                "operation=history_request entity_id=%s record_count=%s",
-                entity.entity_id,
-                len(records),
-            )
             values, entity_start, latest_observation = self._normalize_records(
                 records, start, end, entity
             )
@@ -217,50 +205,88 @@ class HomeAssistantLoadImporter:
             f"&filter_entity_id={quote(entity_id)}"
         )
 
-    def _request(self, url: str, entity: HouseholdLoadEntityConfiguration) -> Any:
+    def _request(
+        self,
+        url: str,
+        entity: HouseholdLoadEntityConfiguration,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> Any:
         headers = {
             "Authorization": f"Bearer {self.configuration.token.get_secret_value()}",
             "Accept": "application/json",
         }
+        started_at = perf_counter()
+        status: int | str = "not_sent"
         try:
-            if self._client is not None:
-                response = self._client.get(
-                    url,
-                    headers=headers,
-                    timeout=self.configuration.timeout_seconds,
-                )
-            else:
-                with httpx.Client(timeout=self.configuration.timeout_seconds) as client:
-                    response = client.get(url, headers=headers)
-        except httpx.TimeoutException as error:
-            raise HomeAssistantError(
-                "Home Assistant request timed out; check the endpoint and timeout"
-            ) from error
-        except httpx.RequestError as error:
-            raise HomeAssistantError(
-                f"Home Assistant request failed: {error}"
-            ) from error
+            try:
+                if self._client is not None:
+                    response = self._client.get(
+                        url,
+                        headers=headers,
+                        timeout=self.configuration.timeout_seconds,
+                    )
+                else:
+                    with httpx.Client(
+                        timeout=self.configuration.timeout_seconds
+                    ) as client:
+                        response = client.get(url, headers=headers)
+            except httpx.TimeoutException as error:
+                status = "timeout"
+                raise HomeAssistantError(
+                    "Home Assistant request timed out; check the endpoint and timeout"
+                ) from error
+            except httpx.RequestError as error:
+                status = "transport_error"
+                raise HomeAssistantError(
+                    "Home Assistant request failed: transport error"
+                ) from error
 
-        if response.status_code in (401, 403):
-            raise HomeAssistantError(
-                "Home Assistant authentication failed; check the configured token"
+            status = response.status_code
+            if response.status_code in (401, 403):
+                raise HomeAssistantError(
+                    "Home Assistant authentication failed; check the configured token"
+                )
+            if response.status_code == 404:
+                raise HomeAssistantError(
+                    "Home Assistant household-load history was not found; check the "
+                    "configured entity ID and endpoint"
+                )
+            if response.is_error:
+                raise HomeAssistantError(
+                    "Home Assistant returned HTTP "
+                    f"{response.status_code} while retrieving household-load history"
+                )
+            try:
+                payload = response.json()
+            except ValueError as error:
+                raise HomeAssistantError(
+                    "Home Assistant returned malformed JSON for household-load history"
+                ) from error
+        except Exception as error:
+            logger.warning(
+                "event=home_assistant_history_request component=home_assistant "
+                "operation=history_request entity_id=%s start_time=%s end_time=%s "
+                "status=%s duration_ms=%.1f error_type=%s",
+                entity.entity_id,
+                start_time.isoformat(),
+                end_time.isoformat(),
+                status,
+                (perf_counter() - started_at) * 1000,
+                error.__class__.__name__,
             )
-        if response.status_code == 404:
-            raise HomeAssistantError(
-                "Home Assistant household-load history was not found for "
-                f"{entity.entity_id}; check the configured entity ID and endpoint"
-            )
-        if response.is_error:
-            raise HomeAssistantError(
-                "Home Assistant returned HTTP "
-                f"{response.status_code} while retrieving household-load history"
-            )
-        try:
-            return response.json()
-        except ValueError as error:
-            raise HomeAssistantError(
-                "Home Assistant returned malformed JSON for household-load history"
-            ) from error
+            raise
+        logger.info(
+            "event=home_assistant_history_request component=home_assistant "
+            "operation=history_request entity_id=%s start_time=%s end_time=%s "
+            "status=%s duration_ms=%.1f",
+            entity.entity_id,
+            start_time.isoformat(),
+            end_time.isoformat(),
+            status,
+            (perf_counter() - started_at) * 1000,
+        )
+        return payload
 
     def _parse_history(
         self, payload: Any, entity: HouseholdLoadEntityConfiguration

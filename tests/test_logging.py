@@ -150,6 +150,7 @@ def test_third_party_loggers_use_one_handler_and_formatter(
 
     uvicorn_logger.info("server ready")
     httpx_logger.info("HTTP Request: GET /health")
+    httpx_logger.info("connection pool ready")
 
     output = capsys.readouterr().out.splitlines()
     assert len(output) == 2
@@ -158,7 +159,7 @@ def test_third_party_loggers_use_one_handler_and_formatter(
         for line in output
     )
     assert output[0].endswith("server ready")
-    assert output[1].endswith("HTTP Request: GET /health")
+    assert output[1].endswith("connection pool ready")
     assert (
         len(
             [
