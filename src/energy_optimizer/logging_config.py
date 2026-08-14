@@ -31,6 +31,16 @@ _NORMALIZED_LOGGERS: Final[tuple[str, ...]] = (
 )
 
 
+class _SuppressHttpxRequestLog(logging.Filter):
+    """Drop generic HTTPX completion records replaced by provider events."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith("HTTP Request:")
+
+
+_SUPPRESS_HTTPX_REQUEST_LOG = _SuppressHttpxRequestLog()
+
+
 class ConsistentFormatter(logging.Formatter):
     """Render every physical log line with the same level and timestamp."""
 
@@ -127,6 +137,10 @@ def _configure_logging(level: int) -> int:
         normalized_logger.setLevel(logging.NOTSET)
         normalized_logger.disabled = False
         normalized_logger.propagate = True
+
+    httpx_logger = logging.getLogger("httpx")
+    if _SUPPRESS_HTTPX_REQUEST_LOG not in httpx_logger.filters:
+        httpx_logger.addFilter(_SUPPRESS_HTTPX_REQUEST_LOG)
 
     uvicorn_access = logging.getLogger("uvicorn.access")
     uvicorn_access.disabled = True

@@ -99,6 +99,9 @@ Request completion is logged once by the service with an `X-Request-ID`
 response header. Uvicorn access logging is disabled to avoid duplicate access
 records. Logs never include authorization headers, Home Assistant tokens, raw
 provider responses, complete request bodies, or complete energy series.
+Home Assistant history requests replace HTTPX's generic completion record with
+one `home_assistant_history_request` event containing the entity, time range,
+HTTP status, and duration.
 
 Configuration is expected to contain parameters such as:
 
