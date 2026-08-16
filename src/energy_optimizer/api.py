@@ -5,13 +5,13 @@ import logging
 import math
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Annotated, AsyncIterator, Awaitable, Callable, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -20,7 +20,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
+from starlette.staticfiles import StaticFiles
 
 from energy_optimizer import __version__
 from energy_optimizer.config import ConfigurationError, load_configuration
@@ -387,6 +388,32 @@ class HouseholdLoadResponse(BaseModel):
     latest_observation_at: datetime
 
 
+class HistoricHouseholdLoadResponse(BaseModel):
+    """Historic household-load actuals returned to the dashboard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["validated", "stale", "empty"]
+    data_type: Literal["household_load"]
+    schema_version: Literal["1"]
+    start_time: datetime = Field(description="Inclusive requested range start")
+    end_time: datetime = Field(description="Exclusive requested range end")
+    interval_minutes: Literal[60]
+    timestamps: list[datetime]
+    load_kw: list[float]
+    unit: Literal["kW"]
+    source: SourceMetadata
+    coverage_start_time: datetime | None
+    coverage_end_time: datetime | None
+    available_start_time: datetime
+    available_end_time: datetime
+    retrieved_at: datetime
+    latest_observation_at: datetime
+    validation_status: Literal["valid"]
+    freshness: Literal["fresh", "stale", "unknown"]
+    freshness_checked_at: datetime
+
+
 HOUSEHOLD_LOAD_ADAPTER = TypeAdapter(HouseholdLoadData)
 
 
@@ -608,6 +635,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Energy Optimizer", version=__version__, lifespan=lifespan)
+FRONTEND_DIRECTORY = Path(__file__).parents[2] / "frontend"
 
 
 @app.middleware("http")
@@ -656,6 +684,12 @@ async def log_requests(
 def health() -> dict[str, str]:
     """Return the service health and running version."""
     return {"status": "ok", "version": __version__}
+
+
+@app.get("/dashboard", include_in_schema=False)
+def dashboard_redirect() -> RedirectResponse:
+    """Redirect the dashboard root to its trailing-slash entry point."""
+    return RedirectResponse(url="/dashboard/", status_code=307)
 
 
 @app.post("/optimize", response_model=OptimizationResponse)
@@ -855,6 +889,143 @@ def persisted_household_load(request: Request) -> HouseholdLoadResponse:
     )
 
 
+@app.get(
+    "/api/v1/historic/household-load",
+    response_model=HistoricHouseholdLoadResponse,
+    responses={
+        404: {"description": "No persisted household-load data is available"},
+        503: {"description": "Persisted household-load data is unavailable"},
+    },
+)
+def historic_household_load(
+    request: Request,
+    start_time: datetime = Query(description="Inclusive timezone-aware range start"),
+    end_time: datetime = Query(description="Exclusive timezone-aware range end"),
+) -> HistoricHouseholdLoadResponse:
+    """Return persisted household-load actuals for a requested time range."""
+    if any(
+        timestamp.tzinfo is None or timestamp.utcoffset() is None
+        for timestamp in (start_time, end_time)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="start_time and end_time must include a timezone",
+        )
+    start = start_time.astimezone(timezone.utc)
+    end = end_time.astimezone(timezone.utc)
+    if end <= start:
+        raise HTTPException(
+            status_code=422,
+            detail="end_time must be later than start_time",
+        )
+    if end - start > timedelta(hours=MAX_HORIZON_HOURS):
+        raise HTTPException(
+            status_code=422,
+            detail=f"requested range must not exceed {MAX_HORIZON_HOURS} hours",
+        )
+
+    configuration = request.app.state.configuration
+    store = request.app.state.provider_data_store
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="provider data persistence is not configured",
+        )
+    if configuration.home_assistant is None:
+        raise HTTPException(
+            status_code=503,
+            detail="the Home Assistant household-load provider is not configured",
+        )
+
+    source = SourceMetadata(
+        provider="home-assistant",
+        entity_id=configuration.home_assistant.household_load_source_id,
+    )
+    key = ProviderDataKey(
+        data_type="household-load",
+        provider=source.provider,
+        entity_id=source.entity_id,
+    )
+    try:
+        complete_data = store.load(key, HOUSEHOLD_LOAD_ADAPTER)
+        if complete_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail="no persisted household-load provider data is available",
+            )
+        provider_data = store.load_household_load_range(key, start, end)
+    except HTTPException:
+        raise
+    except ProviderDataStoreError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not recover household-load provider data: {error}",
+        ) from error
+
+    available_start = complete_data.start_time.astimezone(timezone.utc)
+    available_end = available_start + timedelta(hours=len(complete_data.load_kw))
+    freshness = _household_load_freshness(
+        complete_data,
+        configuration.home_assistant.max_data_age_seconds,
+    )
+    response_status: Literal["validated", "stale", "empty"] = (
+        "empty"
+        if provider_data is None
+        else ("stale" if freshness == "stale" else "validated")
+    )
+    timestamps = (
+        [
+            provider_data.start_time.astimezone(timezone.utc) + timedelta(hours=index)
+            for index in range(len(provider_data.load_kw))
+        ]
+        if provider_data is not None
+        else []
+    )
+    return HistoricHouseholdLoadResponse(
+        status=response_status,
+        data_type="household_load",
+        schema_version=complete_data.schema_version,
+        start_time=start,
+        end_time=end,
+        interval_minutes=complete_data.interval_minutes,
+        timestamps=timestamps,
+        load_kw=list(provider_data.load_kw) if provider_data is not None else [],
+        unit=complete_data.unit,
+        source=SourceMetadata(
+            provider=complete_data.source.provider,
+            entity_id=complete_data.source.entity_id,
+        ),
+        coverage_start_time=(
+            provider_data.start_time if provider_data is not None else None
+        ),
+        coverage_end_time=(
+            provider_data.start_time + timedelta(hours=len(provider_data.load_kw))
+            if provider_data is not None
+            else None
+        ),
+        available_start_time=available_start,
+        available_end_time=available_end,
+        retrieved_at=complete_data.retrieved_at,
+        latest_observation_at=complete_data.latest_observation_at,
+        validation_status="valid",
+        freshness=freshness,
+        freshness_checked_at=datetime.now(timezone.utc),
+    )
+
+
+def _household_load_freshness(
+    data: HouseholdLoadData,
+    max_age_seconds: float | None,
+) -> Literal["fresh", "stale", "unknown"]:
+    """Assess polling freshness without invalidating historical actuals."""
+    if max_age_seconds is None:
+        return "unknown"
+    age_seconds = (
+        datetime.now(timezone.utc) - data.latest_observation_at.astimezone(timezone.utc)
+    ).total_seconds()
+    return "fresh" if age_seconds <= max_age_seconds else "stale"
+
+
 @app.post("/api/v1/pv-generation", response_model=PvGenerationResponse)
 def pv_generation(request: PvGenerationRequest) -> PvGenerationResponse:
     """Validate a versioned hourly PV-generation data series."""
@@ -881,4 +1052,12 @@ def grid_flow(request: GridFlowRequest) -> GridFlowResponse:
         export_kw=request.export_kw,
         unit=request.unit,
         source=request.source,
+    )
+
+
+if FRONTEND_DIRECTORY.is_dir():
+    app.mount(
+        "/dashboard",
+        StaticFiles(directory=FRONTEND_DIRECTORY, html=True),
+        name="dashboard",
     )

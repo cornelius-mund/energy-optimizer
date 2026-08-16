@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from energy_optimizer.api import MAX_HORIZON_HOURS, app
+from energy_optimizer.storage import ProviderDataKey
 
 
 def test_health_returns_service_status_and_version(
@@ -32,6 +33,31 @@ solver:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "version": "0.1.0"}
+
+
+def test_dashboard_is_served_by_the_application(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.get("/dashboard/")
+
+    assert response.status_code == 200
+    assert "Historic energy data" in response.text
 
 
 def valid_request() -> dict[str, object]:
@@ -749,6 +775,156 @@ def test_household_load_provider_data_is_merged_on_persistence(
     assert second_response.json()["start_time"] == "2026-01-01T00:00:00Z"
     assert second_response.json()["load_kw"] == [1.2, 9.0, 3.0]
     assert read_response.json() == second_response.json()
+
+
+def test_historic_household_load_returns_requested_range_and_metadata(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+    request = household_load_request()
+
+    with TestClient(app) as client:
+        client.post("/api/v1/household-load", json=request)
+        response = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T01:00:00+00:00",
+                "end_time": "2026-01-01T02:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "validated",
+        "data_type": "household_load",
+        "schema_version": "1",
+        "start_time": "2026-01-01T01:00:00Z",
+        "end_time": "2026-01-01T02:00:00Z",
+        "interval_minutes": 60,
+        "timestamps": ["2026-01-01T01:00:00Z"],
+        "load_kw": [1.0],
+        "unit": "kW",
+        "source": {"provider": "home-assistant", "entity_id": "household_load"},
+        "coverage_start_time": "2026-01-01T01:00:00Z",
+        "coverage_end_time": "2026-01-01T02:00:00Z",
+        "available_start_time": "2026-01-01T00:00:00Z",
+        "available_end_time": "2026-01-01T02:00:00Z",
+        "retrieved_at": "2026-01-01T00:00:00Z",
+        "latest_observation_at": "2026-01-01T01:00:00Z",
+        "validation_status": "valid",
+        "freshness": "unknown",
+        "freshness_checked_at": response.json()["freshness_checked_at"],
+    }
+
+
+def test_historic_household_load_reports_empty_range(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+
+    with TestClient(app) as client:
+        client.post("/api/v1/household-load", json=household_load_request())
+        response = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-02T00:00:00+00:00",
+                "end_time": "2026-01-02T01:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "empty"
+    assert body["timestamps"] == []
+    assert body["load_kw"] == []
+    assert body["coverage_start_time"] is None
+    assert body["coverage_end_time"] is None
+
+
+def test_historic_household_load_reports_stale_but_valid_history(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = persistence_configuration(tmp_path)
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8").replace(
+            "  timeout_seconds: 10", "  timeout_seconds: 10\n  max_data_age_seconds: 1"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        client.post("/api/v1/household-load", json=household_load_request())
+        response = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T01:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "stale"
+    assert response.json()["validation_status"] == "valid"
+
+
+def test_historic_household_load_reports_corrupt_persistence(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+    store = tmp_path / "provider-data"
+    store.mkdir()
+    key = "household-load-"
+    provider_key = ProviderDataKey("household-load", "home-assistant", "household_load")
+    (store / f"{key}{provider_key.digest()}.ndjson").write_text(
+        "invalid\n", encoding="utf-8"
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T01:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 503
+    assert "could not recover" in response.json()["detail"]
+
+
+def test_historic_household_load_rejects_invalid_ranges(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+
+    with TestClient(app) as client:
+        responses = [
+            client.get(
+                "/api/v1/historic/household-load",
+                params={
+                    "start_time": "2026-01-01T01:00:00+00:00",
+                    "end_time": "2026-01-01T00:00:00+00:00",
+                },
+            ),
+            client.get(
+                "/api/v1/historic/household-load",
+                params={
+                    "start_time": "2026-01-01T00:00:00",
+                    "end_time": "2026-01-01T01:00:00+00:00",
+                },
+            ),
+        ]
+
+    assert all(response.status_code == 422 for response in responses)
 
 
 def test_household_load_direct_submission_is_not_persisted(

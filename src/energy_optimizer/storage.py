@@ -339,6 +339,27 @@ class ProviderDataStore:
             f"{key.data_type}/{key.provider}/{key.entity_id or 'default'}"
         )
 
+    def load_household_load_range(
+        self,
+        key: ProviderDataKey,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> HouseholdLoadData | None:
+        """Load retained household-load points within a half-open range."""
+        if key.data_type != "household-load":
+            raise ProviderDataStoreError(
+                "household-load range queries require the household-load data type"
+            )
+        start = _as_utc(start_time)
+        end = _as_utc(end_time)
+        if end <= start:
+            raise ProviderDataStoreError("household-load range must be non-empty")
+
+        history = self._load_household_history(key)
+        if history is None:
+            return None
+        return _slice_household_load(history.model, start, end)
+
     def _paths(self, key: ProviderDataKey) -> tuple[Path, Path]:
         filename = f"{key.data_type}-{key.digest()}"
         extension = ".ndjson" if key.data_type == "household-load" else ".json"
@@ -587,6 +608,32 @@ def merge_household_load_history(
         source=incoming.source,
         retrieved_at=_as_utc(incoming.retrieved_at),
         latest_observation_at=_as_utc(incoming.latest_observation_at),
+    )
+
+
+def _slice_household_load(
+    data: HouseholdLoadData,
+    start_time: datetime,
+    end_time: datetime,
+) -> HouseholdLoadData | None:
+    """Return hourly observations overlapping a half-open range."""
+    points = _household_load_points(data)
+    selected = [
+        (timestamp, value)
+        for timestamp, value in sorted(points.items())
+        if start_time <= timestamp < end_time
+    ]
+    if not selected:
+        return None
+    return HouseholdLoadData(
+        schema_version=data.schema_version,
+        start_time=selected[0][0],
+        interval_minutes=60,
+        load_kw=tuple(value for _, value in selected),
+        unit=data.unit,
+        source=data.source,
+        retrieved_at=_as_utc(data.retrieved_at),
+        latest_observation_at=_as_utc(data.latest_observation_at),
     )
 
 
