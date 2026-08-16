@@ -171,6 +171,16 @@ household-load JSON primary and backup files are migrated to NDJSON on first
 access. Scheduled and API persistence use the same append and compaction
 behavior.
 
+The historic household-load read endpoint queries this normalized store rather
+than exposing files. It accepts a timezone-aware half-open range, returns only
+the retained hourly points in that range, and includes requested coverage,
+available coverage, source metadata, retrieval metadata, validation status, and
+polling freshness. Historical validity and polling freshness are separate: a
+stale observation remains usable historical actual data and is reported as
+stale, while corrupt or unrecoverable persistence is returned as a service
+error. The dashboard consumes this contract and labels its values as actuals;
+it does not infer provider semantics or combine forecasts and plans.
+
 ### Optimization
 
 The optimization component builds a Pyomo mixed-integer linear program, applies

@@ -8,6 +8,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
+COPY frontend ./frontend
 COPY config.example.yaml ./config.yaml
 
 RUN pip install --no-cache-dir . \

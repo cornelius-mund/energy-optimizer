@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#10231f" />
+    <title>Historic energy data | Energy Optimizer</title>
+    <link rel="stylesheet" href="/dashboard/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Energy Optimizer / Data archive</p>
+          <h1>Historic energy data</h1>
+          <p class="lede">
+            Review imported household load actuals without mixing them with
+            predictions or optimization plans.
+          </p>
+        </div>
+        <div class="actual-badge"><span></span> Historic actuals</div>
+      </header>
+
+      <section class="controls" aria-labelledby="range-heading">
+        <div class="section-heading">
+          <p class="eyebrow">Time window</p>
+          <h2 id="range-heading">Choose a day or range</h2>
+        </div>
+        <form id="range-form" class="range-form">
+          <label>
+            <span>Start</span>
+            <input id="start-date" name="start" type="date" required />
+          </label>
+          <label>
+            <span>End</span>
+            <input id="end-date" name="end" type="date" required />
+          </label>
+          <button type="submit">Load actuals</button>
+        </form>
+        <p class="range-help">Dates use UTC boundaries. The end date is included.</p>
+      </section>
+
+      <div id="status" class="status" role="status" aria-live="polite"></div>
+
+      <section id="content" class="dashboard-grid" hidden>
+        <article class="chart-card card">
+          <div class="card-heading">
+            <div>
+              <p class="eyebrow">Imported series</p>
+              <h2>Household load</h2>
+            </div>
+            <div class="legend"><span></span> Load <strong>(kW)</strong></div>
+          </div>
+          <div class="chart-wrap">
+            <svg id="chart" viewBox="0 0 800 330" role="img" aria-labelledby="chart-title chart-description">
+              <title id="chart-title">Historic household load</title>
+              <desc id="chart-description">Hourly household load values.</desc>
+              <g id="grid-lines"></g>
+              <path id="area" class="area" d=""></path>
+              <path id="line" class="line" d=""></path>
+              <g id="points"></g>
+              <g id="labels"></g>
+            </svg>
+          </div>
+          <p class="chart-note">Each point represents one completed hourly interval.</p>
+        </article>
+
+        <aside class="details-card card" aria-labelledby="details-heading">
+          <p class="eyebrow">Data quality</p>
+          <h2 id="details-heading">About this series</h2>
+          <dl id="details" class="details"></dl>
+          <div class="interpretation">
+            <strong>How to read this</strong>
+            <p>These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.</p>
+          </div>
+        </aside>
+      </section>
+
+      <footer>
+        <a href="/docs">API documentation</a>
+        <span>Energy Optimizer | AGPLv3 | no warranty | <a href="/dashboard/THIRD-PARTY-NOTICES.md">notices</a></span>
+      </footer>
+    </main>
+    <script src="/dashboard/app.js" defer></script>
+  </body>
+</html>

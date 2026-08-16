@@ -490,6 +490,25 @@ HTTP 422 with field-level validation details. Historical data is not rejected
 because it is old; polling health is assessed separately with the provider's
 optional freshness threshold.
 
+### Historic household-load dashboard
+
+Open `/dashboard/` to inspect imported household-load actuals. The dashboard
+supports a UTC day or inclusive date range and uses the read-only endpoint
+`GET /api/v1/historic/household-load?start_time=<inclusive>&end_time=<exclusive>`.
+The endpoint returns explicit hourly timestamps, `kW` values, source identity,
+requested and available coverage, retrieval metadata, validation status, and
+polling freshness. A response with `status: "stale"` still contains valid
+historical actuals; it means only that the newest observation is older than the
+configured polling threshold. `status: "empty"` means the persisted history
+exists but has no observations in the requested range. Corrupt or unrecoverable
+persistence returns HTTP 503 rather than data that could be mistaken for valid
+actuals.
+
+The view labels the series as historic actuals and deliberately does not mix it
+with predicted inputs or optimization plans. The current slice displays
+household load; additional asset series can use the same dashboard contract as
+their provider imports become available.
+
 ### PV-generation API
 
 `POST /api/v1/pv-generation` validates a normalized hourly PV-generation

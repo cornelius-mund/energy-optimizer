@@ -193,6 +193,37 @@ def test_store_merges_hourly_history_and_incoming_values_win(
     assert reloaded == merged
 
 
+def test_store_loads_only_points_in_a_half_open_range(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0, 3.0, 4.0]))
+
+    selected = store.load_household_load_range(
+        KEY,
+        start + timedelta(hours=1),
+        start + timedelta(hours=3),
+    )
+
+    assert selected is not None
+    assert selected.start_time == start + timedelta(hours=1)
+    assert selected.load_kw == (2.0, 3.0)
+
+
+def test_store_returns_none_for_a_range_without_points(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+
+    assert (
+        store.load_household_load_range(
+            KEY,
+            start + timedelta(hours=3),
+            start + timedelta(hours=4),
+        )
+        is None
+    )
+
+
 def test_store_appends_new_observations_without_rewriting_existing_lines(
     tmp_path: Path,
 ) -> None:

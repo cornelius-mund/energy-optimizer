@@ -132,6 +132,47 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/historic/household-load:
+    get:
+      summary: Historic Household Load
+      description: Return persisted household-load actuals for a requested time range.
+      operationId: historic_household_load_api_v1_historic_household_load_get
+      parameters:
+      - name: start_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          description: Inclusive timezone-aware range start
+          title: Start Time
+        description: Inclusive timezone-aware range start
+      - name: end_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          description: Exclusive timezone-aware range end
+          title: End Time
+        description: Exclusive timezone-aware range end
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoricHouseholdLoadResponse'
+        '404':
+          description: No persisted household-load data is available
+        '503':
+          description: Persisted household-load data is unavailable
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/pv-generation:
     post:
       summary: Pv Generation
@@ -621,6 +662,121 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    HistoricHouseholdLoadResponse:
+      properties:
+        status:
+          type: string
+          enum:
+          - validated
+          - stale
+          - empty
+          title: Status
+        data_type:
+          type: string
+          const: household_load
+          title: Data Type
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+          description: Inclusive requested range start
+        end_time:
+          type: string
+          format: date-time
+          title: End Time
+          description: Exclusive requested range end
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+        timestamps:
+          items:
+            type: string
+            format: date-time
+          type: array
+          title: Timestamps
+        load_kw:
+          items:
+            type: number
+          type: array
+          title: Load Kw
+        unit:
+          type: string
+          const: kW
+          title: Unit
+        source:
+          $ref: '#/components/schemas/SourceMetadata'
+        coverage_start_time:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Coverage Start Time
+        coverage_end_time:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Coverage End Time
+        available_start_time:
+          type: string
+          format: date-time
+          title: Available Start Time
+        available_end_time:
+          type: string
+          format: date-time
+          title: Available End Time
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+        latest_observation_at:
+          type: string
+          format: date-time
+          title: Latest Observation At
+        validation_status:
+          type: string
+          const: valid
+          title: Validation Status
+        freshness:
+          type: string
+          enum:
+          - fresh
+          - stale
+          - unknown
+          title: Freshness
+        freshness_checked_at:
+          type: string
+          format: date-time
+          title: Freshness Checked At
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - data_type
+      - schema_version
+      - start_time
+      - end_time
+      - interval_minutes
+      - timestamps
+      - load_kw
+      - unit
+      - source
+      - coverage_start_time
+      - coverage_end_time
+      - available_start_time
+      - available_end_time
+      - retrieved_at
+      - latest_observation_at
+      - validation_status
+      - freshness
+      - freshness_checked_at
+      title: HistoricHouseholdLoadResponse
+      description: Historic household-load actuals returned to the dashboard.
     HourlyOptimizationRequest:
       properties:
         start_time:
