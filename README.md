@@ -509,6 +509,11 @@ with predicted inputs or optimization plans. The current slice displays
 household load; additional asset series can use the same dashboard contract as
 their provider imports become available.
 
+The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so
+the dashboard remains available after the Python application is installed into
+the image. Source-tree deployments may omit this setting when the repository's
+`frontend/` directory is present.
+
 ### PV-generation API
 
 `POST /api/v1/pv-generation` validates a normalized hourly PV-generation

@@ -3,10 +3,16 @@
 import json
 from pathlib import Path
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from energy_optimizer.api import MAX_HORIZON_HOURS, app
+from energy_optimizer.api import (
+    MAX_HORIZON_HOURS,
+    app,
+    configured_frontend_directory,
+    dashboard_redirect,
+)
 from energy_optimizer.storage import ProviderDataKey
 
 
@@ -58,6 +64,81 @@ solver:
 
     assert response.status_code == 200
     assert "Historic energy data" in response.text
+
+
+def test_dashboard_serves_its_static_assets(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        html = client.get("/dashboard/")
+        javascript = client.get("/dashboard/app.js")
+        stylesheet = client.get("/dashboard/styles.css")
+
+    assert html.status_code == 200
+    assert javascript.status_code == 200
+    assert stylesheet.status_code == 200
+
+
+def test_dashboard_root_redirects_to_the_trailing_slash_path(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        """
+time_resolution_minutes: 60
+grid:
+  maximum_import_kw: 10
+  maximum_export_kw: 10
+solver:
+  name: highs
+  time_limit_seconds: 60
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+
+    with TestClient(app) as client:
+        response = client.get("/dashboard", follow_redirects=False)
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/dashboard/"
+
+
+def test_missing_dashboard_assets_return_service_unavailable(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("energy_optimizer.api.FRONTEND_DIRECTORY", tmp_path / "missing")
+
+    try:
+        dashboard_redirect()
+    except HTTPException as error:
+        assert error.status_code == 503
+        assert "dashboard assets" in str(error.detail)
+    else:
+        raise AssertionError("missing dashboard assets must not redirect")
+
+
+def test_frontend_directory_can_be_configured_for_installed_deployments(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("ENERGY_OPTIMIZER_FRONTEND_DIRECTORY", str(tmp_path))
+
+    assert configured_frontend_directory() == tmp_path
 
 
 def valid_request() -> dict[str, object]:

@@ -14,7 +14,12 @@ docker run --detach --name "$container" --publish 18000:8000 "$image" >/dev/null
 
 for _ in {1..30}; do
     if curl --fail --silent http://127.0.0.1:18000/health >/dev/null; then
-        curl --fail --silent http://127.0.0.1:18000/dashboard/ >/dev/null
+        curl --fail --silent --show-error --location --max-redirs 1 \
+            http://127.0.0.1:18000/dashboard/ >/dev/null
+        curl --fail --silent --show-error \
+            http://127.0.0.1:18000/dashboard/app.js >/dev/null
+        curl --fail --silent --show-error \
+            http://127.0.0.1:18000/dashboard/styles.css >/dev/null
         health_status="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
         if [[ "$health_status" == "healthy" ]]; then
             printf 'Docker smoke test passed.\n'
