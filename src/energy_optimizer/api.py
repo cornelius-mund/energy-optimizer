@@ -635,7 +635,20 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Energy Optimizer", version=__version__, lifespan=lifespan)
-FRONTEND_DIRECTORY = Path(__file__).parents[2] / "frontend"
+DEFAULT_FRONTEND_DIRECTORY = Path(__file__).parents[2] / "frontend"
+
+
+def configured_frontend_directory() -> Path:
+    """Return the dashboard directory for source and installed deployments."""
+    return Path(
+        os.environ.get(
+            "ENERGY_OPTIMIZER_FRONTEND_DIRECTORY",
+            str(DEFAULT_FRONTEND_DIRECTORY),
+        )
+    )
+
+
+FRONTEND_DIRECTORY = configured_frontend_directory()
 
 
 @app.middleware("http")
@@ -689,6 +702,11 @@ def health() -> dict[str, str]:
 @app.get("/dashboard", include_in_schema=False)
 def dashboard_redirect() -> RedirectResponse:
     """Redirect the dashboard root to its trailing-slash entry point."""
+    if not FRONTEND_DIRECTORY.is_dir():
+        raise HTTPException(
+            status_code=503,
+            detail="dashboard assets are not available in this deployment",
+        )
     return RedirectResponse(url="/dashboard/", status_code=307)
 
 

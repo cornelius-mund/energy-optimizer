@@ -28,3 +28,4 @@ def test_dockerfile_copies_the_dashboard_assets() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
     assert "COPY frontend ./frontend" in dockerfile
+    assert "ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend" in dockerfile
