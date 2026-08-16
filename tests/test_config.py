@@ -135,6 +135,69 @@ def test_load_configuration_allows_no_home_assistant_provider(
     assert configuration.home_assistant is None
 
 
+def test_load_configuration_returns_forecast_solar_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION
+        + "forecast_solar:\n"
+        + "  latitude: 52.52\n"
+        + "  longitude: 13.41\n"
+        + "  declination_degrees: 35\n"
+        + "  azimuth_degrees: 0\n"
+        + "  peak_power_kw: 8\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.forecast_solar is not None
+    assert configuration.forecast_solar.base_url.host == "api.forecast.solar"
+    assert configuration.forecast_solar.pv_generation_source_id == "pv_generation"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("latitude", 91),
+        ("longitude", 181),
+        ("declination_degrees", 91),
+        ("azimuth_degrees", 181),
+        ("peak_power_kw", 0),
+    ],
+)
+def test_load_configuration_rejects_invalid_forecast_solar_settings(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION
+        + "forecast_solar:\n"
+        + "  latitude: 52.52\n"
+        + "  longitude: 13.41\n"
+        + "  declination_degrees: 35\n"
+        + "  azimuth_degrees: 0\n"
+        + "  peak_power_kw: 8\n",
+        encoding="utf-8",
+    )
+    defaults = {
+        "latitude": 52.52,
+        "longitude": 13.41,
+        "declination_degrees": 35,
+        "azimuth_degrees": 0,
+        "peak_power_kw": 8,
+    }
+    document = path.read_text(encoding="utf-8").replace(
+        f"  {field}: {defaults[field]}\n",
+        f"  {field}: {value}\n",
+    )
+    path.write_text(document, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=f"forecast_solar.{field}"):
+        load_configuration(path)
+
+
 def test_load_configuration_rejects_invalid_home_assistant_settings(
     tmp_path: Path,
 ) -> None:

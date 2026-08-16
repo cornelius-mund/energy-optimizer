@@ -17,10 +17,15 @@ from energy_optimizer.config import (
     DataSourceScheduleConfiguration,
     OrchestrationConfiguration,
 )
+from energy_optimizer.providers.forecast_solar import (
+    FORECAST_SOLAR_MIN_INTERVAL_SECONDS,
+    ForecastSolarImporter,
+)
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     HouseholdLoadData,
+    PvGenerationData,
     SourceMetadata,
 )
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
@@ -555,6 +560,57 @@ def build_configured_orchestrator(
                     ),
                     TypeAdapter(HouseholdLoadData),
                 ),
+            )
+        )
+
+    if (
+        configuration.forecast_solar is not None
+        and "pv_generation" in orchestration.sources
+    ):
+        schedule = orchestration.sources["pv_generation"]
+        if (
+            schedule.enabled
+            and schedule.interval_seconds < FORECAST_SOLAR_MIN_INTERVAL_SECONDS
+        ):
+            raise OrchestrationError(
+                "pv_generation polling interval must be at least "
+                f"{FORECAST_SOLAR_MIN_INTERVAL_SECONDS} seconds for the "
+                "Forecast.Solar public rate limit"
+            )
+        forecast_solar = configuration.forecast_solar
+        pv_importer = ForecastSolarImporter(forecast_solar)
+        adapter = TypeAdapter(PvGenerationData)
+
+        def fetch_pv_generation(
+            now: datetime,
+            schedule: DataSourceScheduleConfiguration,
+        ) -> PvGenerationData:
+            del schedule
+            start_time = now.replace(minute=0, second=0, microsecond=0)
+            return pv_importer.fetch(start_time, now=now)
+
+        def load_pv_generation() -> PvGenerationData | None:
+            return store.load(
+                ProviderDataKey(
+                    data_type="pv-generation",
+                    provider="forecast.solar",
+                    entity_id=forecast_solar.pv_generation_source_id,
+                ),
+                adapter,
+            )
+
+        registrations.append(
+            ProviderRegistration(
+                name="pv_generation",
+                data_type="pv-generation",
+                adapter=adapter,
+                fetch=fetch_pv_generation,
+                is_fresh=lambda data, now: (
+                    pv_importer.is_fresh(data, now=now)
+                    if isinstance(data, PvGenerationData)
+                    else False
+                ),
+                load=load_pv_generation,
             )
         )
 

@@ -225,6 +225,36 @@ all required sources have current, valid data; the plan generator receives one
 coherent `ProviderDataSnapshot`. Concurrent orchestration cycles are skipped to
 avoid duplicate plans.
 
+### Forecast.Solar PV forecast importer
+
+`ForecastSolarImporter` retrieves PV production forecasts directly from the free
+public Forecast.Solar API. Home Assistant, an account, and an API key are not
+required. Configure the installation location, panel declination and azimuth,
+and installed peak power. Forecast.Solar uses azimuth `0` for south, `-90` for
+east, and `90` for west.
+
+The provider converts Forecast.Solar's irregular sunrise and sunset
+`watt_hours_period` response into hourly UTC `generation_kw` values. It validates
+timestamps, time-zone metadata, coverage, units, and finite non-negative values,
+then returns `PvGenerationData` with `retrieved_at` and `expires_at` metadata.
+Forecasts are persisted through the generic replace-based JSON provider store.
+The public tier is free for private use, supports one plane, hourly resolution,
+and today plus the following day. Configure polling conservatively to respect
+the public rate limit of 12 requests per IP per rolling hour.
+
+Example:
+
+```yaml
+forecast_solar:
+  latitude: 52.52
+  longitude: 13.41
+  declination_degrees: 35
+  azimuth_degrees: 0
+  peak_power_kw: 8
+  timeout_seconds: 10
+  max_data_age_seconds: 7200
+```
+
 ### Home Assistant household-load importer
 
 `HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's
