@@ -525,6 +525,27 @@ class HomeAssistantEnergyAggregator:
                     f"Home Assistant total entity {entity.entity_id} decreased "
                     "without a changed last_reset timestamp"
                 )
+            delta_kwh = delta * factor
+            maximum_delta_kwh = entity.maximum_interval_energy_kwh
+            if delta_kwh > maximum_delta_kwh:
+                self._mark_quality(
+                    quality,
+                    timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "physical_limit_exceeded",
+                )
+                logger.warning(
+                    "event=home_assistant_delta_rejected "
+                    "component=home_assistant operation=normalize "
+                    "entity_id=%s timestamp=%s delta_kwh=%s "
+                    "maximum_interval_energy_kwh=%s reason=physical_limit_exceeded",
+                    entity.entity_id,
+                    timestamp.isoformat(),
+                    delta_kwh,
+                    maximum_delta_kwh,
+                )
+                delta = 0.0
             elapsed_seconds = (timestamp - effective_start).total_seconds()
             if elapsed_seconds > 0:
                 hour = math.ceil(elapsed_seconds / 3600) - 1

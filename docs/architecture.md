@@ -152,6 +152,10 @@ persistence, historic API responses, and orchestration; required suspect data
 cannot trigger an optimization plan. A failed chunk fails the complete provider
 fetch, so scheduled orchestration preserves the last valid persisted data and
 retries on a later due cycle.
+Each cumulative-energy mapping may additionally define a physical upper bound
+for one hourly delta in kWh. The bound is applied after unit conversion and
+before signed aggregation; an exceeded bound produces zero energy and suspect
+quality with reason `physical_limit_exceeded`.
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns

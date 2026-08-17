@@ -57,6 +57,7 @@ class HomeAssistantEnergyEntityConfiguration(BaseModel):
     state_class: Literal["total", "total_increasing"]
     unit: Literal["Wh", "kWh", "MWh"]
     operation: Literal["add", "subtract"]
+    maximum_interval_energy_kwh: float = Field(default=100, gt=0)
 
 
 # Preserve the existing configuration name for integrations importing it directly.
