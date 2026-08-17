@@ -17,6 +17,7 @@ from energy_optimizer.providers.home_assistant_energy import (
 from energy_optimizer.providers.interfaces import (
     GRID_FLOW_SOURCE_ID,
     GridFlowData,
+    IntervalQuality,
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import as_utc
@@ -121,6 +122,13 @@ class HomeAssistantGridFlowImporter:
                 import_series.latest_observation_at,
                 export_series.latest_observation_at,
             ),
+            quality=self._combine_quality(
+                import_series.quality,
+                export_series.quality,
+                value_count,
+                import_offset,
+                export_offset,
+            ),
         )
         logger.info(
             "event=provider_fetch_succeeded component=home_assistant operation=fetch "
@@ -130,6 +138,28 @@ class HomeAssistantGridFlowImporter:
             len(data.import_kw),
         )
         return data
+
+    @staticmethod
+    def _combine_quality(
+        import_quality: tuple[IntervalQuality, ...],
+        export_quality: tuple[IntervalQuality, ...],
+        value_count: int,
+        import_offset: int,
+        export_offset: int,
+    ) -> tuple[IntervalQuality, ...]:
+        """Propagate the worst quality from either grid channel."""
+        quality = [IntervalQuality()] * value_count
+        for source_quality, offset in (
+            (import_quality, import_offset),
+            (export_quality, export_offset),
+        ):
+            aligned = source_quality[offset : offset + value_count]
+            for index, item in enumerate(aligned):
+                if item.status == "suspect":
+                    quality[index] = item
+        return (
+            tuple(quality) if any(item.status == "suspect" for item in quality) else ()
+        )
 
     def is_fresh(
         self,

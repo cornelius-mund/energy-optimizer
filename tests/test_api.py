@@ -946,6 +946,7 @@ def test_historic_household_load_returns_requested_range_and_metadata(
         "interval_minutes": 60,
         "timestamps": ["2026-01-01T01:00:00Z"],
         "load_kw": [1.0],
+        "quality": [{"status": "valid", "reason": None, "entity_id": None}],
         "unit": "kW",
         "source": {"provider": "home-assistant", "entity_id": "household_load"},
         "coverage_start_time": "2026-01-01T01:00:00Z",

@@ -30,6 +30,7 @@ from energy_optimizer.providers.interfaces import (
     BatteryData,
     GridFlowData,
     HouseholdLoadData,
+    IntervalQuality,
     PvGenerationData,
     SourceMetadata,
 )
@@ -435,6 +436,41 @@ def test_stale_refresh_does_not_create_plan(tmp_path: Path) -> None:
     cycle = orchestrator.run_due(START)
 
     assert cycle.provider_runs[0].status == "stale"
+    assert cycle.plan_status == "not-ready"
+    assert plans == []
+
+
+def test_suspect_refresh_does_not_create_plan(tmp_path: Path) -> None:
+    plans: list[ProviderDataSnapshot] = []
+
+    def generate(snapshot: ProviderDataSnapshot) -> object:
+        plans.append(snapshot)
+        return snapshot
+
+    def fetch(_: datetime, __: Any) -> HouseholdLoadData:
+        return HouseholdLoadData(
+            **{
+                **data(START).__dict__,
+                "quality": (
+                    IntervalQuality(
+                        status="suspect",
+                        reason="reset_recovery",
+                        entity_id="sensor.household_energy",
+                    ),
+                ),
+            }
+        )
+
+    orchestrator = ProviderOrchestrator(
+        configuration(optimization_enabled=True),
+        [registration(fetch)],
+        ProviderDataStore(tmp_path),
+        plan_generator=generate,
+    )
+
+    cycle = orchestrator.run_due(START)
+
+    assert cycle.provider_runs[0].status == "suspect"
     assert cycle.plan_status == "not-ready"
     assert plans == []
 

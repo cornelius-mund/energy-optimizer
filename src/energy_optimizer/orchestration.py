@@ -40,7 +40,7 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
 logger = logging.getLogger(__name__)
 
-RunStatus = Literal["success", "failed", "stale", "skipped"]
+RunStatus = Literal["success", "failed", "stale", "suspect", "skipped"]
 PlanStatus = Literal[
     "disabled",
     "not-ready",
@@ -288,9 +288,13 @@ class ProviderOrchestrator:
                 self._next_due[registration.name] = attempt_completed + timedelta(
                     seconds=schedule.interval_seconds
                 )
-                if registration.is_fresh(saved_data, now):
+                status: RunStatus
+                if self._has_suspect_quality(saved_data):
+                    status = "suspect"
+                    error = "provider returned suspect interval data"
+                elif registration.is_fresh(saved_data, now):
                     fresh_data[registration.name] = saved_data
-                    status: RunStatus = "success"
+                    status = "success"
                     error = None
                 else:
                     status = "stale"
@@ -304,7 +308,9 @@ class ProviderOrchestrator:
                         error=error,
                     )
                 )
-                log_method = logger.warning if status == "stale" else logger.info
+                log_method = (
+                    logger.warning if status in {"stale", "suspect"} else logger.info
+                )
                 log_method(
                     "event=provider_refresh_completed component=orchestration "
                     "operation=refresh source=%s status=%s duration_seconds=%.3f",
@@ -384,7 +390,11 @@ class ProviderOrchestrator:
                 "reason=required_source_blocked source_count=%s",
                 len(required & blocked_sources),
             )
-            return "not-ready", "a required source failed or returned stale data"
+            return (
+                "not-ready",
+                "a required source failed, returned stale data, or contains "
+                "suspect data",
+            )
         if not required.issubset(fresh_data):
             logger.warning(
                 "event=optimization_skipped component=orchestration operation=plan "
@@ -446,6 +456,12 @@ class ProviderOrchestrator:
             if registration.name == source
         )
         return registration.is_fresh(data, now)
+
+    @staticmethod
+    def _has_suspect_quality(data: object) -> bool:
+        """Return whether normalized provider data contains suspect intervals."""
+        quality = getattr(data, "quality", ())
+        return any(getattr(item, "status", None) == "suspect" for item in quality)
 
     def _is_due(
         self,

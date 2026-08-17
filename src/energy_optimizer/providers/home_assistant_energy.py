@@ -16,6 +16,7 @@ from energy_optimizer.config import (
     HomeAssistantEnergyEntityConfiguration,
 )
 from energy_optimizer.providers.http import JsonHttpClient
+from energy_optimizer.providers.interfaces import IntervalQuality
 from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class HomeAssistantEnergySeries:
     start_time: datetime
     values_kw: tuple[float, ...]
     latest_observation_at: datetime
+    quality: tuple[IntervalQuality, ...] = ()
 
 
 class HomeAssistantEnergyAggregator:
@@ -86,6 +88,7 @@ class HomeAssistantEnergyAggregator:
             )
         value_count = int((end - aggregate_start).total_seconds() // 3600)
         values = [0.0] * value_count
+        quality: list[IntervalQuality] = [IntervalQuality()] * value_count
         for series, operation in contributions:
             offset = int((aggregate_start - series.start_time).total_seconds() // 3600)
             aligned = series.values_kw[offset : offset + value_count]
@@ -96,6 +99,14 @@ class HomeAssistantEnergyAggregator:
             sign = 1.0 if operation == "add" else -1.0
             for index, value in enumerate(aligned):
                 values[index] += sign * value
+            aligned_quality = series.quality[offset : offset + value_count]
+            if aligned_quality and len(aligned_quality) != value_count:
+                raise HomeAssistantError(
+                    f"Home Assistant {label} entities returned misaligned quality data"
+                )
+            for index, item in enumerate(aligned_quality):
+                if item.status == "suspect":
+                    quality[index] = item
 
         for index, value in enumerate(values):
             if not math.isfinite(value) or value < -1e-9:
@@ -111,6 +122,11 @@ class HomeAssistantEnergyAggregator:
             values_kw=tuple(values),
             latest_observation_at=min(
                 series.latest_observation_at for series, _ in contributions
+            ),
+            quality=(
+                tuple(quality)
+                if any(item.status == "suspect" for item in quality)
+                else ()
             ),
         )
 
@@ -389,6 +405,7 @@ class HomeAssistantEnergyAggregator:
                 "history after its earliest usable observation"
             )
         values = [0.0] * hour_count
+        quality = [IntervalQuality()] * hour_count
         previous_value = baseline[1]
         previous_reset = baseline[2]
         reset_baseline: float | None = None
@@ -400,6 +417,13 @@ class HomeAssistantEnergyAggregator:
             if reset_marker_changed:
                 delta = 0.0
                 reset_baseline = previous_value
+                self._mark_quality(
+                    quality,
+                    timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "counter_reset",
+                )
                 logger.warning(
                     "event=home_assistant_counter_reset component=home_assistant "
                     "operation=normalize entity_id=%s timestamp=%s "
@@ -412,6 +436,13 @@ class HomeAssistantEnergyAggregator:
             elif value < previous_value and entity.state_class == "total_increasing":
                 delta = 0.0
                 reset_baseline = previous_value
+                self._mark_quality(
+                    quality,
+                    timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "counter_reset",
+                )
                 logger.warning(
                     "event=home_assistant_counter_reset component=home_assistant "
                     "operation=normalize entity_id=%s timestamp=%s "
@@ -426,6 +457,13 @@ class HomeAssistantEnergyAggregator:
                     value, reset_baseline, rel_tol=0.01, abs_tol=0.001
                 ):
                     delta = 0.0
+                    self._mark_quality(
+                        quality,
+                        timestamp,
+                        effective_start,
+                        entity.entity_id,
+                        "reset_recovery",
+                    )
                     logger.warning(
                         "event=home_assistant_counter_recovery "
                         "component=home_assistant "
@@ -445,11 +483,6 @@ class HomeAssistantEnergyAggregator:
                     f"Home Assistant total entity {entity.entity_id} decreased "
                     "without a changed last_reset timestamp"
                 )
-            else:
-                raise HomeAssistantError(
-                    f"Home Assistant total entity {entity.entity_id} decreased "
-                    "without a changed last_reset timestamp"
-                )
             elapsed_seconds = (timestamp - effective_start).total_seconds()
             if elapsed_seconds > 0:
                 hour = math.ceil(elapsed_seconds / 3600) - 1
@@ -461,7 +494,30 @@ class HomeAssistantEnergyAggregator:
             start_time=effective_start,
             values_kw=tuple(values),
             latest_observation_at=latest_observation,
+            quality=(
+                tuple(quality)
+                if any(item.status == "suspect" for item in quality)
+                else ()
+            ),
         )
+
+    @staticmethod
+    def _mark_quality(
+        quality: list[IntervalQuality],
+        timestamp: datetime,
+        start_time: datetime,
+        entity_id: str,
+        reason: str,
+    ) -> None:
+        """Mark the hourly interval containing a reset or recovery anomaly."""
+        elapsed_seconds = (timestamp - start_time).total_seconds()
+        if elapsed_seconds <= 0:
+            return
+        hour = math.ceil(elapsed_seconds / 3600) - 1
+        if 0 <= hour < len(quality):
+            quality[hour] = IntervalQuality(
+                status="suspect", reason=reason, entity_id=entity_id
+            )
 
     @staticmethod
     def _parse_timestamp(value: Any, label: str) -> datetime:

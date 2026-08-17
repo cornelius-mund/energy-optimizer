@@ -290,7 +290,9 @@ close to the pre-reset counter is treated as recovery rather than energy. Every
 other observed increase within an hour is summed, so valid energy after a reset
 is retained without turning the post-reset absolute counter value into fabricated
 energy. Reset transitions and recovery decisions are logged with the entity and
-observed values. `unknown` and `unavailable` history samples are
+observed values and mark the affected hourly interval as `suspect`; suspect
+intervals are exposed with a reason and source entity and block optimization.
+`unknown` and `unavailable` history samples are
 skipped without assigning energy, and the importer logs the affected entity
 and time range. The next valid cumulative observation determines the delta;
 the delta is assigned to that observation's hour rather than interpolated
