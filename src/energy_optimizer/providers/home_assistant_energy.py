@@ -485,7 +485,7 @@ class HomeAssistantEnergyAggregator:
                 )
             delta_kwh = delta * factor
             maximum_delta_kwh = entity.maximum_interval_energy_kwh
-            if maximum_delta_kwh is not None and delta_kwh > maximum_delta_kwh:
+            if delta_kwh > maximum_delta_kwh:
                 self._mark_quality(
                     quality,
                     timestamp,

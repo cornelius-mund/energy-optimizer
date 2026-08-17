@@ -68,6 +68,10 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
         ("sensor.household_energy", "total_increasing", "kWh", "add"),
         ("sensor.ev_energy", "total", "kWh", "subtract"),
     ]
+    assert all(
+        entity.maximum_interval_energy_kwh == 100
+        for entity in configuration.home_assistant.household_load_entities or []
+    )
     assert configuration.home_assistant.household_load_source_id == "household_load"
 
 

@@ -65,7 +65,7 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
-      # Optional physical upper bound for one hourly cumulative-energy delta.
+      # Physical upper bound for one hourly cumulative-energy delta (default: 100 kWh).
       maximum_interval_energy_kwh: 15
     - entity_id: sensor.ev_energy
       state_class: total
