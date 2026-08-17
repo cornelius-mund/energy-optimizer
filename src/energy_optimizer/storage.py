@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import Literal, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
@@ -18,6 +18,7 @@ from pydantic import TypeAdapter, ValidationError
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     HouseholdLoadData,
+    IntervalQuality,
     SourceMetadata,
 )
 
@@ -32,6 +33,7 @@ _HOUSEHOLD_LOAD_RECORD_FIELDS = frozenset(
     {
         "latest_observation_at",
         "load_kw",
+        "quality",
         "retrieved_at",
         "schema_version",
         "source",
@@ -71,6 +73,7 @@ class _HouseholdLoadRecord:
     source: dict[str, str | None]
     retrieved_at: datetime
     latest_observation_at: datetime
+    quality: IntervalQuality
 
 
 @dataclass(frozen=True)
@@ -579,7 +582,10 @@ def merge_household_load_history(
     """Merge hourly household-load data, preferring the incoming values."""
     existing_points = _household_load_points(existing)
     incoming_points = _household_load_points(incoming)
+    existing_quality = _household_load_quality_points(existing)
+    incoming_quality = _household_load_quality_points(incoming)
     points = existing_points | incoming_points
+    quality_points = existing_quality | incoming_quality
     logger.debug(
         "event=persistence_merge component=storage operation=merge "
         "existing_count=%s incoming_count=%s merged_count=%s",
@@ -599,6 +605,7 @@ def merge_household_load_history(
             "household-load history must contain contiguous hourly timestamps"
         )
 
+    ordered_quality = tuple(quality_points[timestamp] for timestamp in timestamps)
     return HouseholdLoadData(
         schema_version=incoming.schema_version,
         start_time=timestamps[0],
@@ -608,6 +615,11 @@ def merge_household_load_history(
         source=incoming.source,
         retrieved_at=_as_utc(incoming.retrieved_at),
         latest_observation_at=_as_utc(incoming.latest_observation_at),
+        quality=(
+            ordered_quality
+            if any(item.status == "suspect" for item in ordered_quality)
+            else ()
+        ),
     )
 
 
@@ -634,6 +646,9 @@ def _slice_household_load(
         source=data.source,
         retrieved_at=_as_utc(data.retrieved_at),
         latest_observation_at=_as_utc(data.latest_observation_at),
+        quality=_slice_quality(
+            data.quality, start_time, data.start_time, len(selected)
+        ),
     )
 
 
@@ -655,6 +670,7 @@ def _household_load_records(
             source=source,
             retrieved_at=_as_utc(data.retrieved_at),
             latest_observation_at=_as_utc(data.latest_observation_at),
+            quality=_quality_at(data.quality, timestamp, data.start_time),
         )
         for timestamp, value in sorted(points.items())
     )
@@ -669,6 +685,11 @@ def _encode_household_records(
             {
                 "timestamp": record.timestamp.isoformat(),
                 "load_kw": record.load_kw,
+                "quality": {
+                    "status": record.quality.status,
+                    "reason": record.quality.reason,
+                    "entity_id": record.quality.entity_id,
+                },
                 "schema_version": record.schema_version,
                 "unit": record.unit,
                 "source": record.source,
@@ -707,6 +728,18 @@ def _bounded_household_load(data: HouseholdLoadData) -> HouseholdLoadData:
         source=data.source,
         retrieved_at=_as_utc(data.retrieved_at),
         latest_observation_at=_as_utc(data.latest_observation_at),
+        quality=(
+            tuple(
+                _quality_at(data.quality, timestamp, data.start_time)
+                for timestamp, _ in points
+            )
+            if any(
+                _quality_at(data.quality, timestamp, data.start_time).status
+                == "suspect"
+                for timestamp, _ in points
+            )
+            else ()
+        ),
     )
 
 
@@ -794,6 +827,10 @@ def _parse_household_history(
     for record in records:
         points[record.timestamp] = record.load_kw
     ordered_points = sorted(points.items())[-HOUSEHOLD_LOAD_MAX_VALUES:]
+    records_by_timestamp = {record.timestamp: record for record in records}
+    ordered_records = [
+        records_by_timestamp[timestamp] for timestamp, _ in ordered_points
+    ]
     timestamps = [timestamp for timestamp, _ in ordered_points]
     if any(
         later - earlier != _HOUR for earlier, later in zip(timestamps, timestamps[1:])
@@ -814,6 +851,11 @@ def _parse_household_history(
         ),
         retrieved_at=latest.retrieved_at,
         latest_observation_at=latest.latest_observation_at,
+        quality=(
+            tuple(record.quality for record in ordered_records)
+            if any(record.quality.status == "suspect" for record in ordered_records)
+            else ()
+        ),
     )
     return _HouseholdLoadHistory(
         model=model,
@@ -824,7 +866,15 @@ def _parse_household_history(
 
 def _parse_household_record(value: object) -> _HouseholdLoadRecord:
     """Validate one decoded NDJSON household-load record."""
-    if not isinstance(value, dict) or set(value) != _HOUSEHOLD_LOAD_RECORD_FIELDS:
+    if (
+        not isinstance(value, dict)
+        or not set(value).issubset(_HOUSEHOLD_LOAD_RECORD_FIELDS)
+        or set(value)
+        not in {
+            _HOUSEHOLD_LOAD_RECORD_FIELDS - {"quality"},
+            _HOUSEHOLD_LOAD_RECORD_FIELDS,
+        }
+    ):
         raise ValueError("record fields do not match the NDJSON contract")
     source = value["source"]
     if not isinstance(source, dict) or set(source) != {"provider", "entity_id"}:
@@ -842,6 +892,28 @@ def _parse_household_record(value: object) -> _HouseholdLoadRecord:
     timestamp = _parse_record_timestamp(value["timestamp"], require_hour=True)
     retrieved_at = _parse_record_timestamp(value["retrieved_at"])
     latest_observation_at = _parse_record_timestamp(value["latest_observation_at"])
+    quality_value = value.get("quality")
+    if quality_value is None:
+        quality_status = "valid"
+        quality_reason = None
+        quality_entity_id = None
+    else:
+        if not isinstance(quality_value, dict) or set(quality_value) != {
+            "status",
+            "reason",
+            "entity_id",
+        }:
+            raise ValueError("record quality is invalid")
+        quality_status = quality_value["status"]
+        quality_reason = quality_value["reason"]
+        quality_entity_id = quality_value["entity_id"]
+    if quality_status not in {"valid", "suspect"}:
+        raise ValueError("record quality status is invalid")
+    quality_status = cast(Literal["valid", "suspect"], quality_status)
+    if quality_reason is not None and not isinstance(quality_reason, str):
+        raise ValueError("record quality reason is invalid")
+    if quality_entity_id is not None and not isinstance(quality_entity_id, str):
+        raise ValueError("record quality entity is invalid")
     if value["schema_version"] != "1" or value["unit"] != "kW":
         raise ValueError("record schema or unit is invalid")
     return _HouseholdLoadRecord(
@@ -852,6 +924,11 @@ def _parse_household_record(value: object) -> _HouseholdLoadRecord:
         source={"provider": provider, "entity_id": entity_id},
         retrieved_at=retrieved_at,
         latest_observation_at=latest_observation_at,
+        quality=IntervalQuality(
+            status=quality_status,
+            reason=quality_reason,
+            entity_id=quality_entity_id,
+        ),
     )
 
 
@@ -886,6 +963,47 @@ def _household_load_points(data: HouseholdLoadData) -> dict[datetime, float]:
             )
         points[start_time + (index * _HOUR)] = float(value)
     return points
+
+
+def _household_load_quality_points(
+    data: HouseholdLoadData,
+) -> dict[datetime, IntervalQuality]:
+    """Index interval quality, treating omitted metadata as valid."""
+    points = _household_load_points(data)
+    return {
+        timestamp: _quality_at(data.quality, timestamp, data.start_time)
+        for timestamp in points
+    }
+
+
+def _quality_at(
+    quality: tuple[IntervalQuality, ...],
+    timestamp: datetime,
+    start_time: datetime,
+) -> IntervalQuality:
+    """Return the quality for one hourly point."""
+    if not quality:
+        return IntervalQuality()
+    index = int((timestamp - _as_utc(start_time)).total_seconds() // 3600)
+    if index < 0 or index >= len(quality):
+        raise ProviderDataStoreError("household-load quality is misaligned")
+    return quality[index]
+
+
+def _slice_quality(
+    quality: tuple[IntervalQuality, ...],
+    start_time: datetime,
+    data_start: datetime,
+    count: int,
+) -> tuple[IntervalQuality, ...]:
+    """Slice aligned quality metadata while preserving the valid default."""
+    if not quality:
+        return ()
+    offset = int((_as_utc(start_time) - _as_utc(data_start)).total_seconds() // 3600)
+    selected = quality[offset : offset + count]
+    if len(selected) != count:
+        raise ProviderDataStoreError("household-load quality is misaligned")
+    return tuple(selected)
 
 
 _HOUR = timedelta(hours=1)

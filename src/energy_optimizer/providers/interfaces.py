@@ -20,6 +20,15 @@ class SourceMetadata:
 
 
 @dataclass(frozen=True)
+class IntervalQuality:
+    """Quality assessment for one normalized hourly interval."""
+
+    status: Literal["valid", "suspect"] = "valid"
+    reason: str | None = None
+    entity_id: str | None = None
+
+
+@dataclass(frozen=True)
 class HouseholdLoadData:
     """Normalized hourly household-load data from a provider."""
 
@@ -31,6 +40,7 @@ class HouseholdLoadData:
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+    quality: tuple[IntervalQuality, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,7 @@ class GridFlowData:
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+    quality: tuple[IntervalQuality, ...] = ()
 
 
 @dataclass(frozen=True)

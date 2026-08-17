@@ -539,6 +539,9 @@ def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> Non
         client.close()
 
     assert data.load_kw == (0.25,)
+    assert data.quality[0].status == "suspect"
+    assert data.quality[0].reason == "reset_recovery"
+    assert data.quality[0].entity_id == ENTITY_ID
 
 
 def test_total_rejects_a_decrease_without_last_reset_change() -> None:

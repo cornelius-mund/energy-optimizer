@@ -97,6 +97,7 @@ class HomeAssistantLoadImporter:
             ),
             retrieved_at=retrieved_at,
             latest_observation_at=series.latest_observation_at,
+            quality=series.quality,
         )
         logger.info(
             "event=provider_fetch_succeeded component=home_assistant operation=fetch "

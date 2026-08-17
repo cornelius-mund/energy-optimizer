@@ -8,7 +8,11 @@ import pytest
 from pydantic import TypeAdapter
 
 from energy_optimizer import storage as storage_module
-from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
+from energy_optimizer.providers.interfaces import (
+    HouseholdLoadData,
+    IntervalQuality,
+    SourceMetadata,
+)
 from energy_optimizer.storage import (
     ProviderDataKey,
     ProviderDataStore,
@@ -191,6 +195,39 @@ def test_store_merges_hourly_history_and_incoming_values_win(
     assert merged.retrieved_at == start + timedelta(hours=4)
     reloaded = store.load(KEY, ADAPTER)
     assert reloaded == merged
+
+
+def test_store_round_trips_interval_quality_and_legacy_records(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    data = household_load_data(start, [1.0, 2.0, 3.0])
+    suspect = HouseholdLoadData(
+        **{
+            **data.__dict__,
+            "quality": (
+                IntervalQuality(),
+                IntervalQuality(
+                    status="suspect",
+                    reason="reset_recovery",
+                    entity_id="sensor.household_load",
+                ),
+                IntervalQuality(),
+            ),
+        }
+    )
+
+    saved = store.save(KEY, ADAPTER, suspect)
+
+    assert store.load(KEY, ADAPTER) == saved
+    assert saved.quality[1].reason == "reset_recovery"
+    primary, _ = paths(tmp_path)
+    assert json.loads(primary.read_text().splitlines()[1])["quality"] == {
+        "status": "suspect",
+        "reason": "reset_recovery",
+        "entity_id": "sensor.household_load",
+    }
 
 
 def test_store_loads_only_points_in_a_half_open_range(tmp_path: Path) -> None:
