@@ -27,9 +27,11 @@ src/energy_optimizer/
 │   └── orchestration.py      # Scheduled provider retrieval and plan triggers
 ├── providers/
 │   ├── interfaces.py         # Provider contracts
+│   ├── http.py               # Shared bounded JSON HTTP requests
 │   ├── prices.py             # Electricity-price adapters
-│   ├── forecasts.py          # PV and weather adapters
-│   └── normalization.py      # External data to domain data conversion
+│   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast adapter
+│   ├── normalization.py      # Shared timestamp and value validation
+│   └── home_assistant.py     # Home Assistant adapters
 ├── storage.py                # Durable normalized provider-data storage
 └── optimization/
     ├── model.py              # Pyomo MILP model construction
@@ -170,6 +172,19 @@ malformed records follow the normal recovery error path. Existing monolithic
 household-load JSON primary and backup files are migrated to NDJSON on first
 access. Scheduled and API persistence use the same append and compaction
 behavior.
+
+The direct Forecast.Solar adapter is a separate provider slice for short-term PV
+forecasts. It uses the public API without Home Assistant, an account, or an API
+key, and is configured with the PV location, panel declination and azimuth, and
+installed peak power. Forecast.Solar returns period-energy estimates at irregular
+sunrise and sunset boundaries; the adapter converts those values to hourly UTC
+`PvGenerationData` rather than treating the provider response as normalized.
+Forecast forecasts use `retrieved_at` and `expires_at` instead of household-load
+observation metadata. Forecasts are persisted through the generic JSON storage
+path and replace the previous forecast, unlike append-friendly household-load
+history. The free public tier is limited to one plane, hourly resolution, and
+today plus the following day; polling is configured by orchestration so the
+public rate limit is respected.
 
 The historic household-load read endpoint queries this normalized store rather
 than exposing files. It accepts a timezone-aware half-open range, returns only

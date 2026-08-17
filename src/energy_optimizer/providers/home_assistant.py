@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 
@@ -15,11 +14,13 @@ from energy_optimizer.config import (
     HomeAssistantConfiguration,
     HouseholdLoadEntityConfiguration,
 )
+from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_SOURCE_ID,
     HouseholdLoadData,
     SourceMetadata,
 )
+from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class HomeAssistantLoadImporter:
         client: httpx.Client | None = None,
     ) -> None:
         self.configuration = configuration
-        self._client = client
+        self._http = JsonHttpClient(client)
 
     def fetch(
         self,
@@ -216,77 +217,45 @@ class HomeAssistantLoadImporter:
             "Authorization": f"Bearer {self.configuration.token.get_secret_value()}",
             "Accept": "application/json",
         }
-        started_at = perf_counter()
-        status: int | str = "not_sent"
-        try:
-            try:
-                if self._client is not None:
-                    response = self._client.get(
-                        url,
-                        headers=headers,
-                        timeout=self.configuration.timeout_seconds,
-                    )
-                else:
-                    with httpx.Client(
-                        timeout=self.configuration.timeout_seconds
-                    ) as client:
-                        response = client.get(url, headers=headers)
-            except httpx.TimeoutException as error:
-                status = "timeout"
-                raise HomeAssistantError(
-                    "Home Assistant request timed out; check the endpoint and timeout"
-                ) from error
-            except httpx.RequestError as error:
-                status = "transport_error"
-                raise HomeAssistantError(
-                    "Home Assistant request failed: transport error"
-                ) from error
 
-            status = response.status_code
-            if response.status_code in (401, 403):
-                raise HomeAssistantError(
+        def status_error(status: int) -> Exception | None:
+            if status in (401, 403):
+                return HomeAssistantError(
                     "Home Assistant authentication failed; check the configured token"
                 )
-            if response.status_code == 404:
-                raise HomeAssistantError(
+            if status == 404:
+                return HomeAssistantError(
                     "Home Assistant household-load history was not found; check the "
                     "configured entity ID and endpoint"
                 )
-            if response.is_error:
-                raise HomeAssistantError(
+            if status >= 400:
+                return HomeAssistantError(
                     "Home Assistant returned HTTP "
-                    f"{response.status_code} while retrieving household-load history"
+                    f"{status} while retrieving household-load history"
                 )
-            try:
-                payload = response.json()
-            except ValueError as error:
-                raise HomeAssistantError(
-                    "Home Assistant returned malformed JSON for household-load history"
-                ) from error
-        except Exception as error:
-            logger.warning(
-                "event=home_assistant_history_request component=home_assistant "
-                "operation=history_request entity_id=%s start_time=%s end_time=%s "
-                "status=%s duration_ms=%.1f error_type=%s",
-                entity.entity_id,
-                start_time.isoformat(),
-                end_time.isoformat(),
-                status,
-                (perf_counter() - started_at) * 1000,
-                error.__class__.__name__,
-            )
-            raise
-        logger.info(
-            "event=home_assistant_history_request component=home_assistant "
-            "operation=history_request entity_id=%s start_time=%s end_time=%s "
-            "status=%s duration_ms=%.1f",
-            entity.entity_id,
-            start_time.isoformat(),
-            end_time.isoformat(),
-            status,
-            (perf_counter() - started_at) * 1000,
+            return None
+
+        return self._http.get_json(
+            url,
+            headers=headers,
+            timeout_seconds=self.configuration.timeout_seconds,
+            error_factory=HomeAssistantError,
+            timeout_message=(
+                "Home Assistant request timed out; check the endpoint and timeout"
+            ),
+            transport_message="Home Assistant request failed: transport error",
+            malformed_message=(
+                "Home Assistant returned malformed JSON for household-load history"
+            ),
+            status_error=status_error,
+            log_event="home_assistant_history_request",
+            component="home_assistant",
+            operation="history_request",
+            log_context=(
+                f"entity_id={entity.entity_id} start_time={start_time.isoformat()} "
+                f"end_time={end_time.isoformat()}"
+            ),
         )
-        return payload
 
     def _parse_history(
         self, payload: Any, entity: HouseholdLoadEntityConfiguration
@@ -508,29 +477,27 @@ class HomeAssistantLoadImporter:
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:
-        if not isinstance(value, str):
-            raise HomeAssistantError(
+        return parse_aware_timestamp(
+            value,
+            error_factory=HomeAssistantError,
+            missing_message=(
                 "Home Assistant household-load history has a missing timestamp"
-            )
-        try:
-            timestamp = datetime.fromisoformat(value)
-        except ValueError as error:
-            raise HomeAssistantError(
-                f"Home Assistant returned an invalid timestamp: {value!r}"
-            ) from error
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise HomeAssistantError(
+            ),
+            invalid_message=lambda raw: (
+                f"Home Assistant returned an invalid timestamp: {raw!r}"
+            ),
+            naive_message=(
                 "Home Assistant household-load timestamps must include a timezone"
-            )
-        return timestamp.astimezone(timezone.utc)
+            ),
+        )
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise HomeAssistantError(
-                "Home Assistant import times must include a timezone"
-            )
-        return value.astimezone(timezone.utc)
+        return as_utc(
+            value,
+            error_factory=HomeAssistantError,
+            message="Home Assistant import times must include a timezone",
+        )
 
     @staticmethod
     def _latest_completed_hour(value: datetime) -> datetime:

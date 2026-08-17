@@ -6,6 +6,7 @@ from typing import Literal, Protocol
 
 HOUSEHOLD_LOAD_SOURCE_ID = "household_load"
 HOUSEHOLD_LOAD_MAX_VALUES = 87_672
+PV_GENERATION_SOURCE_ID = "pv_generation"
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,20 @@ class HouseholdLoadData:
     latest_observation_at: datetime
 
 
+@dataclass(frozen=True)
+class PvGenerationData:
+    """Normalized hourly PV-generation forecast from a provider."""
+
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    generation_kw: tuple[float, ...]
+    unit: Literal["kW"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    expires_at: datetime
+
+
 class HouseholdLoadProvider(Protocol):
     """Retrieve normalized household-load data for a requested period."""
 
@@ -50,3 +65,24 @@ class HouseholdLoadProvider(Protocol):
         now: datetime | None = None,
     ) -> bool:
         """Report whether data is within the configured polling age threshold."""
+
+
+class PvForecastProvider(Protocol):
+    """Retrieve normalized hourly PV generation forecasts."""
+
+    def fetch(
+        self,
+        start_time: datetime,
+        end_time: datetime | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> PvGenerationData:
+        """Fetch a forecast for the requested half-open period."""
+
+    def is_fresh(
+        self,
+        data: PvGenerationData,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Report whether the forecast is still usable."""

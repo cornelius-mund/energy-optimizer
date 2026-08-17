@@ -16,7 +16,10 @@ from pydantic import (
     model_validator,
 )
 
-from energy_optimizer.providers.interfaces import HOUSEHOLD_LOAD_SOURCE_ID
+from energy_optimizer.providers.interfaces import (
+    HOUSEHOLD_LOAD_SOURCE_ID,
+    PV_GENERATION_SOURCE_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,26 @@ class HomeAssistantConfiguration(BaseModel):
         return HOUSEHOLD_LOAD_SOURCE_ID
 
 
+class ForecastSolarConfiguration(BaseModel):
+    """Free public Forecast.Solar installation and request settings."""
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    declination_degrees: float = Field(ge=0, le=90)
+    azimuth_degrees: float = Field(ge=-180, le=180)
+    peak_power_kw: float = Field(gt=0)
+    base_url: AnyHttpUrl = AnyHttpUrl("https://api.forecast.solar")
+    timeout_seconds: float = Field(default=10, gt=0, le=120)
+    max_data_age_seconds: float | None = Field(default=7200, gt=0)
+
+    @property
+    def pv_generation_source_id(self) -> str:
+        """Return the stable identity for this installation's forecast."""
+        return PV_GENERATION_SOURCE_ID
+
+
 class PersistenceConfiguration(BaseModel):
     """Filesystem location for normalized provider data."""
 
@@ -195,6 +218,7 @@ class Configuration(BaseModel):
     grid: GridConfiguration
     solver: SolverConfiguration
     home_assistant: HomeAssistantConfiguration | None = None
+    forecast_solar: ForecastSolarConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
     orchestration: OrchestrationConfiguration | None = None
 

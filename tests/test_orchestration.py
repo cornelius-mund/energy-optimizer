@@ -11,6 +11,7 @@ from pydantic import TypeAdapter
 from energy_optimizer.config import (
     Configuration,
     DataSourceScheduleConfiguration,
+    ForecastSolarConfiguration,
     GridConfiguration,
     HomeAssistantConfiguration,
     OptimizationTriggerConfiguration,
@@ -25,11 +26,16 @@ from energy_optimizer.orchestration import (
     ProviderRegistration,
     build_configured_orchestrator,
 )
-from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
+from energy_optimizer.providers.interfaces import (
+    HouseholdLoadData,
+    PvGenerationData,
+    SourceMetadata,
+)
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 ADAPTER = TypeAdapter(HouseholdLoadData)
+PV_ADAPTER = TypeAdapter(PvGenerationData)
 
 
 def data(
@@ -49,6 +55,20 @@ def data(
         ),
         retrieved_at=now,
         latest_observation_at=now,
+    )
+
+
+def pv_data(now: datetime, value: float = 1.0) -> PvGenerationData:
+    start = now.replace(minute=0, second=0, microsecond=0)
+    return PvGenerationData(
+        schema_version="1",
+        start_time=start,
+        interval_minutes=60,
+        generation_kw=(value,),
+        unit="kW",
+        source=SourceMetadata(provider="forecast.solar", entity_id="pv_generation"),
+        retrieved_at=now,
+        expires_at=start + timedelta(hours=24),
     )
 
 
@@ -452,6 +472,95 @@ def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
     )
     assert persisted is not None
     assert persisted.source.entity_id == "household_load"
+
+
+def test_configured_forecast_solar_orchestrator_persists_forecast(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeForecastSolarImporter:
+        def __init__(self, _: ForecastSolarConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            *,
+            now: datetime | None = None,
+        ) -> PvGenerationData:
+            del end_time
+            return pv_data(now or start_time)
+
+        def is_fresh(self, _: PvGenerationData, now: datetime) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.ForecastSolarImporter",
+        FakeForecastSolarImporter,
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        forecast_solar=ForecastSolarConfiguration(
+            latitude=52.52,
+            longitude=13.41,
+            declination_degrees=35,
+            azimuth_degrees=0,
+            peak_power_kw=8,
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "pv_generation": DataSourceScheduleConfiguration(interval_seconds=300)
+            },
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+
+    assert orchestrator is not None
+    cycle = orchestrator.run_due(START)
+    assert cycle.provider_runs[0].source == "pv_generation"
+    assert cycle.provider_runs[0].status == "success"
+    persisted = store.load(
+        ProviderDataKey("pv-generation", "forecast.solar", "pv_generation"),
+        PV_ADAPTER,
+    )
+    assert persisted is not None
+    assert persisted.generation_kw == (1.0,)
+
+
+def test_configured_forecast_solar_orchestrator_rejects_fast_polling(
+    tmp_path: Path,
+) -> None:
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        forecast_solar=ForecastSolarConfiguration(
+            latitude=52.52,
+            longitude=13.41,
+            declination_degrees=35,
+            azimuth_degrees=0,
+            peak_power_kw=8,
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "pv_generation": DataSourceScheduleConfiguration(interval_seconds=299)
+            },
+        ),
+    )
+
+    with pytest.raises(OrchestrationError, match="at least 300 seconds"):
+        build_configured_orchestrator(
+            runtime_configuration, ProviderDataStore(tmp_path)
+        )
 
 
 def test_configured_home_assistant_failure_preserves_persisted_data(
