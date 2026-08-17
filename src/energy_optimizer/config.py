@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from energy_optimizer.providers.interfaces import (
+    BATTERY_SOURCE_ID,
     GRID_FLOW_SOURCE_ID,
     HOUSEHOLD_LOAD_SOURCE_ID,
     PV_GENERATION_SOURCE_ID,
@@ -62,6 +63,60 @@ class HomeAssistantEnergyEntityConfiguration(BaseModel):
 HouseholdLoadEntityConfiguration = HomeAssistantEnergyEntityConfiguration
 
 
+class HomeAssistantBatteryEntityConfiguration(BaseModel):
+    """Configuration for one instantaneous Home Assistant battery value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_id: str = Field(min_length=1, max_length=255)
+    unit: Literal["%", "Wh", "kWh", "W", "kW", "ratio"]
+    attribute: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class HomeAssistantBatteryConfiguration(BaseModel):
+    """Home Assistant entity mappings for battery state and capabilities."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state_of_charge: HomeAssistantBatteryEntityConfiguration
+    capacity: HomeAssistantBatteryEntityConfiguration
+    minimum_soc: HomeAssistantBatteryEntityConfiguration
+    maximum_soc: HomeAssistantBatteryEntityConfiguration
+    maximum_charge: HomeAssistantBatteryEntityConfiguration
+    maximum_discharge: HomeAssistantBatteryEntityConfiguration
+    charge_efficiency: HomeAssistantBatteryEntityConfiguration
+    discharge_efficiency: HomeAssistantBatteryEntityConfiguration
+
+    @model_validator(mode="after")
+    def validate_mapping_units(self) -> "HomeAssistantBatteryConfiguration":
+        """Require units compatible with each normalized battery field."""
+        energy_fields = {
+            "state_of_charge": self.state_of_charge,
+            "minimum_soc": self.minimum_soc,
+            "maximum_soc": self.maximum_soc,
+        }
+        for name, mapping in energy_fields.items():
+            if mapping.unit not in {"%", "Wh", "kWh"}:
+                raise ValueError(
+                    f"battery.{name} must use %, Wh, or kWh; got {mapping.unit}"
+                )
+        if self.capacity.unit not in {"Wh", "kWh"}:
+            raise ValueError("battery.capacity must use Wh or kWh")
+        for name, mapping in {
+            "maximum_charge": self.maximum_charge,
+            "maximum_discharge": self.maximum_discharge,
+        }.items():
+            if mapping.unit not in {"W", "kW"}:
+                raise ValueError(f"battery.{name} must use W or kW")
+        for name, mapping in {
+            "charge_efficiency": self.charge_efficiency,
+            "discharge_efficiency": self.discharge_efficiency,
+        }.items():
+            if mapping.unit not in {"%", "ratio"}:
+                raise ValueError(f"battery.{name} must use % or ratio")
+        return self
+
+
 class HomeAssistantConfiguration(BaseModel):
     """Connection and energy mappings for Home Assistant."""
 
@@ -84,6 +139,7 @@ class HomeAssistantConfiguration(BaseModel):
     grid_export_entities: list[HomeAssistantEnergyEntityConfiguration] | None = Field(
         default=None, min_length=1
     )
+    battery: HomeAssistantBatteryConfiguration | None = None
     timeout_seconds: float = Field(gt=0, le=120)
     max_data_age_seconds: float | None = Field(default=None, gt=0)
 
@@ -128,6 +184,25 @@ class HomeAssistantConfiguration(BaseModel):
             raise ValueError(
                 "Home Assistant energy entities must not contain duplicates"
             )
+        if self.battery is not None:
+            battery_mappings = (
+                self.battery.state_of_charge,
+                self.battery.capacity,
+                self.battery.minimum_soc,
+                self.battery.maximum_soc,
+                self.battery.maximum_charge,
+                self.battery.maximum_discharge,
+                self.battery.charge_efficiency,
+                self.battery.discharge_efficiency,
+            )
+            mapping_keys = [
+                (mapping.entity_id, mapping.attribute) for mapping in battery_mappings
+            ]
+            if len(mapping_keys) != len(set(mapping_keys)):
+                raise ValueError(
+                    "Home Assistant battery mappings must not reuse the same "
+                    "entity and attribute"
+                )
         return self
 
     @property
@@ -139,6 +214,11 @@ class HomeAssistantConfiguration(BaseModel):
     def grid_flow_source_id(self) -> str:
         """Return the single persistence identity for grid-flow data."""
         return GRID_FLOW_SOURCE_ID
+
+    @property
+    def battery_source_id(self) -> str:
+        """Return the stable persistence identity for battery data."""
+        return BATTERY_SOURCE_ID
 
 
 class ForecastSolarConfiguration(BaseModel):
@@ -289,6 +369,19 @@ class Configuration(BaseModel):
             and self.home_assistant.grid_export_entities is not None
             and provider == "home-assistant"
             and entity_id == self.home_assistant.grid_flow_source_id
+        )
+
+    def is_configured_battery_source(
+        self,
+        provider: str,
+        entity_id: str | None,
+    ) -> bool:
+        """Return whether a source identifies the configured battery provider."""
+        return (
+            self.home_assistant is not None
+            and self.home_assistant.battery is not None
+            and provider == "home-assistant"
+            and entity_id == self.home_assistant.battery_source_id
         )
 
 

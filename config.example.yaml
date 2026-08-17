@@ -30,6 +30,9 @@ orchestration:
       enabled: true
       interval_seconds: 3600
       history_lookback_seconds: 3600
+    battery:
+      enabled: true
+      interval_seconds: 300
     pv_generation:
       enabled: true
       interval_seconds: 3600
@@ -76,6 +79,41 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
+  # Battery imports read the current state of each mapped Home Assistant entity.
+  # Values may be in the entity state or in a named attribute. The importer
+  # returns one current hourly value and persists the latest valid snapshot.
+  battery:
+    state_of_charge:
+      entity_id: sensor.battery_state_of_charge
+      unit: '%'
+    capacity:
+      entity_id: sensor.battery
+      attribute: capacity_kwh
+      unit: kWh
+    minimum_soc:
+      entity_id: sensor.battery
+      attribute: minimum_soc_kwh
+      unit: kWh
+    maximum_soc:
+      entity_id: sensor.battery
+      attribute: maximum_soc_kwh
+      unit: kWh
+    maximum_charge:
+      entity_id: sensor.battery
+      attribute: maximum_charge_kw
+      unit: kW
+    maximum_discharge:
+      entity_id: sensor.battery
+      attribute: maximum_discharge_kw
+      unit: kW
+    charge_efficiency:
+      entity_id: sensor.battery
+      attribute: charge_efficiency
+      unit: ratio
+    discharge_efficiency:
+      entity_id: sensor.battery
+      attribute: discharge_efficiency
+      unit: ratio
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.
   max_data_age_seconds: 7200

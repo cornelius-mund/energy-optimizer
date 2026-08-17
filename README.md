@@ -518,6 +518,29 @@ timestamps, out-of-range state of charge, inconsistent limits, invalid
 efficiencies, and series longer than ten years (87,672 hourly values) return
 HTTP 422 with field-level validation details.
 
+### Home Assistant battery import
+
+The Home Assistant battery provider retrieves a current snapshot from the REST
+state endpoint for each configured mapping. It accepts values from either the
+entity state or a named entity attribute and normalizes them to the battery API
+units. State-of-charge and SOC limits accept `%`, `Wh`, or `kWh`; capacity accepts
+`Wh` or `kWh`; power limits accept `W` or `kW`; and efficiencies accept `%` or a
+unitless `ratio`.
+
+Configure the provider under `home_assistant.battery` and add the `battery`
+source to `orchestration.sources`. The snapshot contains one current
+`state_of_charge_kwh` value, uses that value as `initial_soc_kwh`, and records
+the oldest Home Assistant observation timestamp across all mappings for
+freshness checks. All mappings are fetched before normalization, so an
+unavailable or invalid entity prevents a partial battery snapshot from being
+persisted. HTTP authentication failures, missing entities, malformed values,
+invalid timestamps, inconsistent SOC limits, and stale data are reported as
+provider errors or stale orchestration runs.
+
+The importer does not reconstruct historic SOC. Historic battery data and
+measurement alignment for installation efficiency calculations are separate
+follow-up behavior.
+
 ### Household-load API
 
 `POST /api/v1/household-load` validates a normalized hourly household-load
