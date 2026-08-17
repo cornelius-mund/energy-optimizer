@@ -6,6 +6,7 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import perf_counter
 from typing import Any
 from urllib.parse import quote
 
@@ -59,6 +60,54 @@ class HomeAssistantEnergyAggregator:
         label: str,
     ) -> HomeAssistantEnergySeries:
         """Fetch, align, and combine all configured entity contributions."""
+        started_at = perf_counter()
+        entity_count = len(entities or [])
+        try:
+            result = self._aggregate(
+                entities,
+                start_time,
+                end_time,
+                history_lookback_seconds,
+                label=label,
+            )
+            logger.info(
+                "event=home_assistant_history_aggregate component=home_assistant "
+                "operation=aggregate status=success label=%s entity_count=%s "
+                "start_time=%s end_time=%s "
+                "duration_ms=%.1f",
+                label,
+                entity_count,
+                start_time.isoformat(),
+                end_time.isoformat(),
+                (perf_counter() - started_at) * 1000,
+            )
+            return result
+        except Exception as error:
+            logger.warning(
+                "event=home_assistant_history_aggregate component=home_assistant "
+                "operation=aggregate status=failed label=%s entity_count=%s "
+                "start_time=%s end_time=%s "
+                "duration_ms=%.1f error_type=%s error=%s",
+                label,
+                entity_count,
+                start_time.isoformat(),
+                end_time.isoformat(),
+                (perf_counter() - started_at) * 1000,
+                error.__class__.__name__,
+                error,
+            )
+            raise
+
+    def _aggregate(
+        self,
+        entities: list[HomeAssistantEnergyEntityConfiguration] | None,
+        start_time: datetime,
+        end_time: datetime,
+        history_lookback_seconds: float,
+        *,
+        label: str,
+    ) -> HomeAssistantEnergySeries:
+        """Fetch, align, and combine entity contributions without summary logs."""
         start = self._as_utc(start_time)
         end = self._as_utc(end_time)
         self._validate_period(start, end, history_lookback_seconds, label)
@@ -242,6 +291,8 @@ class HomeAssistantEnergyAggregator:
             log_event="home_assistant_history_request",
             component="home_assistant",
             operation="history_request",
+            success_log_level=logging.DEBUG,
+            error_log_level=logging.DEBUG,
             log_context=(
                 f"entity_id={entity.entity_id} start_time={start_time.isoformat()} "
                 f"end_time={end_time.isoformat()}"

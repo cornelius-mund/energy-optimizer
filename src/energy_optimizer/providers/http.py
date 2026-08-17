@@ -35,6 +35,8 @@ class JsonHttpClient:
         component: str,
         operation: str,
         log_context: str = "",
+        success_log_level: int = logging.INFO,
+        error_log_level: int = logging.WARNING,
     ) -> Any:
         """Fetch and decode JSON, translating transport failures for a provider."""
         started_at = perf_counter()
@@ -72,7 +74,8 @@ class JsonHttpClient:
             except ValueError as error:
                 raise error_factory(malformed_message) from error
         except Exception as error:
-            logger.warning(
+            logger.log(
+                error_log_level,
                 "event=%s component=%s operation=%s %sstatus=%s duration_ms=%.1f "
                 "error_type=%s",
                 log_event,
@@ -84,7 +87,8 @@ class JsonHttpClient:
                 error.__class__.__name__,
             )
             raise
-        logger.info(
+        logger.log(
+            success_log_level,
             "event=%s component=%s operation=%s %sstatus=%s duration_ms=%.1f",
             log_event,
             component,
