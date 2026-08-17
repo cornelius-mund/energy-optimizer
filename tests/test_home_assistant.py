@@ -86,7 +86,7 @@ def importer(
 def test_fetch_converts_total_increasing_energy_to_hourly_load(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/history/period/2025-12-31T23:00:00+00:00"
@@ -122,12 +122,21 @@ def test_fetch_converts_total_increasing_energy_to_hourly_load(
         if record.getMessage().startswith("event=home_assistant_history_request")
     ]
     assert len(request_logs) == 1
+    assert request_logs[0].levelno == logging.DEBUG
     message = request_logs[0].getMessage()
     assert (
         "entity_id=sensor.household_energy "
         "start_time=2025-12-31T23:00:00+00:00 "
         "end_time=2026-01-01T04:00:00+00:00 status=200 duration_ms="
     ) in message
+    aggregate_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_aggregate")
+    ]
+    assert len(aggregate_logs) == 1
+    assert aggregate_logs[0].levelno == logging.INFO
+    assert "status=success" in aggregate_logs[0].getMessage()
 
 
 def test_fetch_splits_long_history_into_weekly_chunks_before_normalization(
@@ -193,15 +202,16 @@ def test_fetch_splits_long_history_into_weekly_chunks_before_normalization(
         for record in caplog.records
         if record.getMessage().startswith("event=home_assistant_history_request")
     ]
-    assert len(request_logs) == len(calls)
-    assert all(
-        "entity_id=sensor.household_energy" in record.getMessage()
-        for record in request_logs
-    )
-    assert all(
-        "status=200 duration_ms=" in record.getMessage() for record in request_logs
-    )
-    assert all("test-token" not in record.getMessage() for record in request_logs)
+    assert request_logs == []
+    aggregate_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_aggregate")
+    ]
+    assert len(aggregate_logs) == 1
+    assert aggregate_logs[0].levelno == logging.INFO
+    assert "status=success" in aggregate_logs[0].getMessage()
+    assert "entity_count=1" in aggregate_logs[0].getMessage()
 
 
 def test_fetch_uses_one_request_for_a_week_without_lookback() -> None:
@@ -987,6 +997,8 @@ def test_fetch_does_not_return_partial_data_when_entity_has_no_usable_history() 
 
 
 def test_fetch_reports_http_failures(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+
     def handler(_: httpx.Request) -> httpx.Response:
         return httpx.Response(401)
 
@@ -1003,12 +1015,23 @@ def test_fetch_reports_http_failures(caplog: pytest.LogCaptureFixture) -> None:
         if record.getMessage().startswith("event=home_assistant_history_request")
     ]
     assert len(request_logs) == 1
+    assert request_logs[0].levelno == logging.DEBUG
     assert "entity_id=sensor.household_energy" in request_logs[0].getMessage()
     assert "status=401" in request_logs[0].getMessage()
     assert "test-token" not in request_logs[0].getMessage()
+    aggregate_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_aggregate")
+    ]
+    assert len(aggregate_logs) == 1
+    assert aggregate_logs[0].levelno == logging.WARNING
+    assert "status=failed" in aggregate_logs[0].getMessage()
 
 
 def test_fetch_reports_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+
     def handler(_: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out")
 
@@ -1025,8 +1048,17 @@ def test_fetch_reports_timeout(caplog: pytest.LogCaptureFixture) -> None:
         if record.getMessage().startswith("event=home_assistant_history_request")
     ]
     assert len(request_logs) == 1
+    assert request_logs[0].levelno == logging.DEBUG
     assert "status=timeout" in request_logs[0].getMessage()
     assert "test-token" not in request_logs[0].getMessage()
+    aggregate_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_aggregate")
+    ]
+    assert len(aggregate_logs) == 1
+    assert aggregate_logs[0].levelno == logging.WARNING
+    assert "status=failed" in aggregate_logs[0].getMessage()
 
 
 def test_fetch_reports_malformed_json() -> None:

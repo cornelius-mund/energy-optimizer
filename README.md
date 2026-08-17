@@ -100,8 +100,12 @@ response header. Uvicorn access logging is disabled to avoid duplicate access
 records. Logs never include authorization headers, Home Assistant tokens, raw
 provider responses, complete request bodies, or complete energy series.
 Home Assistant history requests replace HTTPX's generic completion record with
-one `home_assistant_history_request` event per entity and request chunk. Each
-record contains the entity, chunk time range, HTTP status, and duration.
+debug-level `home_assistant_history_request` events per entity and request chunk.
+Each record contains the entity, chunk time range, HTTP status, and duration.
+The enclosing history aggregate emits one `home_assistant_history_aggregate`
+`INFO` event after all entities and chunks succeed, or one `WARNING` event when
+the aggregate fails. This keeps normal logs concise while retaining per-chunk
+diagnostics when debug logging is enabled.
 
 Configuration is expected to contain parameters such as:
 

@@ -152,6 +152,9 @@ persistence, historic API responses, and orchestration; required suspect data
 cannot trigger an optimization plan. A failed chunk fails the complete provider
 fetch, so scheduled orchestration preserves the last valid persisted data and
 retries on a later due cycle.
+Individual chunk request outcomes are debug-level diagnostics. The shared
+aggregator emits one structured success summary at info level or one failure
+summary at warning level after the complete entity set has been processed.
 Each cumulative-energy mapping may additionally define a physical upper bound
 for one hourly delta in kWh. The bound is applied after unit conversion and
 before signed aggregation; an exceeded bound produces zero energy and suspect
