@@ -27,6 +27,7 @@ from energy_optimizer.orchestration import (
     build_configured_orchestrator,
 )
 from energy_optimizer.providers.interfaces import (
+    GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
     SourceMetadata,
@@ -36,6 +37,7 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 ADAPTER = TypeAdapter(HouseholdLoadData)
 PV_ADAPTER = TypeAdapter(PvGenerationData)
+GRID_FLOW_ADAPTER = TypeAdapter(GridFlowData)
 
 
 def data(
@@ -69,6 +71,21 @@ def pv_data(now: datetime, value: float = 1.0) -> PvGenerationData:
         source=SourceMetadata(provider="forecast.solar", entity_id="pv_generation"),
         retrieved_at=now,
         expires_at=start + timedelta(hours=24),
+    )
+
+
+def grid_flow_data(now: datetime, value: float = 1.0) -> GridFlowData:
+    start = now.replace(minute=0, second=0, microsecond=0)
+    return GridFlowData(
+        schema_version="1",
+        start_time=start,
+        interval_minutes=60,
+        import_kw=(value,),
+        export_kw=(value / 2,),
+        unit="kW",
+        source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
+        retrieved_at=now,
+        latest_observation_at=now,
     )
 
 
@@ -532,6 +549,83 @@ def test_configured_forecast_solar_orchestrator_persists_forecast(
     )
     assert persisted is not None
     assert persisted.generation_kw == (1.0,)
+
+
+def test_configured_grid_flow_orchestrator_persists_grid_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeGridFlowImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            history_lookback_seconds: float = 0,
+            *,
+            now: datetime | None = None,
+        ) -> GridFlowData:
+            del start_time, end_time, history_lookback_seconds
+            return grid_flow_data(now or START)
+
+        def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantGridFlowImporter",
+        FakeGridFlowImporter,
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "grid_import_entities": [
+                    {
+                        "entity_id": "sensor.grid_import",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "grid_export_entities": [
+                    {
+                        "entity_id": "sensor.grid_export",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "grid_flow": DataSourceScheduleConfiguration(interval_seconds=300)
+            },
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+
+    assert orchestrator is not None
+    cycle = orchestrator.run_due(START)
+    assert cycle.provider_runs[0].source == "grid_flow"
+    assert cycle.provider_runs[0].status == "success"
+    persisted = store.load(
+        ProviderDataKey("grid-flow", "home-assistant", "grid_flow"),
+        GRID_FLOW_ADAPTER,
+    )
+    assert persisted is not None
+    assert persisted.import_kw == (1.0,)
 
 
 def test_configured_forecast_solar_orchestrator_rejects_fast_polling(

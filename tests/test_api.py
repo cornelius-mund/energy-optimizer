@@ -784,11 +784,71 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
+  grid_import_entities:
+    - entity_id: sensor.grid_import
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+  grid_export_entities:
+    - entity_id: sensor.grid_export
+      state_class: total_increasing
+      unit: kWh
+      operation: add
   timeout_seconds: 10
 """,
         encoding="utf-8",
     )
     return configuration
+
+
+def grid_flow_persisted_request() -> dict[str, object]:
+    request = grid_flow_request()
+    request["source"] = {
+        "provider": "home-assistant",
+        "entity_id": "grid_flow",
+    }
+    return request
+
+
+def test_grid_flow_provider_data_is_persisted_and_retrieved_after_restart(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+
+    with TestClient(app) as client:
+        write_response = client.post(
+            "/api/v1/grid-flow", json=grid_flow_persisted_request()
+        )
+        read_response = client.get("/api/v1/grid-flow")
+
+    assert write_response.status_code == 200
+    assert read_response.status_code == 200
+    assert read_response.json() == write_response.json()
+
+    with TestClient(app) as restarted_client:
+        restarted_response = restarted_client.get("/api/v1/grid-flow")
+
+    assert restarted_response.status_code == 200
+    assert restarted_response.json() == read_response.json()
+
+
+def test_grid_flow_direct_submission_is_not_persisted(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration(tmp_path))
+    )
+    request = grid_flow_request()
+    request.pop("source")
+
+    with TestClient(app) as client:
+        write_response = client.post("/api/v1/grid-flow", json=request)
+        read_response = client.get("/api/v1/grid-flow")
+
+    assert write_response.status_code == 200
+    assert read_response.status_code == 404
 
 
 def test_household_load_provider_data_is_persisted_and_retrieved_after_restart(
@@ -1062,6 +1122,8 @@ def grid_flow_request() -> dict[str, object]:
             "provider": "home-assistant",
             "entity_id": "sensor.grid_import",
         },
+        "retrieved_at": "2026-01-01T00:00:00+00:00",
+        "latest_observation_at": "2026-01-01T01:00:00+00:00",
     }
 
 
@@ -1099,6 +1161,8 @@ solver:
             "provider": "home-assistant",
             "entity_id": "sensor.grid_import",
         },
+        "retrieved_at": "2026-01-01T00:00:00Z",
+        "latest_observation_at": "2026-01-01T01:00:00Z",
     }
 
 
@@ -1206,7 +1270,9 @@ solver:
                     '{"schema_version":"1",'
                     '"start_time":"2026-01-01T00:00:00+00:00",'
                     '"interval_minutes":60,"import_kw":[0.0,'
-                    f'{value},1.0],"export_kw":[0.0,0.0,0.0],"unit":"kW"}}'
+                    f'{value},1.0],"export_kw":[0.0,0.0,0.0],"unit":"kW",'
+                    '"retrieved_at":"2026-01-01T00:00:00+00:00",'
+                    '"latest_observation_at":"2026-01-01T01:00:00+00:00"}'
                 ),
                 headers={"content-type": "application/json"},
             )

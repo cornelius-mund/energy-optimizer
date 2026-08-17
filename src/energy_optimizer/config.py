@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from energy_optimizer.providers.interfaces import (
+    GRID_FLOW_SOURCE_ID,
     HOUSEHOLD_LOAD_SOURCE_ID,
     PV_GENERATION_SOURCE_ID,
 )
@@ -46,8 +47,8 @@ class SolverConfiguration(BaseModel):
     time_limit_seconds: float = Field(gt=0)
 
 
-class HouseholdLoadEntityConfiguration(BaseModel):
-    """Configuration for one Home Assistant household-load energy entity."""
+class HomeAssistantEnergyEntityConfiguration(BaseModel):
+    """Configuration for one Home Assistant cumulative-energy entity."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -57,15 +58,19 @@ class HouseholdLoadEntityConfiguration(BaseModel):
     operation: Literal["add", "subtract"]
 
 
+# Preserve the existing configuration name for integrations importing it directly.
+HouseholdLoadEntityConfiguration = HomeAssistantEnergyEntityConfiguration
+
+
 class HomeAssistantConfiguration(BaseModel):
-    """Connection and household-load mappings for Home Assistant."""
+    """Connection and energy mappings for Home Assistant."""
 
     model_config = ConfigDict(extra="forbid")
 
     base_url: AnyHttpUrl
     token: SecretStr
-    household_load_entities: list[HouseholdLoadEntityConfiguration] | None = Field(
-        default=None, min_length=1
+    household_load_entities: list[HomeAssistantEnergyEntityConfiguration] | None = (
+        Field(default=None, min_length=1)
     )
     household_load_entity_id: str | None = Field(
         default=None,
@@ -73,41 +78,67 @@ class HomeAssistantConfiguration(BaseModel):
         max_length=255,
         description="Legacy single-entity setting; migrate to household_load_entities",
     )
+    grid_import_entities: list[HomeAssistantEnergyEntityConfiguration] | None = Field(
+        default=None, min_length=1
+    )
+    grid_export_entities: list[HomeAssistantEnergyEntityConfiguration] | None = Field(
+        default=None, min_length=1
+    )
     timeout_seconds: float = Field(gt=0, le=120)
     max_data_age_seconds: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def validate_household_load_entities(self) -> "HomeAssistantConfiguration":
-        """Require explicit energy semantics and reject duplicate entities."""
+    def validate_energy_entities(self) -> "HomeAssistantConfiguration":
+        """Apply the legacy mapping and reject duplicate physical entities."""
         if self.household_load_entities is None:
-            if self.household_load_entity_id is None:
-                raise ValueError(
-                    "household_load_entities is required; configure at least one "
-                    "energy entity with state_class, unit, and operation"
-                )
-            self.household_load_entities = [
-                HouseholdLoadEntityConfiguration(
-                    entity_id=self.household_load_entity_id,
-                    state_class="total_increasing",
-                    unit="kWh",
-                    operation="add",
-                )
-            ]
+            if self.household_load_entity_id is not None:
+                self.household_load_entities = [
+                    HomeAssistantEnergyEntityConfiguration(
+                        entity_id=self.household_load_entity_id,
+                        state_class="total_increasing",
+                        unit="kWh",
+                        operation="add",
+                    )
+                ]
         elif self.household_load_entity_id is not None:
             raise ValueError(
                 "configure household_load_entities instead of the legacy "
                 "household_load_entity_id"
             )
 
-        entity_ids = [entity.entity_id for entity in self.household_load_entities]
+        grid_entity_sets = (self.grid_import_entities, self.grid_export_entities)
+        if any(entities is not None for entities in grid_entity_sets) and not all(
+            entities is not None for entities in grid_entity_sets
+        ):
+            raise ValueError(
+                "grid_import_entities and grid_export_entities must be configured "
+                "together"
+            )
+
+        entity_ids = [
+            entity.entity_id
+            for entities in (
+                self.household_load_entities,
+                self.grid_import_entities,
+                self.grid_export_entities,
+            )
+            for entity in entities or []
+        ]
         if len(entity_ids) != len(set(entity_ids)):
-            raise ValueError("household_load_entities must not contain duplicates")
+            raise ValueError(
+                "Home Assistant energy entities must not contain duplicates"
+            )
         return self
 
     @property
     def household_load_source_id(self) -> str:
         """Return the single persistence identity for the aggregate dataset."""
         return HOUSEHOLD_LOAD_SOURCE_ID
+
+    @property
+    def grid_flow_source_id(self) -> str:
+        """Return the single persistence identity for grid-flow data."""
+        return GRID_FLOW_SOURCE_ID
 
 
 class ForecastSolarConfiguration(BaseModel):
@@ -241,8 +272,23 @@ class Configuration(BaseModel):
         """Return whether a source identifies the configured load provider."""
         return (
             self.home_assistant is not None
+            and self.home_assistant.household_load_entities is not None
             and provider == "home-assistant"
             and entity_id == self.home_assistant.household_load_source_id
+        )
+
+    def is_configured_grid_flow_source(
+        self,
+        provider: str,
+        entity_id: str | None,
+    ) -> bool:
+        """Return whether a source identifies the configured grid-flow provider."""
+        return (
+            self.home_assistant is not None
+            and self.home_assistant.grid_import_entities is not None
+            and self.home_assistant.grid_export_entities is not None
+            and provider == "home-assistant"
+            and entity_id == self.home_assistant.grid_flow_source_id
         )
 
 

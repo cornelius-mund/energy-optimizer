@@ -22,8 +22,12 @@ from energy_optimizer.providers.forecast_solar import (
     ForecastSolarImporter,
 )
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
+from energy_optimizer.providers.home_assistant_grid_flow import (
+    HomeAssistantGridFlowImporter,
+)
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
+    GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
     SourceMetadata,
@@ -510,6 +514,7 @@ def build_configured_orchestrator(
     registrations: list[ProviderRegistration] = []
     if (
         configuration.home_assistant is not None
+        and configuration.home_assistant.household_load_entities is not None
         and "household_load" in orchestration.sources
     ):
         home_assistant = configuration.home_assistant
@@ -611,6 +616,54 @@ def build_configured_orchestrator(
                     else False
                 ),
                 load=load_pv_generation,
+            )
+        )
+
+    if (
+        configuration.home_assistant is not None
+        and configuration.home_assistant.grid_import_entities is not None
+        and configuration.home_assistant.grid_export_entities is not None
+        and "grid_flow" in orchestration.sources
+    ):
+        home_assistant = configuration.home_assistant
+        grid_flow_importer = HomeAssistantGridFlowImporter(home_assistant)
+        grid_flow_adapter = TypeAdapter(GridFlowData)
+
+        def fetch_grid_flow(
+            now: datetime,
+            schedule: DataSourceScheduleConfiguration,
+        ) -> GridFlowData:
+            end_time = now.replace(minute=0, second=0, microsecond=0)
+            start_time = end_time - timedelta(hours=1)
+            return grid_flow_importer.fetch(
+                start_time,
+                end_time,
+                schedule.history_lookback_seconds,
+                now=now,
+            )
+
+        def load_grid_flow() -> GridFlowData | None:
+            return store.load(
+                ProviderDataKey(
+                    data_type="grid-flow",
+                    provider="home-assistant",
+                    entity_id=home_assistant.grid_flow_source_id,
+                ),
+                grid_flow_adapter,
+            )
+
+        registrations.append(
+            ProviderRegistration(
+                name="grid_flow",
+                data_type="grid-flow",
+                adapter=grid_flow_adapter,
+                fetch=fetch_grid_flow,
+                is_fresh=lambda data, now: (
+                    grid_flow_importer.is_fresh(data, now=now)
+                    if isinstance(data, GridFlowData)
+                    else False
+                ),
+                load=load_grid_flow,
             )
         )
 

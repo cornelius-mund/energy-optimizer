@@ -30,8 +30,10 @@ src/energy_optimizer/
 │   ├── http.py               # Shared bounded JSON HTTP requests
 │   ├── prices.py             # Electricity-price adapters
 │   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast adapter
-│   ├── normalization.py      # Shared timestamp and value validation
-│   └── home_assistant.py     # Home Assistant adapters
+│   ├── normalization.py      # Provider-independent timestamp/value utilities
+│   ├── home_assistant.py     # Household-load Home Assistant composition
+│   ├── home_assistant_energy.py # Shared Home Assistant history and energy aggregation
+│   └── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
 ├── storage.py                # Durable normalized provider-data storage
 └── optimization/
     ├── model.py              # Pyomo MILP model construction
@@ -130,28 +132,21 @@ services. Adapters own vendor-specific authentication, HTTP calls, response
 formats, and provider errors. Normalization and validation happen before data is
 passed to the application or optimizer.
 
-The Home Assistant household-load adapter is the first concrete provider slice.
-`HomeAssistantLoadImporter` owns the Home Assistant REST request, bearer-token
-authentication, energy-unit conversion, cumulative counter validation,
-reset-aware delta accumulation, add/subtract aggregation, hourly
-normalization, and observation metadata. It follows Home Assistant's `total`
-and `total_increasing` state classes, rejects instantaneous power entities, and
-rejects any failed or incomplete contribution before returning
-`HouseholdLoadData`. Unknown and unavailable history samples are skipped without
-assigning energy; the next valid counter observation owns the resulting delta,
-and an entity with no usable observations still fails. The aggregate uses the
-logical `household_load` entity identity, regardless of how many Home Assistant
-entities contribute to it. The importer exposes an optional freshness health
-check, but does not start polling, schedule requests, cache results, persist
-results, or invoke the API layer. The orchestration layer selects the requested
-period, history lookback, and polling cadence. An empty household-load store
-requests up to 87,672 hourly values through the latest completed UTC hour; when
-Home Assistant retains less history, normalization starts at the earliest safely
-derivable hour instead of fabricating older values. Later requests begin at the
-first hour after the final persisted hour, so scheduled collection does not
-re-fetch completed persisted values. A cycle with no missing completed hour
-skips provider retrieval and persistence. Historical retention is independent of
-polling freshness.
+The shared `home_assistant_energy.py` component owns Home Assistant history
+requests, bearer-token authentication, energy-unit conversion, cumulative counter
+validation, reset-aware delta accumulation, signed entity aggregation, hourly
+normalization, and observation metadata. It follows Home Assistant's `total` and
+`total_increasing` state classes, rejects instantaneous power entities, and
+rejects failed or incomplete contributions. Unknown and unavailable history
+samples are skipped without assigning energy; the next valid counter observation
+owns the resulting delta, and an entity with no usable observations still fails.
+`HomeAssistantLoadImporter` composes this functionality into the logical
+`household_load` record. `HomeAssistantGridFlowImporter` composes it independently
+for import and export, allowing multiple signed entities per channel, then aligns
+both channels to their common available start and returns `GridFlowData` under
+the logical `grid_flow` identity. Importers expose freshness checks but do not
+start polling, schedule requests, cache results, persist results, or invoke the
+API layer. The orchestration layer owns those policies.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or
@@ -160,7 +155,9 @@ data type, provider, and entity identifier. Atomic replacement, validation on
 read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
-JSON model. Household-load history uses one self-contained hourly observation
+JSON model. Grid-flow persistence replaces the latest validated record; historic
+range retention is deferred to the unified multi-asset history feature.
+Household-load history uses one self-contained hourly observation
 per line in an NDJSON file. API submissions may append overlapping corrections,
 and reads select the latest record for each timestamp before discarding values
 older than the 87,672-value ten-year limit. Scheduled collection requests only

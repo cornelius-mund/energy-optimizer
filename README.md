@@ -218,6 +218,12 @@ hour, so scheduled collection never re-fetches completed hours already in the
 store. If no completed hour is missing, the scheduled cycle skips the provider
 request and persistence write.
 
+Grid-flow collection retrieves the latest completed hour and persists the latest
+validated import/export record through the generic JSON provider store. It uses
+the same Home Assistant energy semantics as household load and can combine
+multiple signed entities independently for import and export. Historic grid-flow
+range queries are deferred to the unified multi-asset history feature.
+
 Scheduled collection requires `persistence.directory`, so normalized data survives
 application restarts. Automatic plan generation is disabled until an optimization
 plan generator is configured. Once enabled, a refresh triggers planning only when
@@ -327,6 +333,39 @@ carry the last known value into the first requested hour. The caller owns the
 lookback and polling policy. Call `is_fresh(data)` when the optional freshness
 threshold is configured to assess polling health. Polling, scheduling, caching,
 and orchestration remain outside this provider adapter.
+
+### Home Assistant grid-flow importer
+
+`HomeAssistantGridFlowImporter` composes the shared Home Assistant energy-history
+retrieval and normalization functionality for grid import and export. Configure
+one or more entities for each channel; every entity uses `state_class` (`total` or
+`total_increasing`), an energy `unit` (`Wh`, `kWh`, or `MWh`), and an explicit
+`operation` (`add` or `subtract`). Import and export are aligned to their common
+available hourly start, and a failed channel never produces a partial result.
+
+```yaml
+home_assistant:
+  base_url: http://homeassistant.local:8123
+  token: replace-with-a-long-lived-access-token
+  grid_import_entities:
+    - entity_id: sensor.grid_import_energy
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+  grid_export_entities:
+    - entity_id: sensor.grid_export_energy
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+  timeout_seconds: 10
+  max_data_age_seconds: 7200
+```
+
+The normalized result is persisted under `home-assistant/grid_flow`.
+`POST /api/v1/grid-flow` validates and persists data when that source is
+configured, while `GET /api/v1/grid-flow` returns the latest persisted record.
+The endpoint stores only the latest record; historic range retention is deferred
+to the unified historic multi-asset API.
 
 ## Development
 
@@ -582,7 +621,8 @@ HTTP 422 with field-level validation details.
 `POST /api/v1/grid-flow` validates normalized hourly grid import and export
 data. The versioned request contains timezone-aware `start_time`,
 `interval_minutes: 60`, equally sized non-negative `import_kw` and `export_kw`
-series for one to 87,672 hours, `unit: "kW"`, and optional source metadata.
+series for one to 87,672 hours, `unit: "kW"`, optional source metadata, and
+timezone-aware `retrieved_at` and `latest_observation_at` metadata.
 
 Example:
 
@@ -596,8 +636,10 @@ Example:
   "unit": "kW",
   "source": {
     "provider": "home-assistant",
-    "entity_id": "sensor.grid_import"
-  }
+    "entity_id": "grid_flow"
+  },
+  "retrieved_at": "2026-01-01T00:00:00+00:00",
+  "latest_observation_at": "2026-01-01T01:00:00+00:00"
 }
 ```
 
@@ -605,7 +647,8 @@ The response echoes the normalized import and export series with
 `status: "validated"`. Missing fields, unknown fields, unsupported versions
 or units, naive timestamps, mismatched series lengths, invalid values, and
 series longer than ten years (87,672 hourly values) return HTTP 422 with
-field-level validation details.
+field-level validation details. `GET /api/v1/grid-flow` returns the latest
+persisted configured Home Assistant record, or HTTP 404 when none is available.
 
 The health endpoint returns the service status and version, for example:
 
