@@ -544,6 +544,64 @@ def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> Non
     assert data.quality[0].entity_id == ENTITY_ID
 
 
+def test_physical_limit_rejects_over_limit_delta_and_marks_interval_suspect() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T00:30:00+00:00", "5"),
+        ("2026-01-01T00:40:00+00:00", "20"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+                "maximum_interval_energy_kwh": 10,
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (5.0,)
+    assert data.quality[0].status == "suspect"
+    assert data.quality[0].reason == "physical_limit_exceeded"
+
+
+def test_physical_limit_accepts_exact_boundary() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T01:00:00+00:00", "10"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+                "maximum_interval_energy_kwh": 10,
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (10.0,)
+    assert data.quality == ()
+
+
 def test_total_rejects_a_decrease_without_last_reset_change() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
