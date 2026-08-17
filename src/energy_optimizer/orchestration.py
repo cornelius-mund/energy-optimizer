@@ -25,6 +25,7 @@ from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
+from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
 )
@@ -339,7 +340,7 @@ class ProviderOrchestrator:
                     registration.name,
                     error.__class__.__name__,
                     message,
-                    exc_info=True,
+                    exc_info=(None if isinstance(error, HomeAssistantError) else True),
                 )
 
         blocked_sources = {

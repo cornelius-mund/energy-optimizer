@@ -100,8 +100,8 @@ response header. Uvicorn access logging is disabled to avoid duplicate access
 records. Logs never include authorization headers, Home Assistant tokens, raw
 provider responses, complete request bodies, or complete energy series.
 Home Assistant history requests replace HTTPX's generic completion record with
-one `home_assistant_history_request` event containing the entity, time range,
-HTTP status, and duration.
+one `home_assistant_history_request` event per entity and request chunk. Each
+record contains the entity, chunk time range, HTTP status, and duration.
 
 Configuration is expected to contain parameters such as:
 
@@ -264,9 +264,10 @@ forecast_solar:
 ### Home Assistant household-load importer
 
 `HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's
-REST history API. It retrieves one requested half-open hourly period, or the
-available retained subset when the requested start predates Home Assistant's
-history, and returns
+REST history API. It retrieves a requested half-open hourly period in contiguous
+requests of no more than seven days. Ranges longer than one week are fetched
+sequentially, and the available retained subset is used when the requested start
+predates Home Assistant's history. The importer returns
 provider-independent household-load data with `load_kw`, `unit: "kW"`, source
 metadata, retrieval time, and the latest source observation time. Household-load
 sources must be energy entities configured with Home Assistant's `state_class`
@@ -335,10 +336,16 @@ and power sensors cannot be configured accidentally.
 Call `fetch(start_time, end_time, history_lookback_seconds)` for a requested
 period. `end_time` may be omitted to fetch through the latest completed UTC
 hour. The lookback asks Home Assistant for an earlier state so the importer can
-carry the last known value into the first requested hour. The caller owns the
-lookback and polling policy. Call `is_fresh(data)` when the optional freshness
-threshold is configured to assess polling health. Polling, scheduling, caching,
-and orchestration remain outside this provider adapter.
+carry the last known value into the first requested hour. It is applied only to
+the first weekly request; later requests start exactly at the previous request's
+end. Raw chunks are combined before counter normalization, so deltas, reset
+boundaries, and recovery handling remain correct across chunk boundaries. A
+failed chunk fails the complete fetch. During scheduled collection, the failed
+refresh is logged and the last valid persisted history remains available for a
+later retry. The caller owns the lookback and polling policy. Call
+`is_fresh(data)` when the optional freshness threshold is configured to assess
+polling health. Polling, scheduling, caching, and orchestration remain outside
+this provider adapter.
 
 ### Home Assistant grid-flow importer
 
@@ -347,7 +354,9 @@ retrieval and normalization functionality for grid import and export. Configure
 one or more entities for each channel; every entity uses `state_class` (`total` or
 `total_increasing`), an energy `unit` (`Wh`, `kWh`, or `MWh`), and an explicit
 `operation` (`add` or `subtract`). Import and export are aligned to their common
-available hourly start, and a failed channel never produces a partial result.
+available hourly start. Long grid-flow requests use the same contiguous,
+seven-day maximum chunks as household load, and a failed chunk or channel never
+produces a partial result.
 
 ```yaml
 home_assistant:

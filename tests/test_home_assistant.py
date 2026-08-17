@@ -130,6 +130,236 @@ def test_fetch_converts_total_increasing_energy_to_hourly_load(
     ) in message
 
 
+def test_fetch_splits_long_history_into_weekly_chunks_before_normalization(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requested_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    requested_end = requested_start + timedelta(days=15)
+    calls: list[tuple[datetime, datetime]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunk_start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        chunk_end = datetime.fromisoformat(request.url.params["end_time"])
+        calls.append((chunk_start, chunk_end))
+        starting_value = int(
+            (chunk_start - (requested_start - timedelta(hours=1))).total_seconds()
+            / 3600
+        )
+        chunk_hours = int((chunk_end - chunk_start).total_seconds() / 3600)
+        readings = [
+            (
+                (chunk_start + timedelta(hours=offset)).isoformat(),
+                str(starting_value + offset),
+            )
+            for offset in range(chunk_hours + 1)
+        ]
+        return httpx.Response(
+            200,
+            json=history_payload(readings=readings),
+        )
+
+    caplog.set_level(logging.INFO)
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        data = provider.fetch(
+            requested_start,
+            requested_end,
+            history_lookback_seconds=3600,
+            now=NOW,
+        )
+    finally:
+        client.close()
+
+    assert calls == [
+        (
+            datetime(2025, 12, 31, 23, tzinfo=timezone.utc),
+            datetime(2026, 1, 7, 23, tzinfo=timezone.utc),
+        ),
+        (
+            datetime(2026, 1, 7, 23, tzinfo=timezone.utc),
+            datetime(2026, 1, 14, 23, tzinfo=timezone.utc),
+        ),
+        (
+            datetime(2026, 1, 14, 23, tzinfo=timezone.utc),
+            requested_end,
+        ),
+    ]
+    assert all(end - start <= timedelta(days=7) for start, end in calls)
+    assert data.start_time == requested_start
+    assert len(data.load_kw) == 15 * 24
+    assert data.load_kw == (1.0,) * (15 * 24)
+    request_logs = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_request")
+    ]
+    assert len(request_logs) == len(calls)
+    assert all(
+        "entity_id=sensor.household_energy" in record.getMessage()
+        for record in request_logs
+    )
+    assert all(
+        "status=200 duration_ms=" in record.getMessage() for record in request_logs
+    )
+    assert all("test-token" not in record.getMessage() for record in request_logs)
+
+
+def test_fetch_uses_one_request_for_a_week_without_lookback() -> None:
+    requested_end = START + timedelta(days=7)
+    calls: list[tuple[datetime, datetime]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunk_start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        chunk_end = datetime.fromisoformat(request.url.params["end_time"])
+        calls.append((chunk_start, chunk_end))
+        return httpx.Response(
+            200,
+            json=history_payload(
+                readings=[
+                    (chunk_start.isoformat(), "0"),
+                    (chunk_end.isoformat(), "1"),
+                ]
+            ),
+        )
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        provider.fetch(START, requested_end, now=NOW)
+    finally:
+        client.close()
+
+    assert calls == [(START, requested_end)]
+
+
+def test_long_history_fetches_every_entity_for_each_chunk() -> None:
+    requested_end = START + timedelta(days=8)
+    requests: list[tuple[str, datetime, datetime]] = []
+    entities = [
+        {
+            "entity_id": ENTITY_ID,
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "add",
+        },
+        {
+            "entity_id": SECOND_ENTITY_ID,
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "subtract",
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        chunk_start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        chunk_end = datetime.fromisoformat(request.url.params["end_time"])
+        requests.append((entity_id, chunk_start, chunk_end))
+        increment = 1.0 if entity_id == ENTITY_ID else 0.25
+        starting_value = 0.0 if chunk_start == START else increment
+        ending_value = starting_value + increment
+        return httpx.Response(
+            200,
+            json=history_payload(
+                entity_id=entity_id,
+                readings=[
+                    (chunk_start.isoformat(), str(starting_value)),
+                    (chunk_end.isoformat(), str(ending_value)),
+                ],
+            ),
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=entities,
+    )
+    try:
+        data = provider.fetch(START, requested_end, now=NOW)
+    finally:
+        client.close()
+
+    assert len(requests) == 4
+    assert [entity_id for entity_id, _, _ in requests] == [
+        ENTITY_ID,
+        ENTITY_ID,
+        SECOND_ENTITY_ID,
+        SECOND_ENTITY_ID,
+    ]
+    assert [(start, end) for _, start, end in requests] == [
+        (START, START + timedelta(days=7)),
+        (START + timedelta(days=7), requested_end),
+        (START, START + timedelta(days=7)),
+        (START + timedelta(days=7), requested_end),
+    ]
+    assert data.load_kw[7 * 24 - 1] == 0.75
+    assert data.load_kw[-1] == 0.75
+
+
+def test_counter_reset_at_chunk_boundary_is_normalized_after_chunks_are_combined() -> (
+    None
+):
+    requested_end = START + timedelta(days=8)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunk_start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        chunk_end = datetime.fromisoformat(request.url.params["end_time"])
+        if chunk_start == START:
+            readings = [
+                (chunk_start.isoformat(), "100"),
+                ((chunk_end - timedelta(hours=1)).isoformat(), "107"),
+                (chunk_end.isoformat(), "200"),
+            ]
+        else:
+            readings = [
+                (chunk_start.isoformat(), "0"),
+                ((chunk_start + timedelta(hours=1)).isoformat(), "1"),
+                (chunk_end.isoformat(), "2"),
+            ]
+        return httpx.Response(200, json=history_payload(readings=readings))
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        data = provider.fetch(START, requested_end, now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw[7 * 24 - 2] == 7
+    assert data.load_kw[7 * 24 - 1] == 0
+    assert data.load_kw[7 * 24] == 1
+    assert max(data.load_kw) == 7
+    assert data.quality[7 * 24 - 1].reason == "counter_reset"
+
+
+def test_failed_history_chunk_does_not_return_partial_long_range_data() -> None:
+    requested_end = START + timedelta(days=8)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return httpx.Response(503)
+        chunk_start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        chunk_end = datetime.fromisoformat(request.url.params["end_time"])
+        return httpx.Response(
+            200,
+            json=history_payload(
+                readings=[
+                    (chunk_start.isoformat(), "0"),
+                    (chunk_end.isoformat(), "1"),
+                ]
+            ),
+        )
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(HomeAssistantError, match="HTTP 503"):
+            provider.fetch(START, requested_end, now=NOW)
+    finally:
+        client.close()
+
+    assert calls == 2
+
+
 def test_total_increasing_observations_need_not_be_hour_aligned() -> None:
     readings = [
         ("2025-12-31T23:15:00+00:00", "0"),

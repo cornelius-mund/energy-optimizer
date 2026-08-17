@@ -21,6 +21,8 @@ from energy_optimizer.providers.normalization import as_utc, parse_aware_timesta
 
 logger = logging.getLogger(__name__)
 
+HOME_ASSISTANT_HISTORY_CHUNK = timedelta(days=7)
+
 
 class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant energy data cannot be imported safely."""
@@ -138,15 +140,49 @@ class HomeAssistantEnergyAggregator:
         history_lookback_seconds: float,
         label: str,
     ) -> HomeAssistantEnergySeries:
-        query_start = start_time - timedelta(seconds=history_lookback_seconds)
-        response = self._request(
-            self._history_url(query_start, end_time, entity.entity_id),
-            entity,
-            query_start,
-            end_time,
-            label,
-        )
-        records = self._parse_history(response, entity, label)
+        chunk_start = start_time - timedelta(seconds=history_lookback_seconds)
+        records: list[dict[str, Any]] = []
+        record_indexes: dict[datetime, int] = {}
+        while chunk_start < end_time:
+            chunk_end = min(
+                chunk_start + HOME_ASSISTANT_HISTORY_CHUNK,
+                end_time,
+            )
+            response = self._request(
+                self._history_url(chunk_start, chunk_end, entity.entity_id),
+                entity,
+                chunk_start,
+                chunk_end,
+                label,
+            )
+            chunk_records = self._parse_history(
+                response, entity, label, allow_empty=True
+            )
+            chunk_timestamps: set[datetime] = set()
+            for record in chunk_records:
+                timestamp = self._parse_timestamp(
+                    record.get("last_updated", record.get("last_changed")),
+                    label,
+                )
+                if timestamp in chunk_timestamps:
+                    # Preserve duplicate records within one provider response so
+                    # normalization can reject the malformed history explicitly.
+                    records.append(record)
+                    continue
+                chunk_timestamps.add(timestamp)
+                existing_index = record_indexes.get(timestamp)
+                if existing_index is None:
+                    record_indexes[timestamp] = len(records)
+                    records.append(record)
+                else:
+                    # Home Assistant may include a boundary observation in both
+                    # adjacent half-open responses; retain the later response once.
+                    records[existing_index] = record
+            chunk_start = chunk_end
+        if not records:
+            raise HomeAssistantError(
+                f"Home Assistant returned no {label} history for {entity.entity_id}"
+            )
         return self._normalize_records(records, start_time, end_time, entity, label)
 
     def _history_url(
@@ -217,6 +253,8 @@ class HomeAssistantEnergyAggregator:
         payload: Any,
         entity: HomeAssistantEnergyEntityConfiguration,
         label: str,
+        *,
+        allow_empty: bool = False,
     ) -> list[dict[str, Any]]:
         if not isinstance(payload, list):
             raise HomeAssistantError(
@@ -224,6 +262,8 @@ class HomeAssistantEnergyAggregator:
                 "entity series"
             )
         if not payload or (len(payload) == 1 and not payload[0]):
+            if allow_empty:
+                return []
             raise HomeAssistantError(
                 f"Home Assistant returned no {label} history for {entity.entity_id}"
             )
@@ -238,6 +278,8 @@ class HomeAssistantEnergyAggregator:
                 f"Home Assistant history for {entity.entity_id} must contain a list "
                 "of records"
             )
+        if not series and allow_empty:
+            return []
         if not all(isinstance(record, dict) for record in series):
             raise HomeAssistantError(
                 f"Home Assistant history for {entity.entity_id} contains an invalid "
