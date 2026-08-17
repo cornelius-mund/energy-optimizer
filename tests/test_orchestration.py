@@ -27,6 +27,7 @@ from energy_optimizer.orchestration import (
     build_configured_orchestrator,
 )
 from energy_optimizer.providers.interfaces import (
+    BatteryData,
     GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
@@ -38,6 +39,7 @@ START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 ADAPTER = TypeAdapter(HouseholdLoadData)
 PV_ADAPTER = TypeAdapter(PvGenerationData)
 GRID_FLOW_ADAPTER = TypeAdapter(GridFlowData)
+BATTERY_ADAPTER = TypeAdapter(BatteryData)
 
 
 def data(
@@ -84,6 +86,28 @@ def grid_flow_data(now: datetime, value: float = 1.0) -> GridFlowData:
         export_kw=(value / 2,),
         unit="kW",
         source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
+        retrieved_at=now,
+        latest_observation_at=now,
+    )
+
+
+def battery_data(now: datetime) -> BatteryData:
+    return BatteryData(
+        schema_version="1",
+        start_time=now,
+        interval_minutes=60,
+        state_of_charge_kwh=(5.0,),
+        capacity_kwh=10.0,
+        minimum_soc_kwh=2.0,
+        maximum_soc_kwh=10.0,
+        initial_soc_kwh=5.0,
+        maximum_charge_kw=4.0,
+        maximum_discharge_kw=4.0,
+        charge_efficiency=0.95,
+        discharge_efficiency=0.9,
+        unit="kWh",
+        power_unit="kW",
+        source=SourceMetadata(provider="home-assistant", entity_id="battery"),
         retrieved_at=now,
         latest_observation_at=now,
     )
@@ -626,6 +650,79 @@ def test_configured_grid_flow_orchestrator_persists_grid_flow(
     )
     assert persisted is not None
     assert persisted.import_kw == (1.0,)
+
+
+def test_configured_battery_orchestrator_persists_battery_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeBatteryImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(self, *, now: datetime | None = None) -> BatteryData:
+            return battery_data(now or START)
+
+        def is_fresh(self, _: BatteryData, *, now: datetime | None = None) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantBatteryImporter",
+        FakeBatteryImporter,
+    )
+    battery_entities = {
+        "state_of_charge": {
+            "entity_id": "sensor.battery_soc",
+            "unit": "%",
+        },
+        "capacity": {"entity_id": "sensor.battery_capacity", "unit": "kWh"},
+        "minimum_soc": {"entity_id": "sensor.battery_minimum", "unit": "kWh"},
+        "maximum_soc": {"entity_id": "sensor.battery_maximum", "unit": "kWh"},
+        "maximum_charge": {"entity_id": "sensor.battery_charge", "unit": "kW"},
+        "maximum_discharge": {
+            "entity_id": "sensor.battery_discharge",
+            "unit": "kW",
+        },
+        "charge_efficiency": {
+            "entity_id": "sensor.battery_charge_efficiency",
+            "unit": "ratio",
+        },
+        "discharge_efficiency": {
+            "entity_id": "sensor.battery_discharge_efficiency",
+            "unit": "ratio",
+        },
+    }
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "battery": battery_entities,
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={"battery": DataSourceScheduleConfiguration(interval_seconds=300)},
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+
+    assert orchestrator is not None
+    cycle = orchestrator.run_due(START)
+    assert cycle.provider_runs[0].source == "battery"
+    assert cycle.provider_runs[0].status == "success"
+    persisted = store.load(
+        ProviderDataKey("battery", "home-assistant", "battery"), BATTERY_ADAPTER
+    )
+    assert persisted is not None
+    assert persisted.state_of_charge_kwh == (5.0,)
 
 
 def test_configured_forecast_solar_orchestrator_rejects_fast_polling(

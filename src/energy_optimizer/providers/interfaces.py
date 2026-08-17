@@ -8,6 +8,7 @@ HOUSEHOLD_LOAD_SOURCE_ID = "household_load"
 HOUSEHOLD_LOAD_MAX_VALUES = 87_672
 PV_GENERATION_SOURCE_ID = "pv_generation"
 GRID_FLOW_SOURCE_ID = "grid_flow"
+BATTERY_SOURCE_ID = "battery"
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,29 @@ class GridFlowData:
     import_kw: tuple[float, ...]
     export_kw: tuple[float, ...]
     unit: Literal["kW"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    latest_observation_at: datetime
+
+
+@dataclass(frozen=True)
+class BatteryData:
+    """Normalized current battery state and capabilities from a provider."""
+
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    state_of_charge_kwh: tuple[float, ...]
+    capacity_kwh: float
+    minimum_soc_kwh: float
+    maximum_soc_kwh: float
+    initial_soc_kwh: float
+    maximum_charge_kw: float
+    maximum_discharge_kw: float
+    charge_efficiency: float
+    discharge_efficiency: float
+    unit: Literal["kWh"]
+    power_unit: Literal["kW"]
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
@@ -120,6 +144,21 @@ class GridFlowProvider(Protocol):
     def is_fresh(
         self,
         data: GridFlowData,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Report whether data is within the configured polling age threshold."""
+
+
+class BatteryProvider(Protocol):
+    """Retrieve normalized current battery state and capabilities."""
+
+    def fetch(self, *, now: datetime | None = None) -> BatteryData:
+        """Fetch the current battery state and capabilities."""
+
+    def is_fresh(
+        self,
+        data: BatteryData,
         *,
         now: datetime | None = None,
     ) -> bool:

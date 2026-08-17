@@ -106,6 +106,136 @@ def test_load_configuration_returns_grid_flow_entity_mappings(
     assert configuration.home_assistant.grid_flow_source_id == "grid_flow"
 
 
+def test_load_configuration_returns_battery_entity_mappings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  battery:\n"
+            "    state_of_charge:\n"
+            "      entity_id: sensor.battery_soc\n"
+            "      unit: '%'\n"
+            "    capacity:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: capacity_kwh\n"
+            "      unit: kWh\n"
+            "    minimum_soc:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: minimum_soc_kwh\n"
+            "      unit: kWh\n"
+            "    maximum_soc:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: maximum_soc_kwh\n"
+            "      unit: kWh\n"
+            "    maximum_charge:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: maximum_charge_kw\n"
+            "      unit: kW\n"
+            "    maximum_discharge:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: maximum_discharge_kw\n"
+            "      unit: kW\n"
+            "    charge_efficiency:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: charge_efficiency\n"
+            "      unit: ratio\n"
+            "    discharge_efficiency:\n"
+            "      entity_id: sensor.battery\n"
+            "      attribute: discharge_efficiency\n"
+            "      unit: ratio\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert configuration.home_assistant.battery is not None
+    assert configuration.home_assistant.battery.state_of_charge.unit == "%"
+    assert configuration.home_assistant.battery.capacity.attribute == "capacity_kwh"
+    assert configuration.home_assistant.battery_source_id == "battery"
+
+
+def test_load_configuration_rejects_invalid_battery_mapping_unit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  battery:\n"
+            "    state_of_charge:\n"
+            "      entity_id: sensor.battery_soc\n"
+            "      unit: W\n"
+            "    capacity:\n"
+            "      entity_id: sensor.battery_capacity\n"
+            "      unit: kWh\n"
+            "    minimum_soc:\n"
+            "      entity_id: sensor.battery_minimum_soc\n"
+            "      unit: kWh\n"
+            "    maximum_soc:\n"
+            "      entity_id: sensor.battery_maximum_soc\n"
+            "      unit: kWh\n"
+            "    maximum_charge:\n"
+            "      entity_id: sensor.battery_maximum_charge\n"
+            "      unit: kW\n"
+            "    maximum_discharge:\n"
+            "      entity_id: sensor.battery_maximum_discharge\n"
+            "      unit: kW\n"
+            "    charge_efficiency:\n"
+            "      entity_id: sensor.battery_charge_efficiency\n"
+            "      unit: ratio\n"
+            "    discharge_efficiency:\n"
+            "      entity_id: sensor.battery_discharge_efficiency\n"
+            "      unit: ratio\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="battery.state_of_charge"):
+        load_configuration(path)
+
+
+def test_load_configuration_rejects_reused_battery_entity_and_attribute(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    document = VALID_CONFIGURATION.replace(
+        "  household_load_entity_id: sensor.household_load\n",
+        "  battery:\n"
+        "    state_of_charge:\n"
+        "      entity_id: sensor.battery\n"
+        "      attribute: value\n"
+        "      unit: '%'\n"
+        "    capacity:\n"
+        "      entity_id: sensor.battery\n"
+        "      attribute: value\n"
+        "      unit: kWh\n"
+        "    minimum_soc:\n"
+        "      entity_id: sensor.battery_minimum_soc\n"
+        "      unit: kWh\n"
+        "    maximum_soc:\n"
+        "      entity_id: sensor.battery_maximum_soc\n"
+        "      unit: kWh\n"
+        "    maximum_charge:\n"
+        "      entity_id: sensor.battery_maximum_charge\n"
+        "      unit: kW\n"
+        "    maximum_discharge:\n"
+        "      entity_id: sensor.battery_maximum_discharge\n"
+        "      unit: kW\n"
+        "    charge_efficiency:\n"
+        "      entity_id: sensor.battery_charge_efficiency\n"
+        "      unit: ratio\n"
+        "    discharge_efficiency:\n"
+        "      entity_id: sensor.battery_discharge_efficiency\n"
+        "      unit: ratio\n",
+    )
+    path.write_text(document, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="reuse"):
+        load_configuration(path)
+
+
 def test_load_configuration_allows_grid_only_home_assistant_provider(
     tmp_path: Path,
 ) -> None:

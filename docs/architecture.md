@@ -33,7 +33,8 @@ src/energy_optimizer/
 │   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── home_assistant.py     # Household-load Home Assistant composition
 │   ├── home_assistant_energy.py # Shared Home Assistant history and energy aggregation
-│   └── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
+│   ├── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
+│   └── home_assistant_battery.py # Current battery state composition
 ├── storage.py                # Durable normalized provider-data storage
 └── optimization/
     ├── model.py              # Pyomo MILP model construction
@@ -147,6 +148,16 @@ both channels to their common available start and returns `GridFlowData` under
 the logical `grid_flow` identity. Importers expose freshness checks but do not
 start polling, schedule requests, cache results, persist results, or invoke the
 API layer. The orchestration layer owns those policies.
+
+`HomeAssistantBatteryImporter` is intentionally separate from the cumulative
+energy helper because battery state of charge and capabilities are instantaneous
+state values. It reads configured Home Assistant state entities, optionally
+selecting a named attribute, converts configured units to the battery contract,
+and returns one current SOC value together with scalar capability limits and
+efficiencies. The oldest mapped entity observation determines freshness, and a
+failure in any required mapping prevents a partial snapshot from being returned.
+Historic SOC reconstruction is not part of this provider; consumers that need
+measurement history must use a dedicated history importer and alignment policy.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or

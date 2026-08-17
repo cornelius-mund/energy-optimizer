@@ -22,11 +22,15 @@ from energy_optimizer.providers.forecast_solar import (
     ForecastSolarImporter,
 )
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
+from energy_optimizer.providers.home_assistant_battery import (
+    HomeAssistantBatteryImporter,
+)
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
 )
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
+    BatteryData,
     GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
@@ -664,6 +668,47 @@ def build_configured_orchestrator(
                     else False
                 ),
                 load=load_grid_flow,
+            )
+        )
+
+    if (
+        configuration.home_assistant is not None
+        and configuration.home_assistant.battery is not None
+        and "battery" in orchestration.sources
+    ):
+        home_assistant = configuration.home_assistant
+        battery_importer = HomeAssistantBatteryImporter(home_assistant)
+        battery_adapter = TypeAdapter(BatteryData)
+
+        def fetch_battery(
+            now: datetime,
+            schedule: DataSourceScheduleConfiguration,
+        ) -> BatteryData:
+            del schedule
+            return battery_importer.fetch(now=now)
+
+        def load_battery() -> BatteryData | None:
+            return store.load(
+                ProviderDataKey(
+                    data_type="battery",
+                    provider="home-assistant",
+                    entity_id=home_assistant.battery_source_id,
+                ),
+                battery_adapter,
+            )
+
+        registrations.append(
+            ProviderRegistration(
+                name="battery",
+                data_type="battery",
+                adapter=battery_adapter,
+                fetch=fetch_battery,
+                is_fresh=lambda data, now: (
+                    battery_importer.is_fresh(data, now=now)
+                    if isinstance(data, BatteryData)
+                    else False
+                ),
+                load=load_battery,
             )
         )
 
