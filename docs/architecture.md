@@ -30,9 +30,9 @@ src/energy_optimizer/
 │   ├── http.py               # Shared bounded JSON HTTP requests
 │   ├── prices.py             # Electricity-price adapters
 │   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast adapter
-│   ├── normalization.py      # Shared timestamp and value validation
+│   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── home_assistant.py     # Household-load Home Assistant composition
-│   ├── home_assistant_energy.py # Shared Home Assistant energy normalization
+│   ├── home_assistant_energy.py # Shared Home Assistant history and energy aggregation
 │   └── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
 ├── storage.py                # Durable normalized provider-data storage
 └── optimization/
