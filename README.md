@@ -303,6 +303,15 @@ control. The importer raises actionable errors for authentication failures,
 missing history, malformed or non-numeric values, unsupported power units,
 invalid state classes, unmarked total resets, and request failures.
 
+Each cumulative-energy entity may also define
+`maximum_interval_energy_kwh`. When set, the importer compares every normalized
+hourly delta after unit conversion with that physical upper bound. A delta above
+the limit is replaced with zero, marked `suspect` with reason
+`physical_limit_exceeded`, and logged with the entity, timestamp, observed delta,
+and configured limit. Equality is accepted. The limit is per source entity, is
+not applied to other mappings, and is disabled when omitted; choose it from the
+meter or inverter's credible maximum hourly energy.
+
 For example, a household meter can be added while an EV meter is subtracted:
 
 ```yaml

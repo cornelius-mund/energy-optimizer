@@ -146,6 +146,10 @@ observation owns the resulting delta, and an entity with no usable observations
 still fails. Reset and recovery intervals carry explicit suspect quality metadata
 through aggregation, persistence, historic API responses, and orchestration;
 required suspect data cannot trigger an optimization plan.
+Each cumulative-energy mapping may additionally define a physical upper bound
+for one hourly delta in kWh. The bound is applied after unit conversion and
+before signed aggregation; an exceeded bound produces zero energy and suspect
+quality with reason `physical_limit_exceeded`.
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns

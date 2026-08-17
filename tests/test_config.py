@@ -71,6 +71,53 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
     assert configuration.home_assistant.household_load_source_id == "household_load"
 
 
+def test_load_configuration_accepts_entity_physical_energy_limits(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  household_load_entities:\n"
+            "    - entity_id: sensor.household_energy\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "      maximum_interval_energy_kwh: 15\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    entities = configuration.home_assistant.household_load_entities
+    assert entities is not None
+    entity = entities[0]
+    assert entity.maximum_interval_energy_kwh == 15
+
+
+def test_load_configuration_rejects_non_positive_entity_physical_limit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  household_load_entities:\n"
+            "    - entity_id: sensor.household_energy\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "      maximum_interval_energy_kwh: 0\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="maximum_interval_energy_kwh"):
+        load_configuration(path)
+
+
 def test_load_configuration_returns_grid_flow_entity_mappings(
     tmp_path: Path,
 ) -> None:
