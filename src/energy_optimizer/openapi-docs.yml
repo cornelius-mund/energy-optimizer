@@ -706,6 +706,7 @@ components:
           enum:
           - validated
           - stale
+          - suspect
           - empty
           title: Status
         data_type:
@@ -741,6 +742,11 @@ components:
             type: number
           type: array
           title: Load Kw
+        quality:
+          items:
+            $ref: '#/components/schemas/HouseholdLoadQuality'
+          type: array
+          title: Quality
         unit:
           type: string
           const: kW
@@ -777,7 +783,9 @@ components:
           title: Latest Observation At
         validation_status:
           type: string
-          const: valid
+          enum:
+          - valid
+          - suspect
           title: Validation Status
         freshness:
           type: string
@@ -801,6 +809,7 @@ components:
       - interval_minutes
       - timestamps
       - load_kw
+      - quality
       - unit
       - source
       - coverage_start_time
@@ -871,6 +880,32 @@ components:
       - export_price_eur_per_kwh
       title: HourlyOptimizationRequest
       description: Validated hourly inputs accepted by the optimization boundary.
+    HouseholdLoadQuality:
+      properties:
+        status:
+          type: string
+          enum:
+          - valid
+          - suspect
+          title: Status
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+        entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - reason
+      - entity_id
+      title: HouseholdLoadQuality
+      description: Quality metadata for one historic household-load interval.
     HouseholdLoadRequest:
       properties:
         schema_version:
