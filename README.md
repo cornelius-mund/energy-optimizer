@@ -297,6 +297,10 @@ is retained without turning the post-reset absolute counter value into fabricate
 energy. Reset transitions and recovery decisions are logged with the entity and
 observed values and mark the affected hourly interval as `suspect`; suspect
 intervals are exposed with a reason and source entity and block optimization.
+If a `total_increasing` counter rises and the next valid observation returns close
+to the value before that rise, the earlier increase is retracted as a transient
+counter spike. Both observations contribute zero for the correction and the
+affected interval is marked `suspect`.
 `unknown` and `unavailable` history samples are
 skipped without assigning energy, and the importer logs the affected entity
 and time range. The next valid cumulative observation determines the delta;

@@ -152,6 +152,10 @@ persistence, historic API responses, and orchestration; required suspect data
 cannot trigger an optimization plan. A failed chunk fails the complete provider
 fetch, so scheduled orchestration preserves the last valid persisted data and
 retries on a later due cycle.
+For `total_increasing` counters, an increase followed by a return close to the
+pre-increase value is treated as a transient counter spike: the earlier delta is
+retracted, both observations are marked suspect, and no fabricated energy is
+retained.
 Individual chunk request outcomes are debug-level diagnostics. The shared
 aggregator emits one structured success summary at info level or one failure
 summary at warning level after the complete entity set has been processed.
