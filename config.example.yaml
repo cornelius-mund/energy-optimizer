@@ -26,6 +26,10 @@ orchestration:
       enabled: true
       interval_seconds: 3600
       history_lookback_seconds: 3600
+    grid_flow:
+      enabled: true
+      interval_seconds: 3600
+      history_lookback_seconds: 3600
     pv_generation:
       enabled: true
       interval_seconds: 3600
@@ -62,6 +66,16 @@ home_assistant:
       state_class: total
       unit: kWh
       operation: subtract
+  grid_import_entities:
+    - entity_id: sensor.grid_import_energy
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+  grid_export_entities:
+    - entity_id: sensor.grid_export_energy
+      state_class: total_increasing
+      unit: kWh
+      operation: add
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.
   max_data_age_seconds: 7200

@@ -198,6 +198,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/grid-flow:
+    get:
+      summary: Persisted Grid Flow
+      description: Return the latest persisted normalized grid-flow provider data.
+      operationId: persisted_grid_flow_api_v1_grid_flow_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GridFlowResponse'
+        '404':
+          description: No persisted provider data is available
+        '503':
+          description: Provider data persistence is unavailable
     post:
       summary: Grid Flow
       description: Validate a versioned hourly grid import and export data series.
@@ -590,6 +605,16 @@ components:
           - $ref: '#/components/schemas/SourceMetadata'
           - type: 'null'
           description: Optional source metadata for externally supplied data
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+          description: Time when the grid-flow data was retrieved
+        latest_observation_at:
+          type: string
+          format: date-time
+          title: Latest Observation At
+          description: Time of the latest source observation in the data
       additionalProperties: false
       type: object
       required:
@@ -599,6 +624,8 @@ components:
       - import_kw
       - export_kw
       - unit
+      - retrieved_at
+      - latest_observation_at
       title: GridFlowRequest
       description: Versioned hourly grid import and export data at the API boundary.
     GridFlowResponse:
@@ -641,6 +668,14 @@ components:
           anyOf:
           - $ref: '#/components/schemas/SourceMetadata'
           - type: 'null'
+        retrieved_at:
+          type: string
+          format: date-time
+          title: Retrieved At
+        latest_observation_at:
+          type: string
+          format: date-time
+          title: Latest Observation At
       additionalProperties: false
       type: object
       required:
@@ -651,6 +686,8 @@ components:
       - import_kw
       - export_kw
       - unit
+      - retrieved_at
+      - latest_observation_at
       title: GridFlowResponse
       description: Response returned after grid-flow data passes validation.
     HTTPValidationError:

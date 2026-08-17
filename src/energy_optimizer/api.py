@@ -28,6 +28,7 @@ from energy_optimizer.config import ConfigurationError, load_configuration
 from energy_optimizer.logging_config import configure_logging
 from energy_optimizer.orchestration import build_configured_orchestrator
 from energy_optimizer.providers.interfaces import (
+    GridFlowData,
     HouseholdLoadData,
 )
 from energy_optimizer.providers.interfaces import (
@@ -415,6 +416,7 @@ class HistoricHouseholdLoadResponse(BaseModel):
 
 
 HOUSEHOLD_LOAD_ADAPTER = TypeAdapter(HouseholdLoadData)
+GRID_FLOW_ADAPTER = TypeAdapter(GridFlowData)
 
 
 class PvGenerationRequest(BaseModel):
@@ -496,6 +498,12 @@ class GridFlowRequest(BaseModel):
         default=None,
         description="Optional source metadata for externally supplied data",
     )
+    retrieved_at: datetime = Field(
+        description="Time when the grid-flow data was retrieved"
+    )
+    latest_observation_at: datetime = Field(
+        description="Time of the latest source observation in the data"
+    )
 
     @field_validator("import_kw", "export_kw", mode="before")
     @classmethod
@@ -511,7 +519,15 @@ class GridFlowRequest(BaseModel):
     @model_validator(mode="after")
     def validate_series(self) -> "GridFlowRequest":
         """Require an unambiguous timestamp and aligned import/export series."""
-        if self.start_time.tzinfo is None or self.start_time.utcoffset() is None:
+        timestamps = (
+            self.start_time,
+            self.retrieved_at,
+            self.latest_observation_at,
+        )
+        if any(
+            timestamp.tzinfo is None or timestamp.utcoffset() is None
+            for timestamp in timestamps
+        ):
             raise ValueError("start_time must include a timezone")
         if len(self.import_kw) != len(self.export_kw):
             raise ValueError(
@@ -533,6 +549,8 @@ class GridFlowResponse(BaseModel):
     export_kw: list[Annotated[float, Field(ge=0, le=1000)]]
     unit: Literal["kW"]
     source: SourceMetadata | None = None
+    retrieved_at: datetime
+    latest_observation_at: datetime
 
 
 class OptimizationResponse(BaseModel):
@@ -1059,17 +1077,143 @@ def pv_generation(request: PvGenerationRequest) -> PvGenerationResponse:
 
 
 @app.post("/api/v1/grid-flow", response_model=GridFlowResponse)
-def grid_flow(request: GridFlowRequest) -> GridFlowResponse:
+def grid_flow(request: Request, data: GridFlowRequest) -> GridFlowResponse:
     """Validate a versioned hourly grid import and export data series."""
+    application_configuration = request.app.state.configuration
+    store = request.app.state.provider_data_store
+    persisted_provider_data: GridFlowData | None = None
+    if (
+        store is not None
+        and data.source is not None
+        and application_configuration.is_configured_grid_flow_source(
+            data.source.provider, data.source.entity_id
+        )
+    ):
+        key = ProviderDataKey(
+            data_type="grid-flow",
+            provider=data.source.provider,
+            entity_id=data.source.entity_id,
+        )
+        provider_data = GridFlowData(
+            schema_version=data.schema_version,
+            start_time=data.start_time,
+            interval_minutes=data.interval_minutes,
+            import_kw=tuple(data.import_kw),
+            export_kw=tuple(data.export_kw),
+            unit=data.unit,
+            source=ProviderSourceMetadata(
+                provider=data.source.provider,
+                entity_id=data.source.entity_id,
+            ),
+            retrieved_at=data.retrieved_at,
+            latest_observation_at=data.latest_observation_at,
+        )
+        try:
+            persisted_provider_data = store.save(key, GRID_FLOW_ADAPTER, provider_data)
+        except ProviderDataStoreError as error:
+            raise HTTPException(
+                status_code=503,
+                detail=f"could not persist grid-flow provider data: {error}",
+            ) from error
     return GridFlowResponse(
         status="validated",
-        schema_version=request.schema_version,
-        start_time=request.start_time,
-        interval_minutes=request.interval_minutes,
-        import_kw=request.import_kw,
-        export_kw=request.export_kw,
-        unit=request.unit,
-        source=request.source,
+        schema_version=data.schema_version,
+        start_time=(
+            persisted_provider_data.start_time
+            if persisted_provider_data is not None
+            else data.start_time
+        ),
+        interval_minutes=data.interval_minutes,
+        import_kw=(
+            list(persisted_provider_data.import_kw)
+            if persisted_provider_data is not None
+            else data.import_kw
+        ),
+        export_kw=(
+            list(persisted_provider_data.export_kw)
+            if persisted_provider_data is not None
+            else data.export_kw
+        ),
+        unit=data.unit,
+        source=(
+            SourceMetadata(
+                provider=persisted_provider_data.source.provider,
+                entity_id=persisted_provider_data.source.entity_id,
+            )
+            if persisted_provider_data is not None
+            else data.source
+        ),
+        retrieved_at=(
+            persisted_provider_data.retrieved_at
+            if persisted_provider_data is not None
+            else data.retrieved_at
+        ),
+        latest_observation_at=(
+            persisted_provider_data.latest_observation_at
+            if persisted_provider_data is not None
+            else data.latest_observation_at
+        ),
+    )
+
+
+@app.get(
+    "/api/v1/grid-flow",
+    response_model=GridFlowResponse,
+    responses={
+        404: {"description": "No persisted provider data is available"},
+        503: {"description": "Provider data persistence is unavailable"},
+    },
+)
+def persisted_grid_flow(request: Request) -> GridFlowResponse:
+    """Return the latest persisted normalized grid-flow provider data."""
+    application_configuration = request.app.state.configuration
+    store = request.app.state.provider_data_store
+    if store is None:
+        raise HTTPException(
+            status_code=503,
+            detail="provider data persistence is not configured",
+        )
+    if application_configuration.home_assistant is None:
+        raise HTTPException(
+            status_code=503,
+            detail="the Home Assistant grid-flow provider is not configured",
+        )
+
+    source = SourceMetadata(
+        provider="home-assistant",
+        entity_id=application_configuration.home_assistant.grid_flow_source_id,
+    )
+    key = ProviderDataKey(
+        data_type="grid-flow",
+        provider=source.provider,
+        entity_id=source.entity_id,
+    )
+    try:
+        provider_data = store.load(key, GRID_FLOW_ADAPTER)
+    except ProviderDataStoreError as error:
+        raise HTTPException(
+            status_code=503,
+            detail=f"could not recover grid-flow provider data: {error}",
+        ) from error
+    if provider_data is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no persisted grid-flow provider data is available",
+        )
+    return GridFlowResponse(
+        status="validated",
+        schema_version=provider_data.schema_version,
+        start_time=provider_data.start_time,
+        interval_minutes=provider_data.interval_minutes,
+        import_kw=list(provider_data.import_kw),
+        export_kw=list(provider_data.export_kw),
+        unit=provider_data.unit,
+        source=SourceMetadata(
+            provider=provider_data.source.provider,
+            entity_id=provider_data.source.entity_id,
+        ),
+        retrieved_at=provider_data.retrieved_at,
+        latest_observation_at=provider_data.latest_observation_at,
     )
 
 

@@ -71,6 +71,136 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
     assert configuration.home_assistant.household_load_source_id == "household_load"
 
 
+def test_load_configuration_returns_grid_flow_entity_mappings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  grid_import_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "  grid_export_entities:\n"
+            "    - entity_id: sensor.grid_export\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert [
+        entity.entity_id
+        for entity in configuration.home_assistant.grid_import_entities or []
+    ] == ["sensor.grid_import"]
+    assert [
+        entity.entity_id
+        for entity in configuration.home_assistant.grid_export_entities or []
+    ] == ["sensor.grid_export"]
+    assert configuration.home_assistant.grid_flow_source_id == "grid_flow"
+
+
+def test_load_configuration_allows_grid_only_home_assistant_provider(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  grid_import_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "  grid_export_entities:\n"
+            "    - entity_id: sensor.grid_export\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    assert configuration.home_assistant.household_load_entities is None
+
+
+def test_load_configuration_rejects_duplicate_energy_entities(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  grid_import_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "  grid_export_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="must not contain duplicates"):
+        load_configuration(path)
+
+
+def test_load_configuration_rejects_incomplete_grid_flow_mapping(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n",
+            "  grid_import_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="configured together"):
+        load_configuration(path)
+
+
+def test_load_configuration_does_not_match_unconfigured_provider_sources(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            "  household_load_entity_id: sensor.household_load\n", ""
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert (
+        configuration.is_configured_household_load_source(
+            "home-assistant", "household_load"
+        )
+        is False
+    )
+    assert (
+        configuration.is_configured_grid_flow_source("home-assistant", "grid_flow")
+        is False
+    )
+
+
 def test_load_configuration_migrates_legacy_single_entity_to_energy_mapping(
     tmp_path: Path,
 ) -> None:
