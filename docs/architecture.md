@@ -138,9 +138,12 @@ requests, bearer-token authentication, energy-unit conversion, cumulative counte
 validation, reset-aware delta accumulation, signed entity aggregation, hourly
 normalization, and observation metadata. It follows Home Assistant's `total` and
 `total_increasing` state classes, rejects instantaneous power entities, and
-rejects failed or incomplete contributions. Unknown and unavailable history
-samples are skipped without assigning energy; the next valid counter observation
-owns the resulting delta, and an entity with no usable observations still fails.
+rejects failed or incomplete contributions. Reset transitions establish a new
+zero-contribution baseline, and a value that returns close to the pre-reset
+counter is treated as recovery rather than energy. Unknown and unavailable
+history samples are skipped without assigning energy; the next valid counter
+observation owns the resulting delta, and an entity with no usable observations
+still fails.
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns
