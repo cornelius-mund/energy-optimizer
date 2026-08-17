@@ -17,7 +17,9 @@ persistence:
 # Optional scheduled provider retrieval. The source name must match a registered
 # provider, and each source has its own polling interval. Household-load history
 # bootstraps with up to the ten-year maximum and uses available retained history
-# when Home Assistant has less than that.
+# when Home Assistant has less than that. History requests longer than seven days
+# are made sequentially in contiguous chunks; a failed chunk leaves the last valid
+# persisted data unchanged for the next scheduled retry.
 orchestration:
   enabled: false
   startup_fetch: true
@@ -82,6 +84,8 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
+  # Long history ranges use contiguous requests of no more than seven days. The
+  # orchestration lookback is applied only to the first request.
   # Battery imports read the current state of each mapped Home Assistant entity.
   # Values may be in the entity state or in a named attribute. The importer
   # returns one current hourly value and persists the latest valid snapshot.

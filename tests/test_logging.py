@@ -28,6 +28,7 @@ from energy_optimizer.logging_config import (
 )
 from energy_optimizer.orchestration import ProviderOrchestrator, ProviderRegistration
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
+from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
@@ -509,3 +510,46 @@ def test_orchestration_failure_log_is_error_with_source_context(
     assert "source=household_load" in failures[0].getMessage()
     assert "provider offline" in failures[0].getMessage()
     assert failures[0].exc_info is not None
+
+
+def test_home_assistant_refresh_failure_omits_expected_traceback(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def fetch(_: datetime, __: DataSourceScheduleConfiguration) -> object:
+        raise HomeAssistantError("Home Assistant request timed out; retry later")
+
+    registration = ProviderRegistration(
+        name="household_load",
+        data_type="household-load",
+        adapter=TypeAdapter(HouseholdLoadData),
+        fetch=fetch,
+        is_fresh=lambda _data, _now: True,
+    )
+    configuration = OrchestrationConfiguration(
+        enabled=True,
+        sources={
+            "household_load": DataSourceScheduleConfiguration(interval_seconds=60)
+        },
+    )
+    configure_logging("DEBUG")
+
+    with caplog.at_level(logging.DEBUG, logger="energy_optimizer.orchestration"):
+        cycle = ProviderOrchestrator(
+            configuration,
+            [registration],
+            ProviderDataStore(tmp_path),
+        ).run_due(start)
+
+    assert cycle.provider_runs[0].status == "failed"
+    failures = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=provider_refresh_failed")
+    ]
+    assert len(failures) == 1
+    assert failures[0].levelno == logging.ERROR
+    assert "status" not in failures[0].getMessage()
+    assert "timed out" in failures[0].getMessage()
+    assert failures[0].exc_info is None

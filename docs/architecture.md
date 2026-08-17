@@ -138,14 +138,20 @@ requests, bearer-token authentication, energy-unit conversion, cumulative counte
 validation, reset-aware delta accumulation, signed entity aggregation, hourly
 normalization, and observation metadata. It follows Home Assistant's `total` and
 `total_increasing` state classes, rejects instantaneous power entities, and
-rejects failed or incomplete contributions. Reset transitions establish a new
-zero-contribution baseline, and a value that returns close to the pre-reset
-counter is treated as recovery rather than energy. Unknown and unavailable
-history samples are skipped without assigning energy; the next valid counter
-observation owns the resulting delta, and an entity with no usable observations
-still fails. Reset and recovery intervals carry explicit suspect quality metadata
-through aggregation, persistence, historic API responses, and orchestration;
-required suspect data cannot trigger an optimization plan.
+rejects failed or incomplete contributions. Requests covering more than seven
+days are split into contiguous half-open chunks, with the configured lookback
+applied only to the first chunk. Raw records from all chunks are combined before
+normalization so counter deltas and reset handling remain continuous at chunk
+boundaries. Reset transitions establish a new zero-contribution baseline, and a
+value that returns close to the pre-reset counter is treated as recovery rather
+than energy. Unknown and unavailable history samples are skipped without
+assigning energy; the next valid counter observation owns the resulting delta,
+and an entity with no usable observations still fails. Reset and recovery
+intervals carry explicit suspect quality metadata through aggregation,
+persistence, historic API responses, and orchestration; required suspect data
+cannot trigger an optimization plan. A failed chunk fails the complete provider
+fetch, so scheduled orchestration preserves the last valid persisted data and
+retries on a later due cycle.
 Each cumulative-energy mapping may additionally define a physical upper bound
 for one hourly delta in kWh. The bound is applied after unit conversion and
 before signed aggregation; an exceeded bound produces zero energy and suspect
