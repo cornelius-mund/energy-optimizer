@@ -354,7 +354,7 @@ def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
         client.close()
 
 
-def test_total_increasing_reset_mid_hour_preserves_energy_on_both_sides() -> None:
+def test_total_increasing_reset_mid_hour_starts_a_new_baseline() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:20:00+00:00", "10.5"),
@@ -375,7 +375,7 @@ def test_total_increasing_reset_mid_hour_preserves_energy_on_both_sides() -> Non
     finally:
         client.close()
 
-    assert data.load_kw == (1.75,)
+    assert data.load_kw == (1.5,)
 
 
 def test_total_increasing_skips_unavailable_observations_without_fabricating_energy(
@@ -479,7 +479,7 @@ def test_total_increasing_does_not_interpolate_between_observations() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (0.5, 1.5)
+    assert data.load_kw == (0.5, 0.0)
 
 
 def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
@@ -515,7 +515,30 @@ def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (1.75,)
+    assert data.load_kw == (1.5,)
+
+
+def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "700"),
+        ("2026-01-01T00:30:00+00:00", "0"),
+        ("2026-01-01T00:40:00+00:00", "700.25"),
+        ("2026-01-01T00:50:00+00:00", "700.5"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(readings=readings, state_class="total_increasing"),
+            )
+        )
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (0.25,)
 
 
 def test_total_rejects_a_decrease_without_last_reset_change() -> None:

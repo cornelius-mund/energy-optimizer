@@ -391,16 +391,60 @@ class HomeAssistantEnergyAggregator:
         values = [0.0] * hour_count
         previous_value = baseline[1]
         previous_reset = baseline[2]
+        reset_baseline: float | None = None
         latest_observation = baseline[0]
         for timestamp, value, reset in parsed[baseline_index + 1 :]:
             if timestamp > end:
                 break
-            if value >= previous_value:
-                delta = value - previous_value
-            elif entity.state_class == "total_increasing":
-                delta = value
-            elif reset != previous_reset:
-                delta = value
+            reset_marker_changed = reset != previous_reset
+            if reset_marker_changed:
+                delta = 0.0
+                reset_baseline = previous_value
+                logger.warning(
+                    "event=home_assistant_counter_reset component=home_assistant "
+                    "operation=normalize entity_id=%s timestamp=%s "
+                    "previous_value=%s current_value=%s reason=reset_marker_changed",
+                    entity.entity_id,
+                    timestamp.isoformat(),
+                    previous_value,
+                    value,
+                )
+            elif value < previous_value and entity.state_class == "total_increasing":
+                delta = 0.0
+                reset_baseline = previous_value
+                logger.warning(
+                    "event=home_assistant_counter_reset component=home_assistant "
+                    "operation=normalize entity_id=%s timestamp=%s "
+                    "previous_value=%s current_value=%s reason=counter_decreased",
+                    entity.entity_id,
+                    timestamp.isoformat(),
+                    previous_value,
+                    value,
+                )
+            elif value >= previous_value:
+                if reset_baseline is not None and math.isclose(
+                    value, reset_baseline, rel_tol=0.01, abs_tol=0.001
+                ):
+                    delta = 0.0
+                    logger.warning(
+                        "event=home_assistant_counter_recovery "
+                        "component=home_assistant "
+                        "operation=normalize entity_id=%s timestamp=%s "
+                        "previous_value=%s current_value=%s reset_baseline=%s",
+                        entity.entity_id,
+                        timestamp.isoformat(),
+                        previous_value,
+                        value,
+                        reset_baseline,
+                    )
+                else:
+                    delta = value - previous_value
+                reset_baseline = None
+            elif entity.state_class == "total":
+                raise HomeAssistantError(
+                    f"Home Assistant total entity {entity.entity_id} decreased "
+                    "without a changed last_reset timestamp"
+                )
             else:
                 raise HomeAssistantError(
                     f"Home Assistant total entity {entity.entity_id} decreased "

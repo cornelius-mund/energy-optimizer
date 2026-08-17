@@ -282,11 +282,15 @@ entities, and request timeout in `config.yaml`. An optional
 `max_data_age_seconds` setting enables a polling health check; it does not
 invalidate historical data. No interpolation is performed: the latest observed
 counter value is carried forward until the next observation. For
-`total_increasing`, a decrease starts a new meter cycle and the new value is
-added as post-reset energy. For `total`, a decrease is accepted only when
-Home Assistant's `last_reset` timestamp changes. Every observed increase within
-an hour is summed, so a reset in the middle of an hour preserves energy from
-both sides of the reset. `unknown` and `unavailable` history samples are
+`total_increasing`, a decrease starts a new meter cycle and establishes the new
+value as a zero-contribution baseline. For `total`, a decrease is accepted only
+when Home Assistant's `last_reset` timestamp changes, and that reset reading
+also establishes a zero-contribution baseline. A subsequent value that returns
+close to the pre-reset counter is treated as recovery rather than energy. Every
+other observed increase within an hour is summed, so valid energy after a reset
+is retained without turning the post-reset absolute counter value into fabricated
+energy. Reset transitions and recovery decisions are logged with the entity and
+observed values. `unknown` and `unavailable` history samples are
 skipped without assigning energy, and the importer logs the affected entity
 and time range. The next valid cumulative observation determines the delta;
 the delta is assigned to that observation's hour rather than interpolated
