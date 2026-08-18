@@ -655,8 +655,11 @@ their provider imports become available.
 The range controls use an end-exclusive boundary: the end time must be later
 than the start time. If a requested actual or forecast range falls outside the
 available coverage, the dashboard replaces both controls with the available
-coverage and loads that range. If forecast coverage is unavailable, it keeps
-the unavailable state instead of inventing a range. The x-axis labels include
+coverage and loads that range. When forecast providers have different
+coverage, the controls use the union of their available ranges so valid price
+and PV points are retained; each chart shows the other provider's missing
+intervals as gaps. If forecast coverage is unavailable, it keeps the
+unavailable state instead of inventing a range. The x-axis labels include
 each point's UTC date and time; chart points also expose their exact timestamp
 and value on pointer hover and keyboard focus.
 

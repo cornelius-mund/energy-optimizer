@@ -109,8 +109,10 @@
       }))
       .filter(({ start, end }) => Number.isFinite(start) && Number.isFinite(end) && end > start);
     if (!ranges.length) return null;
-    const start = Math.max(...ranges.map((range) => range.start));
-    const end = Math.min(...ranges.map((range) => range.end));
+    // Keep the controls wide enough to show each provider's valid slice.
+    // Missing intervals remain explicit gaps in the individual charts.
+    const start = Math.min(...ranges.map((range) => range.start));
+    const end = Math.max(...ranges.map((range) => range.end));
     if (end <= start) return null;
     return {
       start: dateTimeInputValue(new Date(start)),
@@ -336,5 +338,5 @@
   });
   renderHeader();
   diagnostic("debug", "initialized", { scenario });
-  load(todayValue, todayValue);
+  load(todayValue, tomorrowValue);
 })();
