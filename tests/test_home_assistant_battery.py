@@ -178,6 +178,44 @@ def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> No
     assert data.state_of_charge_kwh == (5,)
 
 
+def test_fetch_uses_constants_without_requesting_static_entities() -> None:
+    mapping = {
+        "state_of_charge": {
+            "entity_id": "sensor.battery_soc",
+            "unit": "%",
+        },
+        "capacity": {"value": 10, "unit": "kWh"},
+        "minimum_soc": {"value": 2, "unit": "kWh"},
+        "maximum_soc": {"value": 10, "unit": "kWh"},
+        "maximum_charge": {"value": 4, "unit": "kW"},
+        "maximum_discharge": {"value": 4, "unit": "kW"},
+        "charge_efficiency": {"value": 95, "unit": "%"},
+        "discharge_efficiency": {"value": 0.9, "unit": "ratio"},
+    }
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.path.rsplit("/", 1)[-1]
+        requests.append(entity_id)
+        return httpx.Response(200, json=payload(entity_id, 50))
+
+    provider, client = importer(httpx.MockTransport(handler), battery=mapping)
+    try:
+        data = provider.fetch(now=START)
+    finally:
+        client.close()
+
+    assert requests == ["sensor.battery_soc"]
+    assert data.capacity_kwh == 10
+    assert data.minimum_soc_kwh == 2
+    assert data.maximum_soc_kwh == 10
+    assert data.maximum_charge_kw == 4
+    assert data.maximum_discharge_kw == 4
+    assert data.charge_efficiency == 0.95
+    assert data.discharge_efficiency == 0.9
+    assert data.latest_observation_at == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+
+
 def test_fetch_allows_unavailable_entity_state_when_all_values_use_attributes() -> None:
     mapping = {
         name: {

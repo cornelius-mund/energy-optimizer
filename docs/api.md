@@ -95,21 +95,43 @@ HTTP 422 with field-level validation details.
 ## Home Assistant battery import
 
 The Home Assistant battery provider retrieves a current snapshot from the REST
-state endpoint for each configured mapping. It accepts values from either the
-entity state or a named entity attribute and normalizes them to the battery API
-units. State-of-charge and SOC limits accept `%`, `Wh`, or `kWh`; capacity accepts
-`Wh` or `kWh`; power limits accept `W` or `kW`; and efficiencies accept `%` or a
+state endpoint for each configured entity mapping. Static numeric values may
+instead be configured as constants with `{value, unit}`. Numeric shorthand uses
+the canonical unit for that field. Entity values may come from either the entity
+state or a named entity attribute and normalize to the battery API units.
+State-of-charge and SOC limits accept `%`, `Wh`, or `kWh`; capacity accepts `Wh`
+or `kWh`; power limits accept `W` or `kW`; and efficiencies accept `%` or a
 unitless `ratio`.
 
 Configure the provider under `home_assistant.battery` and add the `battery`
 source to `orchestration.sources`. The snapshot contains one current
 `state_of_charge_kwh` value, uses that value as `initial_soc_kwh`, and records
-the oldest Home Assistant observation timestamp across all mappings for
-freshness checks. All mappings are fetched before normalization, so an
-unavailable or invalid entity prevents a partial battery snapshot from being
-persisted. HTTP authentication failures, missing entities, malformed values,
-invalid timestamps, inconsistent SOC limits, and stale data are reported as
-provider errors or stale orchestration runs.
+the oldest Home Assistant observation timestamp across entity-backed values for
+freshness checks. Constants do not create requests and do not affect freshness.
+All entity mappings are fetched before normalization, so an unavailable or
+invalid entity prevents a partial battery snapshot from being persisted. HTTP
+authentication failures, missing entities, malformed values, invalid timestamps,
+inconsistent SOC limits, and stale data are reported as provider errors or stale
+orchestration runs.
+
+Static battery values can use the following form:
+
+```yaml
+battery:
+  state_of_charge:
+    entity_id: sensor.battery_state_of_charge
+    unit: '%'
+  capacity: {value: 28.7, unit: kWh}
+  minimum_soc: {value: 5, unit: '%'}
+  maximum_soc: {value: 100, unit: '%'}
+  maximum_charge: {value: 12, unit: kW}
+  maximum_discharge: {value: 12, unit: kW}
+  charge_efficiency: {value: 0.95, unit: ratio}
+  discharge_efficiency: {value: 0.9, unit: ratio}
+```
+
+Live state, cumulative counters, and historical measurements remain provider
+backed; constants are intended for static installation parameters only.
 
 The importer does not reconstruct historic SOC. Historic battery data and
 measurement alignment for installation efficiency calculations are separate

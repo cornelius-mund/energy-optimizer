@@ -1,6 +1,7 @@
 """Loading and validation of runtime configuration."""
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -70,19 +71,63 @@ class HomeAssistantBatteryEntityConfiguration(BaseModel):
     attribute: str | None = Field(default=None, min_length=1, max_length=255)
 
 
+class BatteryConstantConfiguration(BaseModel):
+    """A static battery value that does not require a Home Assistant entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: float = Field(allow_inf_nan=False)
+    unit: Literal["%", "Wh", "kWh", "W", "kW", "ratio"]
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def reject_boolean_values(cls, value: object) -> object:
+        """Do not treat YAML booleans as numeric installation parameters."""
+        if isinstance(value, bool):
+            raise ValueError("battery constants must be numeric")
+        return value
+
+
+type BatteryConfigurationValue = (
+    HomeAssistantBatteryEntityConfiguration | BatteryConstantConfiguration
+)
+
+
 class HomeAssistantBatteryConfiguration(BaseModel):
-    """Home Assistant entity mappings for battery state and capabilities."""
+    """Home Assistant battery state and static capability configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
     state_of_charge: HomeAssistantBatteryEntityConfiguration
-    capacity: HomeAssistantBatteryEntityConfiguration
-    minimum_soc: HomeAssistantBatteryEntityConfiguration
-    maximum_soc: HomeAssistantBatteryEntityConfiguration
-    maximum_charge: HomeAssistantBatteryEntityConfiguration
-    maximum_discharge: HomeAssistantBatteryEntityConfiguration
-    charge_efficiency: HomeAssistantBatteryEntityConfiguration
-    discharge_efficiency: HomeAssistantBatteryEntityConfiguration
+    capacity: BatteryConfigurationValue
+    minimum_soc: BatteryConfigurationValue
+    maximum_soc: BatteryConfigurationValue
+    maximum_charge: BatteryConfigurationValue
+    maximum_discharge: BatteryConfigurationValue
+    charge_efficiency: BatteryConfigurationValue
+    discharge_efficiency: BatteryConfigurationValue
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_numeric_constants(cls, values: Any) -> Any:
+        """Allow static battery values as numbers in their canonical units."""
+        if not isinstance(values, dict):
+            return values
+        defaults = {
+            "capacity": "kWh",
+            "minimum_soc": "%",
+            "maximum_soc": "%",
+            "maximum_charge": "kW",
+            "maximum_discharge": "kW",
+            "charge_efficiency": "ratio",
+            "discharge_efficiency": "ratio",
+        }
+        normalized = dict(values)
+        for name, unit in defaults.items():
+            value = normalized.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                normalized[name] = {"value": value, "unit": unit}
+        return normalized
 
     @model_validator(mode="after")
     def validate_mapping_units(self) -> "HomeAssistantBatteryConfiguration":
@@ -92,26 +137,87 @@ class HomeAssistantBatteryConfiguration(BaseModel):
             "minimum_soc": self.minimum_soc,
             "maximum_soc": self.maximum_soc,
         }
-        for name, mapping in energy_fields.items():
-            if mapping.unit not in {"%", "Wh", "kWh"}:
+        for name, value in energy_fields.items():
+            if value.unit not in {"%", "Wh", "kWh"}:
                 raise ValueError(
-                    f"battery.{name} must use %, Wh, or kWh; got {mapping.unit}"
+                    f"battery.{name} must use %, Wh, or kWh; got {value.unit}"
                 )
         if self.capacity.unit not in {"Wh", "kWh"}:
             raise ValueError("battery.capacity must use Wh or kWh")
-        for name, mapping in {
+        for name, value in {
             "maximum_charge": self.maximum_charge,
             "maximum_discharge": self.maximum_discharge,
         }.items():
-            if mapping.unit not in {"W", "kW"}:
+            if value.unit not in {"W", "kW"}:
                 raise ValueError(f"battery.{name} must use W or kW")
-        for name, mapping in {
+        for name, value in {
             "charge_efficiency": self.charge_efficiency,
             "discharge_efficiency": self.discharge_efficiency,
         }.items():
-            if mapping.unit not in {"%", "ratio"}:
+            if value.unit not in {"%", "ratio"}:
                 raise ValueError(f"battery.{name} must use % or ratio")
+        self._validate_constants()
         return self
+
+    def _validate_constants(self) -> None:
+        """Validate static values that are available before provider fetch."""
+        constants = {
+            name: value
+            for name, value in self.__dict__.items()
+            if isinstance(value, BatteryConstantConfiguration)
+        }
+        for name, value in constants.items():
+            if not math.isfinite(value.value):
+                raise ValueError(f"battery.{name} must be finite")
+
+        for name in ("capacity", "maximum_charge", "maximum_discharge"):
+            constant = constants.get(name)
+            if constant is not None and constant.value <= 0:
+                raise ValueError(f"battery.{name} must be greater than zero")
+
+        for name in ("minimum_soc", "maximum_soc"):
+            constant = constants.get(name)
+            if constant is None:
+                continue
+            if constant.value < 0:
+                raise ValueError(f"battery.{name} must be non-negative")
+            if constant.unit == "%" and constant.value > 100:
+                raise ValueError(f"battery.{name} percentage must not exceed 100")
+
+        for name in ("charge_efficiency", "discharge_efficiency"):
+            constant = constants.get(name)
+            if constant is None:
+                continue
+            normalized = (
+                constant.value / 100 if constant.unit == "%" else constant.value
+            )
+            if not 0 < normalized <= 1:
+                raise ValueError(
+                    f"battery.{name} must be greater than zero and no greater than one"
+                )
+
+        capacity = self._constant_energy(constants.get("capacity"))
+        minimum_soc = self._constant_energy(constants.get("minimum_soc"), capacity)
+        maximum_soc = self._constant_energy(constants.get("maximum_soc"), capacity)
+        if (
+            minimum_soc is not None
+            and maximum_soc is not None
+            and minimum_soc > maximum_soc
+        ):
+            raise ValueError("battery.minimum_soc must not exceed maximum_soc")
+        if maximum_soc is not None and capacity is not None and maximum_soc > capacity:
+            raise ValueError("battery.maximum_soc must not exceed capacity")
+
+    @staticmethod
+    def _constant_energy(
+        value: BatteryConstantConfiguration | None,
+        capacity: float | None = None,
+    ) -> float | None:
+        if value is None:
+            return None
+        if value.unit == "%":
+            return None if capacity is None else value.value / 100 * capacity
+        return value.value / 1000 if value.unit == "Wh" else value.value
 
 
 class HomeAssistantConfiguration(BaseModel):
@@ -161,7 +267,7 @@ class HomeAssistantConfiguration(BaseModel):
                 "Home Assistant energy entities must not contain duplicates"
             )
         if self.battery is not None:
-            battery_mappings = (
+            battery_values = (
                 self.battery.state_of_charge,
                 self.battery.capacity,
                 self.battery.minimum_soc,
@@ -170,6 +276,11 @@ class HomeAssistantConfiguration(BaseModel):
                 self.battery.maximum_discharge,
                 self.battery.charge_efficiency,
                 self.battery.discharge_efficiency,
+            )
+            battery_mappings = tuple(
+                value
+                for value in battery_values
+                if isinstance(value, HomeAssistantBatteryEntityConfiguration)
             )
             mapping_keys = [
                 (mapping.entity_id, mapping.attribute) for mapping in battery_mappings

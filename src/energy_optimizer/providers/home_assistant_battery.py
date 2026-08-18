@@ -11,6 +11,8 @@ from urllib.parse import quote
 import httpx
 
 from energy_optimizer.config import (
+    BatteryConfigurationValue,
+    BatteryConstantConfiguration,
     HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
 )
@@ -55,6 +57,7 @@ class HomeAssistantBatteryImporter:
             message="Home Assistant battery import times must include a timezone",
         )
         mappings = self._mappings()
+        values = self._values()
         logger.debug(
             "event=provider_fetch_started component=home_assistant operation=fetch "
             "data_type=battery entity_count=%s",
@@ -63,8 +66,8 @@ class HomeAssistantBatteryImporter:
         records = self._fetch_records(mappings)
         capacity = self._convert(
             "capacity",
-            mappings["capacity"],
-            self._value("capacity", mappings["capacity"], records),
+            values["capacity"],
+            self._value("capacity", values["capacity"], records),
         )
         if capacity <= 0:
             raise HomeAssistantError(
@@ -72,30 +75,30 @@ class HomeAssistantBatteryImporter:
             )
 
         state_of_charge = self._convert_soc(
-            "state_of_charge", mappings["state_of_charge"], records, capacity
+            "state_of_charge", values["state_of_charge"], records, capacity
         )
         minimum_soc = self._convert_soc(
-            "minimum_soc", mappings["minimum_soc"], records, capacity
+            "minimum_soc", values["minimum_soc"], records, capacity
         )
         maximum_soc = self._convert_soc(
-            "maximum_soc", mappings["maximum_soc"], records, capacity
+            "maximum_soc", values["maximum_soc"], records, capacity
         )
         initial_soc = state_of_charge
         maximum_charge = self._convert(
             "maximum_charge",
-            mappings["maximum_charge"],
-            self._value("maximum_charge", mappings["maximum_charge"], records),
+            values["maximum_charge"],
+            self._value("maximum_charge", values["maximum_charge"], records),
         )
         maximum_discharge = self._convert(
             "maximum_discharge",
-            mappings["maximum_discharge"],
-            self._value("maximum_discharge", mappings["maximum_discharge"], records),
+            values["maximum_discharge"],
+            self._value("maximum_discharge", values["maximum_discharge"], records),
         )
         charge_efficiency = self._convert_efficiency(
-            "charge_efficiency", mappings["charge_efficiency"], records
+            "charge_efficiency", values["charge_efficiency"], records
         )
         discharge_efficiency = self._convert_efficiency(
-            "discharge_efficiency", mappings["discharge_efficiency"], records
+            "discharge_efficiency", values["discharge_efficiency"], records
         )
         self._validate_values(
             capacity=capacity,
@@ -226,6 +229,13 @@ class HomeAssistantBatteryImporter:
         )
 
     def _mappings(self) -> dict[str, HomeAssistantBatteryEntityConfiguration]:
+        return {
+            name: value
+            for name, value in self._values().items()
+            if isinstance(value, HomeAssistantBatteryEntityConfiguration)
+        }
+
+    def _values(self) -> dict[str, BatteryConfigurationValue]:
         configuration = self.battery_configuration
         return {
             "state_of_charge": configuration.state_of_charge,
@@ -241,9 +251,13 @@ class HomeAssistantBatteryImporter:
     def _value(
         self,
         name: str,
-        mapping: HomeAssistantBatteryEntityConfiguration,
+        value: BatteryConfigurationValue,
         records: dict[str, dict[str, Any]],
     ) -> object:
+        if isinstance(value, BatteryConstantConfiguration):
+            return value.value
+
+        mapping = value
         record = records[mapping.entity_id]
         if mapping.attribute is None:
             value = record["state"]
@@ -268,35 +282,41 @@ class HomeAssistantBatteryImporter:
     def _convert(
         self,
         name: str,
-        mapping: HomeAssistantBatteryEntityConfiguration,
-        value: object,
+        configuration: BatteryConfigurationValue,
+        raw_value: object,
     ) -> float:
-        number = self._number(value, name, mapping.entity_id)
-        if mapping.unit == "Wh" or mapping.unit == "W":
+        unit = configuration.unit
+        source = (
+            configuration.entity_id
+            if isinstance(configuration, HomeAssistantBatteryEntityConfiguration)
+            else "configuration constant"
+        )
+        number = self._number(raw_value, name, source)
+        if unit == "Wh" or unit == "W":
             number /= 1000
-        elif mapping.unit == "%":
+        elif unit == "%":
             number /= 100
         return number
 
     def _convert_soc(
         self,
         name: str,
-        mapping: HomeAssistantBatteryEntityConfiguration,
+        value: BatteryConfigurationValue,
         records: dict[str, dict[str, Any]],
         capacity: float,
     ) -> float:
-        number = self._convert(name, mapping, self._value(name, mapping, records))
-        if mapping.unit == "%":
+        number = self._convert(name, value, self._value(name, value, records))
+        if value.unit == "%":
             number *= capacity
         return number
 
     def _convert_efficiency(
         self,
         name: str,
-        mapping: HomeAssistantBatteryEntityConfiguration,
+        value: BatteryConfigurationValue,
         records: dict[str, dict[str, Any]],
     ) -> float:
-        return self._convert(name, mapping, self._value(name, mapping, records))
+        return self._convert(name, value, self._value(name, value, records))
 
     def _record_timestamp(
         self,

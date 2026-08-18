@@ -172,13 +172,15 @@ API layer. The orchestration layer owns those policies.
 
 `HomeAssistantBatteryImporter` is intentionally separate from the cumulative
 energy helper because battery state of charge and capabilities are instantaneous
-state values. It reads configured Home Assistant state entities, optionally
-selecting a named attribute, converts configured units to the battery contract,
-and returns one current SOC value together with scalar capability limits and
-efficiencies. The oldest mapped entity observation determines freshness, and a
-failure in any required mapping prevents a partial snapshot from being returned.
-Historic SOC reconstruction is not part of this provider; consumers that need
-measurement history must use a dedicated history importer and alignment policy.
+state values. It reads the live state-of-charge entity, while static capability
+limits and efficiencies may be supplied as validated constants or as configured
+Home Assistant state entities. Entity values can optionally select a named
+attribute; all values are converted to the battery contract, and one current SOC
+value is returned together with scalar capability limits and efficiencies. Only
+entity-backed values determine freshness, and a failure in any required mapping
+prevents a partial snapshot from being returned. Historic SOC reconstruction is
+not part of this provider; consumers that need measurement history must use a
+dedicated history importer and alignment policy.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or
