@@ -1,6 +1,11 @@
 (() => {
   "use strict";
 
+  const diagnostic = (level, event, details = {}) => {
+    const write = console[level] || console.debug;
+    write.call(console, `[dashboard] ${event}`, details);
+  };
+
   const form = document.querySelector("#range-form");
   const startInput = document.querySelector("#start-date");
   const endInput = document.querySelector("#end-date");
@@ -154,27 +159,40 @@
   const load = async (start, end) => {
     content.hidden = true;
     setStatus(`Loading ${scenario === "forecast" ? "forecasts" : "imported actuals"}...`);
+    diagnostic("debug", "data_load_started", { scenario, start, end });
+    let requestId = "none";
+    let responseStatus = "none";
     const params = new URLSearchParams({
       start_time: `${start}T00:00:00Z`, end_time: `${nextDate(end)}T00:00:00Z`, scenario_kind: scenario,
     });
     try {
       const response = await fetch(`/api/v1/dashboard/data?${params}`);
+      requestId = response.headers.get("X-Request-ID") || "none";
+      responseStatus = response.status;
       const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || "The dashboard data could not be loaded.");
+      if (!response.ok) {
+        throw new Error(data.detail || "The dashboard data could not be loaded.");
+      }
       adjustStartDate(data); renderHeader(); renderDetails(data); renderChart(data); content.hidden = false;
       const count = selectedSeries(data).reduce((total, item) => total + item.values.filter((value) => value !== null).length, 0);
+      diagnostic("debug", "data_load_completed", { scenario, status: data.status, series: selectedSeries(data).length, points: count, requestId });
+      if (data.status === "unavailable") {
+        diagnostic("warn", "data_unavailable", { scenario, diagnostics: data.diagnostics, requestId });
+      }
       if (data.status === "unavailable") setStatus(data.diagnostics.join(" ") || "The selected data is unavailable.", "error");
       else if (data.status === "empty") setStatus("No data points are available in this range.", "warning");
       else if (data.status === "stale") setStatus("Data is available, but its freshness window has expired.", "warning");
       else if (data.status === "partial") setStatus("Partial coverage is available. Missing intervals are shown as gaps.", "warning");
       else setStatus(`${count} data point${count === 1 ? "" : "s"} loaded.`);
     } catch (error) {
+      diagnostic("error", "data_load_failed", { scenario, status: responseStatus, message: error instanceof Error ? error.message : String(error), requestId });
       setStatus(error instanceof Error ? error.message : "The dashboard data could not be loaded.", "error");
     }
   };
 
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
     scenario = tab.id === "forecast-tab" ? "forecast" : "actual";
+    diagnostic("info", "tab_clicked", { tab: tab.id, scenario });
     document.querySelectorAll(".tab").forEach((item) => {
       const active = item === tab;
       item.classList.toggle("is-active", active); item.setAttribute("aria-selected", String(active));
@@ -187,5 +205,6 @@
     load(startInput.value, endInput.value);
   });
   renderHeader();
+  diagnostic("debug", "initialized", { scenario });
   load(todayValue, todayValue);
 })();

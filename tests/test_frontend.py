@@ -22,6 +22,10 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     assert 'setAttribute("tabindex", "0")' in javascript
     assert "/api/v1/dashboard/data" in javascript
     assert "scenario_kind: scenario" in javascript
+    assert "const diagnostic = (level, event" in javascript
+    assert 'diagnostic("info", "tab_clicked"' in javascript
+    assert 'diagnostic("warn", "data_unavailable"' in javascript
+    assert 'diagnostic("error", "data_load_failed"' in javascript
     assert "seriesPaths" in javascript
     assert "Missing intervals are shown as gaps" in javascript
 

@@ -663,6 +663,14 @@ the dashboard remains available after the Python application is installed into
 the image. Source-tree deployments may omit this setting when the repository's
 `frontend/` directory is present.
 
+Dashboard diagnostics use the browser console when investigating an unresponsive
+tab: tab clicks are logged at `info`, routine initialization and successful data
+loads at `debug`, unavailable responses at `warn`, and request failures at
+`error`. The service logs dashboard requests at `INFO` with the validated
+`scenario_kind` and request ID. Forecast responses with unavailable data also
+emit a `WARNING` diagnostic; the request ID links that diagnostic to the request
+log without recording query payloads or provider credentials.
+
 ### PV-generation API
 
 `POST /api/v1/pv-generation` validates a normalized hourly PV-generation
