@@ -266,7 +266,9 @@
         ["import_price_forecast", "Import price", "legend-1"],
         ["export_price_forecast", "Export price", "legend-2"],
       ].filter(([id]) => hasSeriesData(series, id))
-      : [["household_load_actual", "Household load", "legend-0"]];
+      : series.some((item) => hasSeriesData([item], "household_load_actual"))
+        ? [["household_load_actual", "Household load", "legend-0"]]
+        : [];
     labels.forEach(([id, label, legendClass]) => {
       const item = document.createElement("span");
       item.className = `legend-item ${legendClass}`;

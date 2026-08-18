@@ -100,6 +100,19 @@ def test_forecast_coverage_preserves_price_windows_across_providers() -> None:
     assert "Missing intervals remain gaps" in javascript
 
 
+def test_dashboard_initial_empty_state_does_not_format_missing_series() -> None:
+    javascript = (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        'series.some((item) => hasSeriesData([item], "household_load_actual"))'
+        in javascript
+    )
+    assert (
+        ' : [["household_load_actual", "Household load", "legend-0"]];'
+        not in javascript
+    )
+
+
 def test_dashboard_styles_define_mobile_layout() -> None:
     styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
 
