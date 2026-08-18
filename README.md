@@ -89,8 +89,10 @@ includes the event, component, operation, status, request ID, and relevant
 time or record-count context. Every Python log uses the format
 `LEVEL TIMESTAMP MESSAGE`, including Uvicorn and HTTP client records. Structured
 records render their event name as the readable message and retain the original
-fields after a `|` separator, for example:
+fields after a `|` separator. For a non-health request, for example:
 `INFO 2026-08-11T11:51:51+0000 request_completed | event=request_completed component=api`.
+Successful health probes use the `health_check_request` event at `DEBUG`; they are
+therefore hidden at the default `INFO` threshold.
 When Uvicorn is started with an external logging configuration, its root output
 handlers are reused and formatted rather than supplemented with another service
 handler. Invalid log-level values stop startup with a configuration error.
@@ -145,8 +147,9 @@ The container listens on port `8000`, runs as a non-root user, and uses
 The example configuration stores normalized provider data under
 `/app/data/provider-data`; mount `/app/data` as a durable volume so data survives
 container replacement.
-The image healthcheck calls the service health endpoint once per minute. Check
-it directly with:
+The image healthcheck calls the service health endpoint every 10 seconds. Successful
+probe completions use the `health_check_request` event at `DEBUG`. Check it directly
+with:
 
 ```bash
 curl http://localhost:8000/health
@@ -170,6 +173,20 @@ External data provider modules may support:
 - Weather data
 
 External providers should be configurable and isolated from the optimization model. Provider data must be validated before use.
+
+### aWATTar Germany electricity prices
+
+The optional `AwattarImporter` retrieves unauthenticated German EPEX Spot day-ahead
+prices from `https://api.awattar.de/v1/marketdata`. Configure the `awattar` section
+and enable the `electricity_prices` orchestration source to persist validated
+hourly values. The importer accepts only contiguous one-hour `Eur/MWh` intervals,
+converts them to `EUR/kWh`, and exposes the market value for both import and export
+directions in the normalized price contract. Negative market prices are supported.
+
+These are wholesale German market prices, not household tariffs: taxes, network
+charges, supplier margins, and feed-in adjustments are not included. The endpoint
+does not require an API key, but deployments should use a reasonable polling
+interval and configure `max_data_age_seconds` for freshness checks.
 
 ### Normalized provider-data persistence
 
@@ -632,6 +649,14 @@ The view labels the series as historic actuals and deliberately does not mix it
 with predicted inputs or optimization plans. The current slice displays
 household load; additional asset series can use the same dashboard contract as
 their provider imports become available.
+
+The dashboard also provides a Forecast tab backed by
+`GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify
+their source, unit, coverage, retrieval time, and freshness. PV generation uses
+`kW`; market prices use `EUR/kWh`. All boundaries and point timestamps are UTC
+hourly half-open ranges. Missing or partial observations remain gaps and are not
+interpolated or treated as zero. Chart points expose their exact timestamp and
+value on pointer hover and keyboard focus.
 
 The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so
 the dashboard remains available after the Python application is installed into

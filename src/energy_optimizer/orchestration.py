@@ -17,6 +17,7 @@ from energy_optimizer.config import (
     DataSourceScheduleConfiguration,
     OrchestrationConfiguration,
 )
+from energy_optimizer.providers.awattar import AwattarImporter
 from energy_optimizer.providers.forecast_solar import (
     FORECAST_SOLAR_MIN_INTERVAL_SECONDS,
     ForecastSolarImporter,
@@ -32,6 +33,7 @@ from energy_optimizer.providers.home_assistant_grid_flow import (
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryData,
+    ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
@@ -637,6 +639,47 @@ def build_configured_orchestrator(
                     else False
                 ),
                 load=load_pv_generation,
+            )
+        )
+
+    if (
+        configuration.awattar is not None
+        and "electricity_prices" in orchestration.sources
+    ):
+        awattar = configuration.awattar
+        price_importer = AwattarImporter(awattar)
+        price_adapter = TypeAdapter(ElectricityPriceData)
+
+        def fetch_electricity_prices(
+            now: datetime,
+            schedule: DataSourceScheduleConfiguration,
+        ) -> ElectricityPriceData:
+            del schedule
+            start_time = now.replace(minute=0, second=0, microsecond=0)
+            return price_importer.fetch(start_time, now=now)
+
+        def load_electricity_prices() -> ElectricityPriceData | None:
+            return store.load(
+                ProviderDataKey(
+                    data_type="electricity-prices",
+                    provider="awattar.de",
+                    entity_id=awattar.electricity_price_source_id,
+                ),
+                price_adapter,
+            )
+
+        registrations.append(
+            ProviderRegistration(
+                name="electricity_prices",
+                data_type="electricity-prices",
+                adapter=price_adapter,
+                fetch=fetch_electricity_prices,
+                is_fresh=lambda data, now: (
+                    price_importer.is_fresh(data, now=now)
+                    if isinstance(data, ElectricityPriceData)
+                    else False
+                ),
+                load=load_electricity_prices,
             )
         )
 

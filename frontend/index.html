@@ -4,65 +4,68 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#10231f" />
-    <title>Historic energy data | Energy Optimizer</title>
+    <title>Energy data | Energy Optimizer</title>
     <link rel="stylesheet" href="/dashboard/styles.css" />
   </head>
   <body>
     <main class="shell">
       <header class="masthead">
         <div>
-          <p class="eyebrow">Energy Optimizer / Data archive</p>
-          <h1>Historic energy data</h1>
+          <p class="eyebrow">Energy Optimizer / Field notes</p>
+          <h1>Historic energy data, without the guesswork.</h1>
           <p class="lede">
-            Review imported household load actuals without mixing them with
-            predictions or optimization plans.
+            Move between measured household load and the forecast inputs used for
+            planning. Every point keeps its UTC timestamp and unit.
           </p>
         </div>
-        <div class="actual-badge"><span></span> Historic actuals</div>
+        <div id="scenario-badge" class="actual-badge"><span></span> Historic actuals</div>
       </header>
 
-      <section class="controls" aria-labelledby="range-heading">
-        <div class="section-heading">
-          <p class="eyebrow">Time window</p>
-          <h2 id="range-heading">Choose a day or range</h2>
-        </div>
-        <form id="range-form" class="range-form">
-          <label>
-            <span>Start</span>
-            <input id="start-date" name="start" type="date" required />
-          </label>
-          <label>
-            <span>End</span>
-            <input id="end-date" name="end" type="date" required />
-          </label>
-          <button type="submit">Load actuals</button>
-        </form>
-        <p class="range-help">Dates use UTC boundaries. The end date is included.</p>
+      <nav class="tabs" aria-label="Dashboard views">
+        <button class="tab is-active" id="actuals-tab" type="button" role="tab" aria-selected="true" aria-controls="dashboard-panel">Historic actuals</button>
+        <button class="tab" id="forecast-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Forecast</button>
+      </nav>
+
+      <section id="dashboard-panel" class="panel" role="tabpanel" aria-labelledby="actuals-tab">
+        <section class="controls" aria-labelledby="range-heading">
+          <div class="section-heading">
+            <p class="eyebrow">Time window</p>
+            <h2 id="range-heading">Choose a day or range</h2>
+          </div>
+          <form id="range-form" class="range-form">
+            <label><span>Start</span><input id="start-date" name="start" type="date" required /></label>
+            <label><span>End</span><input id="end-date" name="end" type="date" required /></label>
+            <button type="submit">Load data</button>
+          </form>
+          <p class="range-help">Dates use UTC boundaries. The end date is included.</p>
+        </section>
       </section>
 
       <div id="status" class="status" role="status" aria-live="polite"></div>
 
-      <section id="content" class="dashboard-grid" hidden>
+      <section id="content" class="dashboard-grid" role="region" aria-live="polite" hidden>
         <article class="chart-card card">
           <div class="card-heading">
             <div>
-              <p class="eyebrow">Imported series</p>
-              <h2>Household load</h2>
+              <p id="series-eyebrow" class="eyebrow">Imported series</p>
+              <h2 id="chart-heading">Household load</h2>
             </div>
-            <div class="legend"><span></span> Load <strong>(kW)</strong></div>
+            <div id="legend" class="legend"></div>
           </div>
           <div class="chart-wrap">
             <svg id="chart" viewBox="0 0 800 330" role="img" aria-labelledby="chart-title chart-description">
               <title id="chart-title">Historic household load</title>
-              <desc id="chart-description">Hourly household load values.</desc>
+              <desc id="chart-description">Hourly energy values.</desc>
               <g id="grid-lines"></g>
               <path id="area" class="area" d=""></path>
               <path id="line" class="line" d=""></path>
+              <g id="series-paths"></g>
               <g id="points"></g>
               <g id="labels"></g>
             </svg>
+            <div id="point-tooltip" class="point-tooltip" role="status" aria-live="polite" hidden></div>
           </div>
-          <p class="chart-note">Each point represents one completed hourly interval.</p>
+          <p class="chart-note">Each point represents one completed hourly interval. Focus a point to inspect it.</p>
         </article>
 
         <aside class="details-card card" aria-labelledby="details-heading">
@@ -71,7 +74,7 @@
           <dl id="details" class="details"></dl>
           <div class="interpretation">
             <strong>How to read this</strong>
-            <p>These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.</p>
+            <p id="interpretation-text">Measured actuals are not forecasts and do not describe an optimization plan.</p>
           </div>
         </aside>
       </section>

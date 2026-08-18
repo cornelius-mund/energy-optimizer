@@ -466,6 +466,20 @@ def test_load_configuration_returns_forecast_solar_settings(tmp_path: Path) -> N
     assert configuration.forecast_solar.pv_generation_source_id == "pv_generation"
 
 
+def test_load_configuration_returns_awattar_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION + "awattar:\n  timeout_seconds: 5\n",
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.awattar is not None
+    assert configuration.awattar.base_url.host == "api.awattar.de"
+    assert configuration.awattar.electricity_price_source_id == "de"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

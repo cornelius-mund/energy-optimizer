@@ -246,6 +246,35 @@ def test_store_loads_only_points_in_a_half_open_range(tmp_path: Path) -> None:
     assert selected.load_kw == (2.0, 3.0)
 
 
+def test_store_slices_quality_from_retained_start_when_range_predates_history(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    retained_start = datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+    data = household_load_data(retained_start, [1.0, 2.0])
+    suspect = HouseholdLoadData(
+        **{
+            **data.__dict__,
+            "quality": (
+                IntervalQuality(),
+                IntervalQuality(status="suspect", reason="reset_recovery"),
+            ),
+        }
+    )
+    store.save(KEY, ADAPTER, suspect)
+
+    selected = store.load_household_load_range(
+        KEY,
+        retained_start - timedelta(days=1),
+        retained_start + timedelta(hours=2),
+    )
+
+    assert selected is not None
+    assert selected.start_time == retained_start
+    assert selected.load_kw == (1.0, 2.0)
+    assert selected.quality[1].reason == "reset_recovery"
+
+
 def test_store_returns_none_for_a_range_without_points(tmp_path: Path) -> None:
     store = ProviderDataStore(tmp_path)
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)

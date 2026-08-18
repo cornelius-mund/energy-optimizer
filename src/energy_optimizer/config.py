@@ -242,6 +242,21 @@ class ForecastSolarConfiguration(BaseModel):
         return PV_GENERATION_SOURCE_ID
 
 
+class AwattarConfiguration(BaseModel):
+    """German aWATTar market-data request and freshness settings."""
+
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+
+    base_url: AnyHttpUrl = AnyHttpUrl("https://api.awattar.de/v1/marketdata")
+    timeout_seconds: float = Field(default=10, gt=0, le=120)
+    max_data_age_seconds: float | None = Field(default=7200, gt=0)
+
+    @property
+    def electricity_price_source_id(self) -> str:
+        """Return the German market-zone persistence identity."""
+        return "de"
+
+
 class PersistenceConfiguration(BaseModel):
     """Filesystem location for normalized provider data."""
 
@@ -331,6 +346,7 @@ class Configuration(BaseModel):
     solver: SolverConfiguration
     home_assistant: HomeAssistantConfiguration | None = None
     forecast_solar: ForecastSolarConfiguration | None = None
+    awattar: AwattarConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
     orchestration: OrchestrationConfiguration | None = None
 
