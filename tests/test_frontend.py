@@ -28,6 +28,35 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     assert 'diagnostic("error", "data_load_failed"' in javascript
     assert "seriesPaths" in javascript
     assert "Missing intervals are shown as gaps" in javascript
+    assert "const hasSeriesData = (series, id)" in javascript
+    assert "item.values.some((value) => value !== null)" in javascript
+    assert "heading.textContent = forecastTypes.length" in javascript
+    assert '"PV generation", "legend-0"' in javascript
+    assert '"Import price", "legend-1"' in javascript
+    assert '"Export price", "legend-2"' in javascript
+    assert "renderHeader(data)" in javascript
+    assert "const seriesClass = (item, index)" in javascript
+    assert 'export_price_forecast: "series-2"' in javascript
+    assert "seriesClass(item, seriesIndex)" in javascript
+
+
+def test_forecast_legend_is_data_driven() -> None:
+    javascript = (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        'const hasPv = hasSeriesData(series, "pv_generation_forecast");' in javascript
+    )
+    assert (
+        'const hasImportPrice = hasSeriesData(series, "import_price_forecast");'
+        in javascript
+    )
+    assert (
+        'const hasExportPrice = hasSeriesData(series, "export_price_forecast");'
+        in javascript
+    )
+    assert ".filter(([id]) => hasSeriesData(series, id))" in javascript
+    assert "const labels = forecast" in javascript
+    assert "labels.forEach(([" in javascript
 
 
 def test_dashboard_styles_define_mobile_layout() -> None:

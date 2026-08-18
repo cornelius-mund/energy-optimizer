@@ -64,6 +64,15 @@
     tooltip.style.top = `${Math.max(pointBox.top - chart.top - 42, 4)}px`;
   };
   const hidePoint = () => { tooltip.hidden = true; };
+  const hasSeriesData = (series, id) => series.some(
+    (item) => item.id === id && item.values.some((value) => value !== null),
+  );
+  const seriesClass = (item, index) => ({
+    household_load_actual: "series-0",
+    pv_generation_forecast: "series-0",
+    import_price_forecast: "series-1",
+    export_price_forecast: "series-2",
+  }[item.id] || `series-${index}`);
 
   const renderDetails = (data) => {
     details.replaceChildren();
@@ -114,13 +123,14 @@
       label.textContent = value.toFixed(1); labels.append(label);
     }
     series.forEach((item, seriesIndex) => {
+      const className = seriesClass(item, seriesIndex);
       let path = "";
       item.values.forEach((value, index) => {
         if (value === null) return;
         const command = index && item.values[index - 1] !== null ? "L" : "M";
         path += `${command}${x(index, item.values.length).toFixed(2)},${y(value).toFixed(2)} `;
         const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-        point.setAttribute("cx", x(index, item.values.length)); point.setAttribute("cy", y(value)); point.setAttribute("r", item.values.length > 48 ? 2.5 : 4); point.setAttribute("class", `point point-${seriesIndex}`);
+        point.setAttribute("cx", x(index, item.values.length)); point.setAttribute("cy", y(value)); point.setAttribute("r", item.values.length > 48 ? 2.5 : 4); point.setAttribute("class", `point point-${className.replace("series-", "")}`);
         point.setAttribute("tabindex", "0");
         point.setAttribute("aria-label", `${item.id}, ${formatTimestamp(item.timestamps[index])}: ${value} ${item.unit}`);
         point.addEventListener("pointerenter", () => showPoint(item.timestamps[index], value, item.unit, point));
@@ -131,26 +141,45 @@
       });
       const seriesLine = document.createElementNS("http://www.w3.org/2000/svg", "path");
       seriesLine.setAttribute("d", path.trim());
-      seriesLine.setAttribute("class", `series-line series-${seriesIndex}`);
+      seriesLine.setAttribute("class", `series-line ${className}`);
       seriesPaths.append(seriesLine);
     });
     line.setAttribute("d", "");
     area.setAttribute("d", "");
   };
 
-  const renderHeader = () => {
+  const renderHeader = (data = {}) => {
     const forecast = scenario === "forecast";
+    const series = selectedSeries(data);
+    const hasPv = hasSeriesData(series, "pv_generation_forecast");
+    const hasImportPrice = hasSeriesData(series, "import_price_forecast");
+    const hasExportPrice = hasSeriesData(series, "export_price_forecast");
     badge.innerHTML = `<span></span> ${forecast ? "Forecast inputs" : "Historic actuals"}`;
     eyebrow.textContent = forecast ? "Planning inputs" : "Imported series";
-    heading.textContent = forecast ? "PV and price forecast" : "Household load";
+    if (forecast) {
+      const forecastTypes = [];
+      if (hasPv) forecastTypes.push("PV");
+      if (hasImportPrice || hasExportPrice) forecastTypes.push("price");
+      heading.textContent = forecastTypes.length
+        ? `${forecastTypes.join(" and ")} forecast`
+        : "Forecast";
+    } else {
+      heading.textContent = "Household load";
+    }
     interpretation.textContent = forecast
       ? "Forecasts are predictions, not measured actuals. Missing intervals remain gaps and are never treated as zero."
       : "These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.";
     legend.replaceChildren();
-    const labels = forecast ? ["PV generation", "Import price", "Export price"] : ["Household load"];
-    labels.forEach((label, index) => {
+    const labels = forecast
+      ? [
+        ["pv_generation_forecast", "PV generation", "legend-0"],
+        ["import_price_forecast", "Import price", "legend-1"],
+        ["export_price_forecast", "Export price", "legend-2"],
+      ].filter(([id]) => hasSeriesData(series, id))
+      : [["household_load_actual", "Household load", "legend-0"]];
+    labels.forEach(([, label, legendClass]) => {
       const item = document.createElement("span");
-      item.className = `legend-item legend-${index}`;
+      item.className = `legend-item ${legendClass}`;
       item.textContent = label;
       legend.append(item);
     });
@@ -173,7 +202,7 @@
       if (!response.ok) {
         throw new Error(data.detail || "The dashboard data could not be loaded.");
       }
-      adjustStartDate(data); renderHeader(); renderDetails(data); renderChart(data); content.hidden = false;
+      adjustStartDate(data); renderHeader(data); renderDetails(data); renderChart(data); content.hidden = false;
       const count = selectedSeries(data).reduce((total, item) => total + item.values.filter((value) => value !== null).length, 0);
       diagnostic("debug", "data_load_completed", { scenario, status: data.status, series: selectedSeries(data).length, points: count, requestId });
       if (data.status === "unavailable") {
