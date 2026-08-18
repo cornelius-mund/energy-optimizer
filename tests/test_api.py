@@ -66,7 +66,7 @@ solver:
         response = client.get("/dashboard/")
 
     assert response.status_code == 200
-    assert "Historic energy data" in response.text
+    assert "Energy dashboard" in response.text
 
 
 def test_dashboard_serves_its_static_assets(
