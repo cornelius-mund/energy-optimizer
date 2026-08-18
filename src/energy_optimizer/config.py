@@ -60,10 +60,6 @@ class HomeAssistantEnergyEntityConfiguration(BaseModel):
     maximum_interval_energy_kwh: float = Field(default=100, gt=0)
 
 
-# Preserve the existing configuration name for integrations importing it directly.
-HouseholdLoadEntityConfiguration = HomeAssistantEnergyEntityConfiguration
-
-
 class HomeAssistantBatteryEntityConfiguration(BaseModel):
     """Configuration for one instantaneous Home Assistant battery value."""
 
@@ -128,12 +124,6 @@ class HomeAssistantConfiguration(BaseModel):
     household_load_entities: list[HomeAssistantEnergyEntityConfiguration] | None = (
         Field(default=None, min_length=1)
     )
-    household_load_entity_id: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=255,
-        description="Legacy single-entity setting; migrate to household_load_entities",
-    )
     grid_import_entities: list[HomeAssistantEnergyEntityConfiguration] | None = Field(
         default=None, min_length=1
     )
@@ -146,22 +136,7 @@ class HomeAssistantConfiguration(BaseModel):
 
     @model_validator(mode="after")
     def validate_energy_entities(self) -> "HomeAssistantConfiguration":
-        """Apply the legacy mapping and reject duplicate physical entities."""
-        if self.household_load_entities is None:
-            if self.household_load_entity_id is not None:
-                self.household_load_entities = [
-                    HomeAssistantEnergyEntityConfiguration(
-                        entity_id=self.household_load_entity_id,
-                        state_class="total_increasing",
-                        unit="kWh",
-                        operation="add",
-                    )
-                ]
-        elif self.household_load_entity_id is not None:
-            raise ValueError(
-                "configure household_load_entities instead of the legacy "
-                "household_load_entity_id"
-            )
+        """Reject duplicate physical entities across configured mappings."""
 
         grid_entity_sets = (self.grid_import_entities, self.grid_export_entities)
         if any(entities is not None for entities in grid_entity_sets) and not all(

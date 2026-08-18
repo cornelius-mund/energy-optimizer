@@ -65,6 +65,20 @@ def test_store_initializes_and_returns_normalized_data(tmp_path: Path) -> None:
         lines = path.read_text().splitlines()
         assert len(lines) == 2
         assert all(json.loads(line)["unit"] == expected_json["unit"] for line in lines)
+    expected_payload = (
+        b'{"timestamp":"2026-01-01T00:00:00+00:00","load_kw":1.2,"quality":'
+        b'{"status":"valid","reason":null,"entity_id":null},"schema_version":"1",'
+        b'"unit":"kW","source":{"provider":"home-assistant","entity_id":'
+        b'"sensor.household_load"},"retrieved_at":"2026-01-01T00:00:00+00:00",'
+        b'"latest_observation_at":"2026-01-01T01:00:00+00:00"}\n'
+        b'{"timestamp":"2026-01-01T01:00:00+00:00","load_kw":1.0,"quality":'
+        b'{"status":"valid","reason":null,"entity_id":null},"schema_version":"1",'
+        b'"unit":"kW","source":{"provider":"home-assistant","entity_id":'
+        b'"sensor.household_load"},"retrieved_at":"2026-01-01T00:00:00+00:00",'
+        b'"latest_observation_at":"2026-01-01T01:00:00+00:00"}\n'
+    )
+    assert primary.read_bytes() == expected_payload
+    assert backup.read_bytes() == expected_payload
     assert "snapshot" not in primary.read_text().lower()
 
 
@@ -228,6 +242,29 @@ def test_store_round_trips_interval_quality_and_legacy_records(
         "reason": "reset_recovery",
         "entity_id": "sensor.household_load",
     }
+
+
+def test_store_accepts_legacy_records_without_quality(tmp_path: Path) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    data = household_load_data(start, [1.0, 2.0])
+    store.save(KEY, ADAPTER, data)
+    primary, backup = paths(tmp_path)
+
+    for path in (primary, backup):
+        records = [json.loads(line) for line in path.read_bytes().splitlines()]
+        path.write_bytes(
+            b"".join(
+                json.dumps(
+                    {key: value for key, value in record.items() if key != "quality"},
+                    separators=(",", ":"),
+                ).encode()
+                + b"\n"
+                for record in records
+            )
+        )
+
+    assert store.load(KEY, ADAPTER) == data
 
 
 def test_store_loads_only_points_in_a_half_open_range(tmp_path: Path) -> None:

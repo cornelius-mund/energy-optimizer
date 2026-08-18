@@ -6,7 +6,14 @@ import pytest
 
 from energy_optimizer.config import ConfigurationError, load_configuration
 
-VALID_CONFIGURATION = """
+CONFIG_MARKER = """  household_load_entities:
+    - entity_id: sensor.household_load
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+"""
+
+VALID_CONFIGURATION = f"""
 time_resolution_minutes: 60
 grid:
   maximum_import_kw: 10
@@ -17,7 +24,7 @@ solver:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: test-token
-  household_load_entity_id: sensor.household_load
+{CONFIG_MARKER}
   timeout_seconds: 10
   max_data_age_seconds: 7200
 """
@@ -44,7 +51,7 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  household_load_entities:\n"
             "    - entity_id: sensor.household_energy\n"
             "      state_class: total_increasing\n"
@@ -81,7 +88,7 @@ def test_load_configuration_accepts_entity_physical_energy_limits(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  household_load_entities:\n"
             "    - entity_id: sensor.household_energy\n"
             "      state_class: total_increasing\n"
@@ -107,7 +114,7 @@ def test_load_configuration_rejects_non_positive_entity_physical_limit(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  household_load_entities:\n"
             "    - entity_id: sensor.household_energy\n"
             "      state_class: total_increasing\n"
@@ -128,7 +135,7 @@ def test_load_configuration_returns_grid_flow_entity_mappings(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  grid_import_entities:\n"
             "    - entity_id: sensor.grid_import\n"
             "      state_class: total_increasing\n"
@@ -161,7 +168,7 @@ def test_load_configuration_returns_battery_entity_mappings(tmp_path: Path) -> N
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  battery:\n"
             "    state_of_charge:\n"
             "      entity_id: sensor.battery_soc\n"
@@ -213,7 +220,7 @@ def test_load_configuration_rejects_invalid_battery_mapping_unit(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  battery:\n"
             "    state_of_charge:\n"
             "      entity_id: sensor.battery_soc\n"
@@ -252,7 +259,7 @@ def test_load_configuration_rejects_reused_battery_entity_and_attribute(
 ) -> None:
     path = tmp_path / "config.yaml"
     document = VALID_CONFIGURATION.replace(
-        "  household_load_entity_id: sensor.household_load\n",
+        CONFIG_MARKER,
         "  battery:\n"
         "    state_of_charge:\n"
         "      entity_id: sensor.battery\n"
@@ -293,7 +300,7 @@ def test_load_configuration_allows_grid_only_home_assistant_provider(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  grid_import_entities:\n"
             "    - entity_id: sensor.grid_import\n"
             "      state_class: total_increasing\n"
@@ -318,7 +325,7 @@ def test_load_configuration_rejects_duplicate_energy_entities(tmp_path: Path) ->
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  grid_import_entities:\n"
             "    - entity_id: sensor.grid_import\n"
             "      state_class: total_increasing\n"
@@ -343,7 +350,7 @@ def test_load_configuration_rejects_incomplete_grid_flow_mapping(
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n",
+            CONFIG_MARKER,
             "  grid_import_entities:\n"
             "    - entity_id: sensor.grid_import\n"
             "      state_class: total_increasing\n"
@@ -362,9 +369,7 @@ def test_load_configuration_does_not_match_unconfigured_provider_sources(
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        VALID_CONFIGURATION.replace(
-            "  household_load_entity_id: sensor.household_load\n", ""
-        ),
+        VALID_CONFIGURATION.replace(CONFIG_MARKER, ""),
         encoding="utf-8",
     )
 
@@ -382,7 +387,7 @@ def test_load_configuration_does_not_match_unconfigured_provider_sources(
     )
 
 
-def test_load_configuration_migrates_legacy_single_entity_to_energy_mapping(
+def test_load_configuration_uses_explicit_single_entity_mapping(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "config.yaml"
@@ -391,9 +396,6 @@ def test_load_configuration_migrates_legacy_single_entity_to_energy_mapping(
     configuration = load_configuration(path)
 
     assert configuration.home_assistant is not None
-    assert configuration.home_assistant.household_load_entity_id == (
-        "sensor.household_load"
-    )
     assert configuration.home_assistant.household_load_entities is not None
     assert configuration.home_assistant.household_load_entities[0].state_class == (
         "total_increasing"
@@ -431,14 +433,7 @@ def test_load_configuration_allows_no_home_assistant_provider(
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        VALID_CONFIGURATION.replace(
-            "home_assistant:\n  base_url: http://homeassistant.local:8123\n"
-            "  token: test-token\n  household_load_entity_id: sensor.household_load\n"
-            "  timeout_seconds: 10\n"
-            "  max_data_age_seconds: 7200\n",
-            "",
-        ),
-        encoding="utf-8",
+        VALID_CONFIGURATION.split("home_assistant:", 1)[0], encoding="utf-8"
     )
 
     configuration = load_configuration(path)
@@ -650,12 +645,7 @@ def test_load_configuration_allows_persistence_without_provider(
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
-        VALID_CONFIGURATION.replace(
-            "home_assistant:\n  base_url: http://homeassistant.local:8123\n"
-            "  token: test-token\n  household_load_entity_id: sensor.household_load\n"
-            "  timeout_seconds: 10\n  max_data_age_seconds: 7200\n",
-            "",
-        )
+        VALID_CONFIGURATION.split("home_assistant:", 1)[0]
         + "persistence:\n  directory: provider-data\n",
         encoding="utf-8",
     )

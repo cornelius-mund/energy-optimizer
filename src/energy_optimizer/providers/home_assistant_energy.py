@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from time import perf_counter
 from typing import Any
 from urllib.parse import quote
@@ -18,7 +18,13 @@ from energy_optimizer.config import (
 )
 from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import IntervalQuality
-from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
+from energy_optimizer.providers.normalization import (
+    align_to_next_hour,
+    as_utc,
+    parse_aware_timestamp,
+    validate_hourly_period,
+)
+from energy_optimizer.providers.normalization import is_fresh as check_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +43,37 @@ class HomeAssistantEnergySeries:
     values_kw: tuple[float, ...]
     latest_observation_at: datetime
     quality: tuple[IntervalQuality, ...] = ()
+
+
+@dataclass
+class _CounterState:
+    """Mutable state carried between cumulative-counter observations."""
+
+    previous_value: float
+    previous_reset: datetime | None
+    reset_baseline: float | None = None
+    previous_delta_kwh: float = 0.0
+    previous_delta_hour: int | None = None
+    previous_delta_timestamp: datetime | None = None
+    previous_delta_start_value: float | None = None
+
+    def record(
+        self,
+        timestamp: datetime,
+        value: float,
+        reset: datetime | None,
+        accepted_delta_kwh: float,
+        hour: int | None,
+    ) -> None:
+        """Record an observation and the delta assigned to its interval."""
+        self.previous_delta_kwh = accepted_delta_kwh
+        self.previous_delta_hour = hour if accepted_delta_kwh > 0 else None
+        self.previous_delta_timestamp = timestamp if accepted_delta_kwh > 0 else None
+        self.previous_delta_start_value = (
+            self.previous_value if accepted_delta_kwh > 0 else None
+        )
+        self.previous_value = value
+        self.previous_reset = reset
 
 
 class HomeAssistantEnergyAggregator:
@@ -253,33 +290,19 @@ class HomeAssistantEnergyAggregator:
         end_time: datetime,
         label: str,
     ) -> Any:
-        headers = {
-            "Authorization": f"Bearer {self.configuration.token.get_secret_value()}",
-            "Accept": "application/json",
-        }
-
-        def status_error(status: int) -> Exception | None:
-            if status in (401, 403):
-                return HomeAssistantError(
-                    "Home Assistant authentication failed; check the configured token"
-                )
-            if status == 404:
-                return HomeAssistantError(
-                    f"Home Assistant {label} history was not found for "
-                    f"{entity.entity_id}; check the configured entity ID and endpoint"
-                )
-            if status >= 400:
-                return HomeAssistantError(
-                    f"Home Assistant returned HTTP {status} while retrieving "
-                    f"{label} history"
-                )
-            return None
-
-        return self._http.get_json(
+        return self._http.get_home_assistant_json(
             url,
-            headers=headers,
+            token=self.configuration.token.get_secret_value(),
             timeout_seconds=self.configuration.timeout_seconds,
             error_factory=HomeAssistantError,
+            not_found_message=(
+                f"Home Assistant {label} history was not found for "
+                f"{entity.entity_id}; check the configured entity ID and endpoint"
+            ),
+            status_message=lambda status: (
+                f"Home Assistant returned HTTP {status} while retrieving "
+                f"{label} history"
+            ),
             timeout_message=(
                 "Home Assistant request timed out; check the endpoint and timeout"
             ),
@@ -287,7 +310,6 @@ class HomeAssistantEnergyAggregator:
             malformed_message=(
                 f"Home Assistant returned malformed JSON for {label} history"
             ),
-            status_error=status_error,
             log_event="home_assistant_history_request",
             component="home_assistant",
             operation="history_request",
@@ -346,6 +368,17 @@ class HomeAssistantEnergyAggregator:
         entity: HomeAssistantEnergyEntityConfiguration,
         label: str,
     ) -> HomeAssistantEnergySeries:
+        parsed, skipped_records = self._parse_records(records, entity, label)
+        return self._normalize_parsed_records(
+            parsed, skipped_records, start_time, end_time, entity
+        )
+
+    def _parse_records(
+        self,
+        records: list[dict[str, Any]],
+        entity: HomeAssistantEnergyEntityConfiguration,
+        label: str,
+    ) -> tuple[list[tuple[datetime, float, datetime | None]], list[datetime]]:
         raw_records: list[tuple[datetime, dict[str, Any]]] = []
         skipped_records: list[datetime] = []
         for record in records:
@@ -458,6 +491,16 @@ class HomeAssistantEnergyAggregator:
             raise HomeAssistantError(
                 f"Home Assistant returned no usable history for {entity.entity_id}"
             )
+        return parsed, skipped_records
+
+    def _normalize_parsed_records(
+        self,
+        parsed: list[tuple[datetime, float, datetime | None]],
+        skipped_records: list[datetime],
+        start_time: datetime,
+        end_time: datetime,
+        entity: HomeAssistantEnergyEntityConfiguration,
+    ) -> HomeAssistantEnergySeries:
         start = self._as_utc(start_time)
         end = self._as_utc(end_time)
         factor = {"Wh": 0.001, "kWh": 1.0, "MWh": 1000.0}[entity.unit]
@@ -499,133 +542,21 @@ class HomeAssistantEnergyAggregator:
             )
         values = [0.0] * hour_count
         quality = [IntervalQuality()] * hour_count
-        previous_value = baseline[1]
-        previous_reset = baseline[2]
-        reset_baseline: float | None = None
+        state = _CounterState(baseline[1], baseline[2])
         latest_observation = baseline[0]
-        previous_delta_kwh = 0.0
-        previous_delta_hour: int | None = None
-        previous_delta_timestamp: datetime | None = None
-        previous_delta_start_value: float | None = None
         for timestamp, value, reset in parsed[baseline_index + 1 :]:
             if timestamp > end:
                 break
-            value_before_observation = previous_value
-            reset_marker_changed = reset != previous_reset
-            if reset_marker_changed:
-                delta = 0.0
-                reset_baseline = previous_value
-                self._mark_quality(
-                    quality,
-                    timestamp,
-                    effective_start,
-                    entity.entity_id,
-                    "counter_reset",
-                )
-                logger.warning(
-                    "event=home_assistant_counter_reset component=home_assistant "
-                    "operation=normalize entity_id=%s timestamp=%s "
-                    "previous_value=%s current_value=%s reason=reset_marker_changed",
-                    entity.entity_id,
-                    timestamp.isoformat(),
-                    previous_value,
-                    value,
-                )
-            elif value < previous_value and entity.state_class == "total_increasing":
-                delta = 0.0
-                transient_spike = (
-                    previous_delta_kwh > 0
-                    and previous_delta_hour is not None
-                    and previous_delta_timestamp is not None
-                    and previous_delta_start_value is not None
-                    and math.isclose(
-                        value,
-                        previous_delta_start_value,
-                        rel_tol=0.01,
-                        abs_tol=0.001,
-                    )
-                )
-                if transient_spike:
-                    assert previous_delta_hour is not None
-                    assert previous_delta_timestamp is not None
-                    values[previous_delta_hour] -= previous_delta_kwh
-                    self._mark_quality(
-                        quality,
-                        previous_delta_timestamp,
-                        effective_start,
-                        entity.entity_id,
-                        "transient_counter_spike",
-                    )
-                    self._mark_quality(
-                        quality,
-                        timestamp,
-                        effective_start,
-                        entity.entity_id,
-                        "transient_counter_spike",
-                    )
-                    reset_baseline = None
-                    logger.warning(
-                        "event=home_assistant_counter_spike_corrected "
-                        "component=home_assistant operation=normalize entity_id=%s "
-                        "timestamp=%s previous_value=%s current_value=%s "
-                        "spike_start_value=%s retracted_delta_kwh=%s",
-                        entity.entity_id,
-                        timestamp.isoformat(),
-                        previous_value,
-                        value,
-                        previous_delta_start_value,
-                        previous_delta_kwh,
-                    )
-                else:
-                    reset_baseline = previous_value
-                    self._mark_quality(
-                        quality,
-                        timestamp,
-                        effective_start,
-                        entity.entity_id,
-                        "counter_reset",
-                    )
-                    logger.warning(
-                        "event=home_assistant_counter_reset "
-                        "component=home_assistant operation=normalize entity_id=%s "
-                        "timestamp=%s previous_value=%s current_value=%s "
-                        "reason=counter_decreased",
-                        entity.entity_id,
-                        timestamp.isoformat(),
-                        previous_value,
-                        value,
-                    )
-            elif value >= previous_value:
-                if reset_baseline is not None and math.isclose(
-                    value, reset_baseline, rel_tol=0.01, abs_tol=0.001
-                ):
-                    delta = 0.0
-                    self._mark_quality(
-                        quality,
-                        timestamp,
-                        effective_start,
-                        entity.entity_id,
-                        "reset_recovery",
-                    )
-                    logger.warning(
-                        "event=home_assistant_counter_recovery "
-                        "component=home_assistant "
-                        "operation=normalize entity_id=%s timestamp=%s "
-                        "previous_value=%s current_value=%s reset_baseline=%s",
-                        entity.entity_id,
-                        timestamp.isoformat(),
-                        previous_value,
-                        value,
-                        reset_baseline,
-                    )
-                else:
-                    delta = value - previous_value
-                reset_baseline = None
-            elif entity.state_class == "total":
-                raise HomeAssistantError(
-                    f"Home Assistant total entity {entity.entity_id} decreased "
-                    "without a changed last_reset timestamp"
-                )
+            delta = self._counter_delta(
+                state,
+                timestamp,
+                value,
+                reset,
+                effective_start,
+                entity,
+                values,
+                quality,
+            )
             delta_kwh = delta * factor
             maximum_delta_kwh = entity.maximum_interval_energy_kwh
             if delta_kwh > maximum_delta_kwh:
@@ -648,23 +579,14 @@ class HomeAssistantEnergyAggregator:
                 )
                 delta = 0.0
             elapsed_seconds = (timestamp - effective_start).total_seconds()
+            hour: int | None = None
             if elapsed_seconds > 0:
                 hour = math.ceil(elapsed_seconds / 3600) - 1
                 values[hour] += delta * factor
                 accepted_delta_kwh = delta * factor
-                previous_delta_kwh = accepted_delta_kwh
-                previous_delta_hour = hour if accepted_delta_kwh > 0 else None
-                previous_delta_timestamp = timestamp if accepted_delta_kwh > 0 else None
-                previous_delta_start_value = (
-                    value_before_observation if accepted_delta_kwh > 0 else None
-                )
             else:
-                previous_delta_kwh = 0.0
-                previous_delta_hour = None
-                previous_delta_timestamp = None
-                previous_delta_start_value = None
-            previous_value = value
-            previous_reset = reset
+                accepted_delta_kwh = 0.0
+            state.record(timestamp, value, reset, accepted_delta_kwh, hour)
             latest_observation = timestamp
         return HomeAssistantEnergySeries(
             start_time=effective_start,
@@ -676,6 +598,135 @@ class HomeAssistantEnergyAggregator:
                 else ()
             ),
         )
+
+    def _counter_delta(
+        self,
+        state: _CounterState,
+        timestamp: datetime,
+        value: float,
+        reset: datetime | None,
+        effective_start: datetime,
+        entity: HomeAssistantEnergyEntityConfiguration,
+        values: list[float],
+        quality: list[IntervalQuality],
+    ) -> float:
+        """Apply reset, spike, and recovery transitions to one observation."""
+        previous_value = state.previous_value
+        if reset != state.previous_reset:
+            delta = 0.0
+            state.reset_baseline = previous_value
+            self._mark_quality(
+                quality,
+                timestamp,
+                effective_start,
+                entity.entity_id,
+                "counter_reset",
+            )
+            logger.warning(
+                "event=home_assistant_counter_reset component=home_assistant "
+                "operation=normalize entity_id=%s timestamp=%s "
+                "previous_value=%s current_value=%s reason=reset_marker_changed",
+                entity.entity_id,
+                timestamp.isoformat(),
+                previous_value,
+                value,
+            )
+        elif value < previous_value and entity.state_class == "total_increasing":
+            delta = 0.0
+            transient_spike = (
+                state.previous_delta_kwh > 0
+                and state.previous_delta_hour is not None
+                and state.previous_delta_timestamp is not None
+                and state.previous_delta_start_value is not None
+                and math.isclose(
+                    value,
+                    state.previous_delta_start_value,
+                    rel_tol=0.01,
+                    abs_tol=0.001,
+                )
+            )
+            if transient_spike:
+                assert state.previous_delta_hour is not None
+                assert state.previous_delta_timestamp is not None
+                values[state.previous_delta_hour] -= state.previous_delta_kwh
+                self._mark_quality(
+                    quality,
+                    state.previous_delta_timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "transient_counter_spike",
+                )
+                self._mark_quality(
+                    quality,
+                    timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "transient_counter_spike",
+                )
+                state.reset_baseline = None
+                logger.warning(
+                    "event=home_assistant_counter_spike_corrected "
+                    "component=home_assistant operation=normalize entity_id=%s "
+                    "timestamp=%s previous_value=%s current_value=%s "
+                    "spike_start_value=%s retracted_delta_kwh=%s",
+                    entity.entity_id,
+                    timestamp.isoformat(),
+                    previous_value,
+                    value,
+                    state.previous_delta_start_value,
+                    state.previous_delta_kwh,
+                )
+            else:
+                state.reset_baseline = previous_value
+                self._mark_quality(
+                    quality,
+                    timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "counter_reset",
+                )
+                logger.warning(
+                    "event=home_assistant_counter_reset "
+                    "component=home_assistant operation=normalize entity_id=%s "
+                    "timestamp=%s previous_value=%s current_value=%s "
+                    "reason=counter_decreased",
+                    entity.entity_id,
+                    timestamp.isoformat(),
+                    previous_value,
+                    value,
+                )
+        elif value >= previous_value:
+            if state.reset_baseline is not None and math.isclose(
+                value, state.reset_baseline, rel_tol=0.01, abs_tol=0.001
+            ):
+                delta = 0.0
+                self._mark_quality(
+                    quality,
+                    timestamp,
+                    effective_start,
+                    entity.entity_id,
+                    "reset_recovery",
+                )
+                logger.warning(
+                    "event=home_assistant_counter_recovery "
+                    "component=home_assistant "
+                    "operation=normalize entity_id=%s timestamp=%s "
+                    "previous_value=%s current_value=%s reset_baseline=%s",
+                    entity.entity_id,
+                    timestamp.isoformat(),
+                    previous_value,
+                    value,
+                    state.reset_baseline,
+                )
+            else:
+                delta = value - previous_value
+            state.reset_baseline = None
+        elif entity.state_class == "total":
+            raise HomeAssistantError(
+                f"Home Assistant total entity {entity.entity_id} decreased "
+                "without a changed last_reset timestamp"
+            )
+        return delta
 
     @staticmethod
     def _mark_quality(
@@ -721,14 +772,9 @@ class HomeAssistantEnergyAggregator:
     def _latest_completed_hour(value: datetime) -> datetime:
         return value.replace(minute=0, second=0, microsecond=0)
 
-    @staticmethod
-    def _next_hour(value: datetime) -> datetime:
-        return value.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-
     @classmethod
     def _first_complete_hour(cls, value: datetime) -> datetime:
-        aligned = value.replace(minute=0, second=0, microsecond=0)
-        return aligned if value == aligned else cls._next_hour(value)
+        return align_to_next_hour(value)
 
     @staticmethod
     def _validate_period(
@@ -737,15 +783,18 @@ class HomeAssistantEnergyAggregator:
         history_lookback_seconds: float,
         label: str,
     ) -> None:
-        if end_time <= start_time:
-            raise HomeAssistantError(f"{label} end_time must be after start_time")
-        duration_seconds = (end_time - start_time).total_seconds()
-        if duration_seconds % 3600 != 0:
-            raise HomeAssistantError(
+        validate_hourly_period(
+            start_time,
+            end_time,
+            error_factory=HomeAssistantError,
+            start_message=f"{label} start_time must be aligned to the hour",
+            end_message=f"{label} end_time must be aligned to the hour",
+            order_message=f"{label} end_time must be after start_time",
+            whole_hours_message=(
                 f"{label} requested period must contain whole hourly intervals"
-            )
-        if start_time.minute or start_time.second or start_time.microsecond:
-            raise HomeAssistantError(f"{label} start_time must be aligned to the hour")
+            ),
+            check_end_alignment=False,
+        )
         if not math.isfinite(history_lookback_seconds) or history_lookback_seconds < 0:
             raise HomeAssistantError(
                 "history_lookback_seconds must be finite and non-negative"
@@ -764,19 +813,11 @@ def is_fresh(
     now: datetime | None = None,
 ) -> bool:
     """Check whether an observation is within the configured age threshold."""
-    if max_data_age_seconds is None:
-        return True
-    current_time = as_utc(
-        now or datetime.now(timezone.utc),
+    return check_freshness(
+        latest_observation_at,
+        max_data_age_seconds,
+        now=now,
         error_factory=HomeAssistantError,
-        message="Home Assistant freshness times must include a timezone",
+        now_message="Home Assistant freshness times must include a timezone",
+        observed_message="Home Assistant observations must include a timezone",
     )
-    age_seconds = (
-        current_time
-        - as_utc(
-            latest_observation_at,
-            error_factory=HomeAssistantError,
-            message="Home Assistant observations must include a timezone",
-        )
-    ).total_seconds()
-    return age_seconds < max_data_age_seconds

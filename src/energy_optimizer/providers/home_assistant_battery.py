@@ -98,14 +98,14 @@ class HomeAssistantBatteryImporter:
             "discharge_efficiency", mappings["discharge_efficiency"], records
         )
         self._validate_values(
-            capacity,
-            minimum_soc,
-            maximum_soc,
-            initial_soc,
-            maximum_charge,
-            maximum_discharge,
-            charge_efficiency,
-            discharge_efficiency,
+            capacity=capacity,
+            minimum_soc=minimum_soc,
+            maximum_soc=maximum_soc,
+            initial_soc=initial_soc,
+            maximum_charge=maximum_charge,
+            maximum_discharge=maximum_discharge,
+            charge_efficiency=charge_efficiency,
+            discharge_efficiency=discharge_efficiency,
         )
         latest_observation_at = min(
             self._record_timestamp(records, name) for name in mappings
@@ -198,34 +198,20 @@ class HomeAssistantBatteryImporter:
         return records
 
     def _request(self, entity_id: str) -> Any:
-        headers = {
-            "Authorization": f"Bearer {self.configuration.token.get_secret_value()}",
-            "Accept": "application/json",
-        }
-
-        def status_error(status: int) -> Exception | None:
-            if status in (401, 403):
-                return HomeAssistantError(
-                    "Home Assistant authentication failed; check the configured token"
-                )
-            if status == 404:
-                return HomeAssistantError(
-                    f"Home Assistant battery entity {entity_id} was not found; "
-                    "check the configured entity ID and endpoint"
-                )
-            if status >= 400:
-                return HomeAssistantError(
-                    f"Home Assistant returned HTTP {status} while retrieving battery "
-                    f"entity {entity_id}"
-                )
-            return None
-
         base_url = str(self.configuration.base_url).rstrip("/")
-        return self._http.get_json(
+        return self._http.get_home_assistant_json(
             f"{base_url}/api/states/{quote(entity_id, safe='')}",
-            headers=headers,
+            token=self.configuration.token.get_secret_value(),
             timeout_seconds=self.configuration.timeout_seconds,
             error_factory=HomeAssistantError,
+            not_found_message=(
+                f"Home Assistant battery entity {entity_id} was not found; "
+                "check the configured entity ID and endpoint"
+            ),
+            status_message=lambda status: (
+                f"Home Assistant returned HTTP {status} while retrieving battery "
+                f"entity {entity_id}"
+            ),
             timeout_message=(
                 "Home Assistant request timed out; check the endpoint and timeout"
             ),
@@ -233,7 +219,6 @@ class HomeAssistantBatteryImporter:
             malformed_message=(
                 f"Home Assistant returned malformed JSON for battery entity {entity_id}"
             ),
-            status_error=status_error,
             log_event="home_assistant_state_request",
             component="home_assistant",
             operation="state_request",
@@ -327,18 +312,29 @@ class HomeAssistantBatteryImporter:
             )
         return timestamp
 
-    def _validate_values(self, *values: float) -> None:
-        names = (
-            "capacity",
-            "minimum_soc",
-            "maximum_soc",
-            "initial_soc",
-            "maximum_charge",
-            "maximum_discharge",
-            "charge_efficiency",
-            "discharge_efficiency",
-        )
-        for name, value in zip(names, values):
+    def _validate_values(
+        self,
+        *,
+        capacity: float,
+        minimum_soc: float,
+        maximum_soc: float,
+        initial_soc: float,
+        maximum_charge: float,
+        maximum_discharge: float,
+        charge_efficiency: float,
+        discharge_efficiency: float,
+    ) -> None:
+        values = {
+            "capacity": capacity,
+            "minimum_soc": minimum_soc,
+            "maximum_soc": maximum_soc,
+            "initial_soc": initial_soc,
+            "maximum_charge": maximum_charge,
+            "maximum_discharge": maximum_discharge,
+            "charge_efficiency": charge_efficiency,
+            "discharge_efficiency": discharge_efficiency,
+        }
+        for name, value in values.items():
             if not math.isfinite(value):
                 raise HomeAssistantError(
                     f"Home Assistant battery {name} must be finite"
@@ -347,28 +343,28 @@ class HomeAssistantBatteryImporter:
                 raise HomeAssistantError(
                     f"Home Assistant battery {name} must be non-negative"
                 )
-        if values[4] <= 0:
+        if maximum_charge <= 0:
             raise HomeAssistantError(
                 "Home Assistant battery maximum_charge must be greater than zero"
             )
-        if values[5] <= 0:
+        if maximum_discharge <= 0:
             raise HomeAssistantError(
                 "Home Assistant battery maximum_discharge must be greater than zero"
             )
-        if values[1] > values[2]:
+        if minimum_soc > maximum_soc:
             raise HomeAssistantError(
                 "Home Assistant battery minimum SOC exceeds maximum SOC"
             )
-        if values[2] > values[0]:
+        if maximum_soc > capacity:
             raise HomeAssistantError(
                 "Home Assistant battery maximum SOC exceeds capacity"
             )
-        if not values[1] <= values[3] <= values[2]:
+        if not minimum_soc <= initial_soc <= maximum_soc:
             raise HomeAssistantError(
                 "Home Assistant battery state of charge is outside configured SOC "
                 "limits"
             )
-        if not 0 < values[6] <= 1 or not 0 < values[7] <= 1:
+        if not 0 < charge_efficiency <= 1 or not 0 < discharge_efficiency <= 1:
             raise HomeAssistantError(
                 "Home Assistant battery efficiencies must be greater than zero and "
                 "no greater than one"

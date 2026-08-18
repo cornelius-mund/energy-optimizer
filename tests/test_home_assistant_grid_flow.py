@@ -6,10 +6,14 @@ from typing import Any
 import httpx
 import pytest
 
-from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
+)
+from home_assistant_fixtures import (
+    home_assistant_configuration_factory,
+    home_assistant_history_payload,
+    home_assistant_importer_factory,
 )
 
 ENTITY_ID = "sensor.grid_import"
@@ -19,54 +23,27 @@ END = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 NOW = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
 
 
-def configuration(**overrides: Any) -> HomeAssistantConfiguration:
-    values: dict[str, Any] = {
-        "base_url": "http://homeassistant.test:8123",
-        "token": "test-token",
-        "grid_import_entities": [
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        "grid_export_entities": [
-            {
-                "entity_id": EXPORT_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        "timeout_seconds": 5,
-        "max_data_age_seconds": 7200,
-    }
-    values.update(overrides)
-    return HomeAssistantConfiguration.model_validate(values)
+configuration = home_assistant_configuration_factory(
+    grid_import_entities=[
+        {
+            "entity_id": ENTITY_ID,
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "add",
+        }
+    ],
+    grid_export_entities=[
+        {
+            "entity_id": EXPORT_ENTITY_ID,
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "add",
+        }
+    ],
+)
 
 
-def history_payload(
-    entity_id: str,
-    readings: list[tuple[str, str]],
-    *,
-    unit: str = "kWh",
-    state_class: str = "total_increasing",
-) -> list[list[dict[str, Any]]]:
-    return [
-        [
-            {
-                "entity_id": entity_id,
-                "state": state,
-                "last_updated": timestamp,
-                "attributes": {
-                    "unit_of_measurement": unit,
-                    "state_class": state_class,
-                },
-            }
-            for timestamp, state in readings
-        ]
-    ]
+history_payload = home_assistant_history_payload
 
 
 def standard_payload(entity_id: str) -> list[list[dict[str, Any]]]:
@@ -82,15 +59,7 @@ def standard_payload(entity_id: str) -> list[list[dict[str, Any]]]:
     )
 
 
-def importer(
-    handler: httpx.MockTransport | httpx.BaseTransport,
-    **configuration_overrides: Any,
-) -> tuple[HomeAssistantGridFlowImporter, httpx.Client]:
-    client = httpx.Client(transport=handler)
-    return (
-        HomeAssistantGridFlowImporter(configuration(**configuration_overrides), client),
-        client,
-    )
+importer = home_assistant_importer_factory(HomeAssistantGridFlowImporter, configuration)
 
 
 def test_fetch_normalizes_import_and_export_entities() -> None:

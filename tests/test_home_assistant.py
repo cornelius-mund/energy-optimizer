@@ -7,10 +7,14 @@ from typing import Any
 import httpx
 import pytest
 
-from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant import (
     HomeAssistantError,
     HomeAssistantLoadImporter,
+)
+from home_assistant_fixtures import (
+    home_assistant_configuration_factory,
+    home_assistant_history_payload,
+    home_assistant_importer_factory,
 )
 
 ENTITY_ID = "sensor.household_energy"
@@ -20,23 +24,16 @@ END = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 NOW = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
 
 
-def configuration(**overrides: Any) -> HomeAssistantConfiguration:
-    values: dict[str, Any] = {
-        "base_url": "http://homeassistant.test:8123",
-        "token": "test-token",
-        "household_load_entities": [
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        "timeout_seconds": 5,
-        "max_data_age_seconds": 7200,
-    }
-    values.update(overrides)
-    return HomeAssistantConfiguration.model_validate(values)
+configuration = home_assistant_configuration_factory(
+    household_load_entities=[
+        {
+            "entity_id": ENTITY_ID,
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "add",
+        }
+    ]
+)
 
 
 def history_payload(
@@ -46,41 +43,16 @@ def history_payload(
     state_class: str = "total_increasing",
     last_resets: list[str | None] | None = None,
 ) -> list[list[dict[str, Any]]]:
-    readings = readings or [
-        ("2026-01-01T00:00:00+00:00", "0"),
-        ("2026-01-01T01:00:00+00:00", "1"),
-        ("2026-01-01T02:00:00+00:00", "3"),
-        ("2026-01-01T03:00:00+00:00", "6"),
-        ("2026-01-01T04:00:00+00:00", "10"),
-    ]
-    records: list[dict[str, Any]] = []
-    for index, (timestamp, state) in enumerate(readings):
-        attributes: dict[str, Any] = {
-            "unit_of_measurement": unit,
-            "state_class": state_class,
-        }
-        if last_resets is not None:
-            attributes["last_reset"] = last_resets[index]
-        records.append(
-            {
-                "entity_id": entity_id,
-                "state": state,
-                "last_updated": timestamp,
-                "attributes": attributes,
-            }
-        )
-    return [records]
-
-
-def importer(
-    handler: httpx.MockTransport | httpx.BaseTransport,
-    **configuration_overrides: Any,
-) -> tuple[HomeAssistantLoadImporter, httpx.Client]:
-    client = httpx.Client(transport=handler)
-    return (
-        HomeAssistantLoadImporter(configuration(**configuration_overrides), client),
-        client,
+    return home_assistant_history_payload(
+        entity_id,
+        readings,
+        unit=unit,
+        state_class=state_class,
+        last_resets=last_resets,
     )
+
+
+importer = home_assistant_importer_factory(HomeAssistantLoadImporter, configuration)
 
 
 def test_fetch_converts_total_increasing_energy_to_hourly_load(

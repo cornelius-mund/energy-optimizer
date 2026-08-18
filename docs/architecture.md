@@ -1,8 +1,8 @@
 # Architecture
 
-This document describes the target architecture at the level currently known. The
-project is in its planning and initial setup phase, so package names and boundaries
-may change as the energy and asset models become better understood.
+This document describes the implemented architecture and the boundaries used for
+maintainable vertical slices. Package names may evolve as the energy and asset
+models become better understood, but each module below has a current runtime role.
 
 ## Package Structure
 
@@ -11,20 +11,17 @@ The planned package layout is:
 ```text
 src/energy_optimizer/
 ├── api/
-│   ├── app.py                # FastAPI application and startup lifecycle
-│   ├── health.py             # Health endpoint
+│   ├── __init__.py           # Stable public API compatibility exports
+│   ├── app.py                # FastAPI application and route handlers
+│   ├── lifecycle.py          # Startup and shutdown orchestration
+│   ├── middleware.py         # Request IDs and outcome logging
+│   ├── persistence.py        # Shared provider persistence mapping
 │   ├── schemas.py            # HTTP request and response models
-│   └── optimization.py       # Optimization route handlers
-├── config/
-│   ├── loader.py             # YAML loading and error handling
-│   └── models.py             # Validated runtime configuration
-├── domain/
-│   ├── energy.py             # Time-series values and energy balances
-│   ├── assets.py             # Grid, PV, battery, EV, and heat-pump models
-│   └── optimization.py       # Optimization inputs, schedules, and outcomes
-├── application/
-│   ├── optimize.py           # End-to-end optimization use case
-│   └── orchestration.py      # Scheduled provider retrieval and plan triggers
+│   ├── series.py             # Dashboard series alignment
+│   ├── validation.py          # Shared HTTP validation helpers
+│   └── routers/               # Core, provider, and dashboard route groups
+├── config.py                 # YAML loading and validated runtime settings
+├── orchestration.py          # Scheduled provider retrieval and plan triggers
 ├── providers/
 │   ├── interfaces.py         # Provider contracts
 │   ├── http.py               # Shared bounded JSON HTTP requests
@@ -36,18 +33,19 @@ src/energy_optimizer/
 │   ├── home_assistant_energy.py # Shared Home Assistant history and energy aggregation
 │   ├── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
 │   └── home_assistant_battery.py # Current battery state composition
-├── storage.py                # Durable normalized provider-data storage
+├── storage.py                # Generic durable normalized provider-data storage
+├── household_load_store.py   # Append-friendly household-load NDJSON storage
+├── storage_errors.py          # Storage error contract
 └── optimization/
     ├── model.py              # Pyomo MILP model construction
     ├── solver.py             # HiGHS integration
     └── results.py            # Solver output and diagnostics mapping
 ```
 
-The implementation should add these boundaries through complete vertical slices,
-rather than creating empty modules in advance. The current implementation is
-smaller: `api.py` contains the FastAPI application, `config.py` contains YAML
-loading and validation, and `providers/home_assistant.py` contains the first
-provider adapter.
+The API package keeps schemas, lifecycle, middleware, and reusable mapping helpers
+separate from route handlers. Generic storage delegates household-load history to
+its own NDJSON module, while provider registration is composed through ordered
+factories in `orchestration.py`.
 
 ## Dependency Direction
 
