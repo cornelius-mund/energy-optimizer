@@ -63,6 +63,22 @@
   };
 
   const selectedSeries = (data) => data.series || [];
+  const axisDomainForValues = (values) => {
+    const finiteValues = values.filter((value) => Number.isFinite(value));
+    if (!finiteValues.length) return { min: 0, max: 1 };
+    const dataMin = Math.min(...finiteValues);
+    const dataMax = Math.max(...finiteValues);
+    const dataSpan = dataMax - dataMin;
+    const padding = dataSpan === 0
+      ? Math.max(Math.abs(dataMin) * 0.1, 0.05)
+      : dataSpan * 0.05;
+    return { min: dataMin - padding, max: dataMax + padding };
+  };
+  const axisPrecisionForSpan = (span) => {
+    const tickSpan = span / 4;
+    if (!Number.isFinite(tickSpan) || tickSpan <= 0) return 1;
+    return Math.min(6, Math.max(1, Math.ceil(-Math.log10(tickSpan))));
+  };
   const unitForSeries = (item) => item.id === "import_price_forecast" || item.id === "export_price_forecast"
     ? "EUR/kWh"
     : item.id === "pv_generation_forecast" || item.id === "household_load_actual"
@@ -137,7 +153,7 @@
   };
   const hidePoint = () => { tooltip.hidden = true; };
   const hasSeriesData = (series, id) => series.some(
-    (item) => item.id === id && item.values.some((value) => value !== null),
+    (item) => item.id === id && item.values.some((value) => Number.isFinite(value)),
   );
   const seriesClass = (item, index) => ({
     household_load_actual: "series-0",
@@ -173,12 +189,12 @@
     axisUnit.textContent = unit;
     title.textContent = `${series.map(seriesLabel).join(" and ")} (${unit})`;
     description.textContent = `${series.map((item) => `${seriesLabel(item)} in ${unitForSeries(item)}`).join("; ")}. Missing intervals remain gaps.`;
-    const valueList = series.flatMap((item) => item.values).filter((value) => value !== null);
+    const valueList = series.flatMap((item) => item.values);
     const left = 52; const right = 785; const top = 18; const bottom = 276;
-    const min = Math.min(...valueList, 0);
-    const max = Math.max(...valueList, 1);
+    const { min, max } = axisDomainForValues(valueList);
+    const axisPrecision = axisPrecisionForSpan(max - min);
     const x = (index, count) => left + (index / Math.max(count - 1, 1)) * (right - left);
-    const y = (value) => bottom - ((value - min) / Math.max(max - min, 1)) * (bottom - top);
+    const y = (value) => bottom - ((value - min) / (max - min)) * (bottom - top);
     for (let index = 0; index <= 4; index += 1) {
       const value = min + (max - min) * (index / 4);
       const lineElement = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -187,7 +203,7 @@
       lineElement.setAttribute("class", "grid-line"); grid.append(lineElement);
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("x", 4); label.setAttribute("y", y(value) + 4); label.setAttribute("class", "axis-label");
-      label.textContent = value.toFixed(1); labels.append(label);
+      label.textContent = value.toFixed(axisPrecision); labels.append(label);
     }
     const timestamps = series.find((item) => item.timestamps.length)?.timestamps || [];
     const tickCount = Math.min(5, timestamps.length);
@@ -205,8 +221,8 @@
       const className = seriesClass(item, seriesIndex);
       let path = "";
       item.values.forEach((value, index) => {
-        if (value === null) return;
-        const command = index && item.values[index - 1] !== null ? "L" : "M";
+        if (!Number.isFinite(value)) return;
+        const command = index && Number.isFinite(item.values[index - 1]) ? "L" : "M";
         path += `${command}${x(index, item.values.length).toFixed(2)},${y(value).toFixed(2)} `;
         const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
         point.setAttribute("cx", x(index, item.values.length)); point.setAttribute("cy", y(value)); point.setAttribute("r", item.values.length > 48 ? 2.5 : 4); point.setAttribute("class", `point point-${className.replace("series-", "")}`);

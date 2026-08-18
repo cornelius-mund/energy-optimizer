@@ -201,11 +201,13 @@ The dashboard also provides a Forecast tab backed by
 `GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify
 their source, unit, coverage, retrieval time, and freshness. PV generation uses
 `kW`; market prices use `EUR/kWh`. The Forecast tab renders power and price data
-in separate charts, each with its own unit axis, scale, legend labels, and
-accessible description. All boundaries and point timestamps are UTC hourly
-half-open ranges. Missing or partial observations remain gaps and are not
-interpolated or treated as zero. Chart points expose their exact timestamp and
-value with the series unit on pointer hover and keyboard focus.
+in separate charts, each with its own unit axis, data-driven scale, legend
+labels, and accessible description. Each scale uses finite visible values with
+small padding, while flat or empty data receives a safe non-zero fallback
+domain. All boundaries and point timestamps are UTC hourly half-open ranges.
+Missing or partial observations remain gaps and are not interpolated or treated
+as zero. Chart points expose their exact timestamp and value with the series
+unit on pointer hover and keyboard focus.
 
 The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so the
 dashboard remains available after the Python application is installed into the
