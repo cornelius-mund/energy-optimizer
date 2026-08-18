@@ -53,19 +53,29 @@
             <div id="legend" class="legend"></div>
           </div>
           <div class="chart-wrap">
-            <svg id="chart" viewBox="0 0 800 330" role="img" aria-labelledby="chart-title chart-description">
-              <title id="chart-title">Historic household load</title>
-              <desc id="chart-description">Hourly energy values.</desc>
-              <g id="grid-lines"></g>
-              <path id="area" class="area" d=""></path>
-              <path id="line" class="line" d=""></path>
-              <g id="series-paths"></g>
-              <g id="points"></g>
-              <g id="labels"></g>
-            </svg>
+            <div id="chart" class="chart-stack" role="group" aria-label="Energy charts separated by unit">
+              <svg id="power-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="power-chart-title power-chart-description">
+                <title id="power-chart-title">Power data (kW)</title>
+                <desc id="power-chart-description">Hourly power values in kW.</desc>
+                <text class="axis-unit" id="power-axis-unit" x="4" y="12">kW</text>
+                <g id="power-grid-lines"></g>
+                <g id="power-series-paths"></g>
+                <g id="power-points"></g>
+                <g id="power-labels"></g>
+              </svg>
+              <svg id="price-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="price-chart-title price-chart-description" hidden>
+                <title id="price-chart-title">Electricity prices (EUR/kWh)</title>
+                <desc id="price-chart-description">Hourly electricity prices in EUR/kWh.</desc>
+                <text class="axis-unit" id="price-axis-unit" x="4" y="12">EUR/kWh</text>
+                <g id="price-grid-lines"></g>
+                <g id="price-series-paths"></g>
+                <g id="price-points"></g>
+                <g id="price-labels"></g>
+              </svg>
+            </div>
             <div id="point-tooltip" class="point-tooltip" role="status" aria-live="polite" hidden></div>
           </div>
-          <p class="chart-note">Each point represents one completed hourly interval. Focus a point to inspect it.</p>
+          <p class="chart-note">Each point represents one completed hourly interval. Charts are separated by unit. Focus a point to inspect it.</p>
         </article>
 
         <aside class="details-card card" aria-labelledby="details-heading">

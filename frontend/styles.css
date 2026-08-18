@@ -67,6 +67,9 @@ button:hover { background: #28544b; }
 .legend strong { color: var(--ink); font-weight: 700; }
 .chart-wrap { min-height: 330px; margin: 26px -10px 0; }
 svg { width: 100%; height: auto; overflow: visible; }
+.chart-stack { display: grid; gap: 28px; }
+.data-chart[hidden] { display: none; }
+.axis-unit { fill: var(--ink); font-size: 12px; font-weight: 800; }
 .grid-line { stroke: #dfe7e1; stroke-width: 1; }
 .axis-label { fill: #82918a; font-size: 12px; }
 .area { fill: rgb(26 139 114 / 13%); }
@@ -105,6 +108,7 @@ a { color: var(--accent-dark); font-weight: 700; }
   .chart-card { margin-bottom: 18px; padding: 23px 18px; }
   .details-card { padding: 23px 20px; }
   .chart-wrap { min-height: 245px; margin-top: 22px; }
+  .chart-stack { gap: 20px; }
   .card-heading { display: block; }
   .legend { margin-top: 15px; }
   footer { padding-bottom: 12px; }

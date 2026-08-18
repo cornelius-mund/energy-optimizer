@@ -49,6 +49,43 @@
   };
 
   const selectedSeries = (data) => data.series || [];
+  const unitForSeries = (item) => item.id === "import_price_forecast" || item.id === "export_price_forecast"
+    ? "EUR/kWh"
+    : item.id === "pv_generation_forecast" || item.id === "household_load_actual"
+      ? "kW"
+      : item.unit;
+  const seriesLabel = (item) => ({
+    household_load_actual: "Household load",
+    pv_generation_forecast: "PV generation",
+    import_price_forecast: "Import price",
+    export_price_forecast: "Export price",
+  }[item.id] || item.id);
+  const chartDefinitions = {
+    power: {
+      element: document.querySelector("#power-chart"),
+      grid: document.querySelector("#power-grid-lines"),
+      labels: document.querySelector("#power-labels"),
+      points: document.querySelector("#power-points"),
+      seriesPaths: document.querySelector("#power-series-paths"),
+      axisUnit: document.querySelector("#power-axis-unit"),
+      title: document.querySelector("#power-chart-title"),
+      description: document.querySelector("#power-chart-description"),
+    },
+    price: {
+      element: document.querySelector("#price-chart"),
+      grid: document.querySelector("#price-grid-lines"),
+      labels: document.querySelector("#price-labels"),
+      points: document.querySelector("#price-points"),
+      seriesPaths: document.querySelector("#price-series-paths"),
+      axisUnit: document.querySelector("#price-axis-unit"),
+      title: document.querySelector("#price-chart-title"),
+      description: document.querySelector("#price-chart-description"),
+    },
+  };
+  const chartSeries = (series) => ({
+    power: series.filter((item) => ["household_load_actual", "pv_generation_forecast"].includes(item.id)),
+    price: series.filter((item) => ["import_price_forecast", "export_price_forecast"].includes(item.id)),
+  });
   const adjustStartDate = (data) => {
     if (scenario !== "actual" || !data.series?.[0]?.available_start_time) return;
     const availableDate = isoDate(new Date(data.series[0].available_start_time));
@@ -84,7 +121,8 @@
       return;
     }
     addDetail("Source", `${first.source?.provider || "Unavailable"} / ${first.source?.entity_id || "default"}`);
-    addDetail("Unit", first.unit);
+    const units = [...new Set(series.filter((item) => hasSeriesData([item], item.id)).map(unitForSeries))];
+    addDetail(units.length === 1 ? "Unit" : "Units", units.join(", "));
     addDetail("Coverage", first.available_start_time ? `${formatTimestamp(first.available_start_time)} to ${formatTimestamp(first.available_end_time)}` : "No points in range");
     addDetail("Freshness", first.freshness);
     addDetail("Retrieved", first.retrieved_at ? formatTimestamp(first.retrieved_at) : "Not available");
@@ -92,20 +130,14 @@
     if (first.published_at) addDetail("Published", formatTimestamp(first.published_at));
   };
 
-  const renderChart = (data) => {
-    const grid = document.querySelector("#grid-lines");
-    const labels = document.querySelector("#labels");
-    const points = document.querySelector("#points");
-    const seriesPaths = document.querySelector("#series-paths");
-    const line = document.querySelector("#line");
-    const area = document.querySelector("#area");
+  const renderGraph = (definition, series) => {
+    const { element, grid, labels, points, seriesPaths, axisUnit, title, description } = definition;
     grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
-    hidePoint();
-    const series = selectedSeries(data);
-    if (!series.length || !series.some((item) => item.timestamps.length)) {
-      line.setAttribute("d", ""); area.setAttribute("d", "");
-      return;
-    }
+    element.hidden = false;
+    const unit = unitForSeries(series[0]);
+    axisUnit.textContent = unit;
+    title.textContent = `${series.map(seriesLabel).join(" and ")} (${unit})`;
+    description.textContent = `${series.map((item) => `${seriesLabel(item)} in ${unitForSeries(item)}`).join("; ")}. Missing intervals remain gaps.`;
     const valueList = series.flatMap((item) => item.values).filter((value) => value !== null);
     const left = 52; const right = 785; const top = 18; const bottom = 276;
     const min = Math.min(...valueList, 0);
@@ -132,10 +164,10 @@
         const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
         point.setAttribute("cx", x(index, item.values.length)); point.setAttribute("cy", y(value)); point.setAttribute("r", item.values.length > 48 ? 2.5 : 4); point.setAttribute("class", `point point-${className.replace("series-", "")}`);
         point.setAttribute("tabindex", "0");
-        point.setAttribute("aria-label", `${item.id}, ${formatTimestamp(item.timestamps[index])}: ${value} ${item.unit}`);
-        point.addEventListener("pointerenter", () => showPoint(item.timestamps[index], value, item.unit, point));
+        point.setAttribute("aria-label", `${seriesLabel(item)}, ${formatTimestamp(item.timestamps[index])}: ${value} ${unitForSeries(item)}`);
+        point.addEventListener("pointerenter", () => showPoint(item.timestamps[index], value, unitForSeries(item), point));
         point.addEventListener("pointerleave", hidePoint);
-        point.addEventListener("focus", () => showPoint(item.timestamps[index], value, item.unit, point));
+        point.addEventListener("focus", () => showPoint(item.timestamps[index], value, unitForSeries(item), point));
         point.addEventListener("blur", hidePoint);
         points.append(point);
       });
@@ -144,8 +176,19 @@
       seriesLine.setAttribute("class", `series-line ${className}`);
       seriesPaths.append(seriesLine);
     });
-    line.setAttribute("d", "");
-    area.setAttribute("d", "");
+  };
+
+  const renderChart = (data) => {
+    Object.values(chartDefinitions).forEach(({ element, grid, labels, points, seriesPaths }) => {
+      element.hidden = true;
+      grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
+    });
+    hidePoint();
+    const series = selectedSeries(data);
+    Object.entries(chartSeries(series)).forEach(([kind, groupedSeries]) => {
+      const usableSeries = groupedSeries.filter((item) => hasSeriesData([item], item.id));
+      if (usableSeries.length) renderGraph(chartDefinitions[kind], usableSeries);
+    });
   };
 
   const renderHeader = (data = {}) => {
@@ -177,10 +220,11 @@
         ["export_price_forecast", "Export price", "legend-2"],
       ].filter(([id]) => hasSeriesData(series, id))
       : [["household_load_actual", "Household load", "legend-0"]];
-    labels.forEach(([, label, legendClass]) => {
+    labels.forEach(([id, label, legendClass]) => {
       const item = document.createElement("span");
       item.className = `legend-item ${legendClass}`;
-      item.textContent = label;
+      const source = series.find((candidate) => candidate.id === id);
+      item.textContent = `${label} (${unitForSeries(source)})`;
       legend.append(item);
     });
   };
