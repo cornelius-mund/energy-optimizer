@@ -358,7 +358,9 @@ orchestration consumers receive one coherent household-load dataset.
 Household load must be configured through `household_load_entities`. Each mapping
 declares its Home Assistant state class, energy unit, operation, and optional
 physical hourly limit, so instantaneous power sensors cannot be configured
-accidentally.
+accidentally. An entity ID may also be listed in the grid-flow mappings when the
+same physical meter provides both household-load and grid-flow measurements. An
+entity ID must not be repeated within one logical mapping category.
 
 Call `fetch(start_time, end_time, history_lookback_seconds)` for a requested
 period. `end_time` may be omitted to fetch through the latest completed UTC
@@ -405,6 +407,10 @@ home_assistant:
 
 The normalized result is persisted under `home-assistant/grid_flow`. See
 [`docs/api.md`](docs/api.md) for the corresponding endpoint behavior.
+
+The household-load and grid-flow categories are normalized independently, so a
+physical meter can be reused across both categories without double-counting it
+within either aggregate.
 
 ## Development
 

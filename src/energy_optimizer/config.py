@@ -242,7 +242,7 @@ class HomeAssistantConfiguration(BaseModel):
 
     @model_validator(mode="after")
     def validate_energy_entities(self) -> "HomeAssistantConfiguration":
-        """Reject duplicate physical entities across configured mappings."""
+        """Reject duplicate physical entities within each logical mapping."""
 
         grid_entity_sets = (self.grid_import_entities, self.grid_export_entities)
         if any(entities is not None for entities in grid_entity_sets) and not all(
@@ -253,19 +253,17 @@ class HomeAssistantConfiguration(BaseModel):
                 "together"
             )
 
-        entity_ids = [
-            entity.entity_id
-            for entities in (
-                self.household_load_entities,
-                self.grid_import_entities,
-                self.grid_export_entities,
-            )
-            for entity in entities or []
-        ]
-        if len(entity_ids) != len(set(entity_ids)):
-            raise ValueError(
-                "Home Assistant energy entities must not contain duplicates"
-            )
+        for category, entities in (
+            ("household_load", self.household_load_entities),
+            ("grid_import", self.grid_import_entities),
+            ("grid_export", self.grid_export_entities),
+        ):
+            entity_ids = [entity.entity_id for entity in entities or []]
+            if len(entity_ids) != len(set(entity_ids)):
+                raise ValueError(
+                    f"Home Assistant {category} energy entities must not contain "
+                    "duplicates"
+                )
         if self.battery is not None:
             battery_values = (
                 self.battery.state_of_charge,

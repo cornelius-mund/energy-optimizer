@@ -443,11 +443,18 @@ def test_load_configuration_allows_grid_only_home_assistant_provider(
     assert configuration.home_assistant.household_load_entities is None
 
 
-def test_load_configuration_rejects_duplicate_energy_entities(tmp_path: Path) -> None:
+def test_load_configuration_allows_cross_category_energy_entity_reuse(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
         VALID_CONFIGURATION.replace(
             CONFIG_MARKER,
+            "  household_load_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
             "  grid_import_entities:\n"
             "    - entity_id: sensor.grid_import\n"
             "      state_class: total_increasing\n"
@@ -462,7 +469,43 @@ def test_load_configuration_rejects_duplicate_energy_entities(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    with pytest.raises(ConfigurationError, match="must not contain duplicates"):
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    household_load_entities = configuration.home_assistant.household_load_entities
+    grid_import_entities = configuration.home_assistant.grid_import_entities
+    assert household_load_entities is not None
+    assert grid_import_entities is not None
+    assert household_load_entities[0].entity_id == "sensor.grid_import"
+    assert grid_import_entities[0].entity_id == "sensor.grid_import"
+
+
+def test_load_configuration_rejects_duplicate_energy_entities_within_category(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            CONFIG_MARKER,
+            "  grid_import_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "  grid_export_entities:\n"
+            "    - entity_id: sensor.grid_export\n"
+            "      state_class: total_increasing\n"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="grid_import.*duplicates"):
         load_configuration(path)
 
 
