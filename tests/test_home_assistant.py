@@ -784,6 +784,78 @@ def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> Non
     assert data.quality[0].entity_id == ENTITY_ID
 
 
+def test_total_increasing_transient_spike_is_retracted_when_counter_recovers() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "0.0182"),
+        ("2026-01-01T00:10:38+00:00", "57.2166"),
+        ("2026-01-01T00:11:30+00:00", "0.0182"),
+        ("2026-01-01T00:30:00+00:00", "0.5"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        )
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == pytest.approx((0.4818,))
+    assert data.quality[0].status == "suspect"
+    assert data.quality[0].reason == "transient_counter_spike"
+    assert data.quality[0].entity_id == ENTITY_ID
+
+
+def test_transient_spike_does_not_make_signed_aggregate_negative() -> None:
+    responses = {
+        ENTITY_ID: history_payload(
+            readings=[
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T00:30:00+00:00", "1"),
+            ]
+        ),
+        SECOND_ENTITY_ID: history_payload(
+            entity_id=SECOND_ENTITY_ID,
+            readings=[
+                ("2026-01-01T00:00:00+00:00", "0.0182"),
+                ("2026-01-01T00:10:38+00:00", "57.2166"),
+                ("2026-01-01T00:11:30+00:00", "0.0182"),
+            ],
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "subtract",
+            },
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == pytest.approx((1.0,))
+    assert data.quality[0].reason == "transient_counter_spike"
+
+
 def test_physical_limit_rejects_over_limit_delta_and_marks_interval_suspect() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "0"),
