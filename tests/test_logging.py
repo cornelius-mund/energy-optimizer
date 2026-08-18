@@ -407,6 +407,85 @@ def test_successful_non_health_request_remains_info(
     assert request_logs[0].levelno == logging.INFO
 
 
+def test_dashboard_request_log_includes_scenario_kind(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(MINIMAL_CONFIGURATION, encoding="utf-8")
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.api"):
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/dashboard/data",
+                params={
+                    "scenario_kind": "forecast",
+                    "start_time": "2026-01-01T00:00:00+00:00",
+                    "end_time": "2026-01-01T01:00:00+00:00",
+                },
+            )
+
+    assert response.status_code == 200
+    request_logs = [
+        record
+        for record in caplog.records
+        if record.name == "energy_optimizer.api"
+        and record.getMessage().startswith("event=request_completed")
+        and "path=/api/v1/dashboard/data" in record.getMessage()
+    ]
+    assert len(request_logs) == 1
+    assert request_logs[0].levelno == logging.INFO
+    message = request_logs[0].getMessage()
+    assert "scenario_kind=forecast" in message
+    assert "status=200" in message
+
+
+def test_unavailable_forecast_emits_actionable_warning(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(
+        MINIMAL_CONFIGURATION
+        + "persistence:\n"
+        + "  directory: "
+        + str(tmp_path / "provider-data")
+        + "\nforecast_solar:\n"
+        + "  latitude: 52.52\n"
+        + "  longitude: 13.41\n"
+        + "  declination_degrees: 35\n"
+        + "  azimuth_degrees: 0\n"
+        + "  peak_power_kw: 8\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.api"):
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v1/dashboard/data",
+                params={
+                    "scenario_kind": "forecast",
+                    "start_time": "2026-01-01T00:00:00+00:00",
+                    "end_time": "2026-01-01T01:00:00+00:00",
+                },
+            )
+
+    assert response.status_code == 200
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "energy_optimizer.api"
+        and record.getMessage().startswith("event=dashboard_forecast_unavailable")
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    message = warnings[0].getMessage()
+    assert "request_id=" in message
+    assert "diagnostics=PV_forecast_data_is_unavailable" in message
+
+
 def test_provider_failure_log_excludes_token_and_raw_state(
     caplog: LogCaptureFixture,
 ) -> None:
