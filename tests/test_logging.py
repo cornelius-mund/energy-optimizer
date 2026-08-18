@@ -307,7 +307,11 @@ def test_configuration_load_is_logged_without_secret_values(
         + "home_assistant:\n"
         + "  base_url: http://homeassistant.local:8123\n"
         + "  token: do-not-log-this-token\n"
-        + "  household_load_entity_id: sensor.household_energy\n"
+        + "  household_load_entities:\n"
+        + "    - entity_id: sensor.household_energy\n"
+        + "      state_class: total_increasing\n"
+        + "      unit: kWh\n"
+        + "      operation: add\n"
         + "  timeout_seconds: 10\n",
         encoding="utf-8",
     )
@@ -493,7 +497,14 @@ def test_provider_failure_log_excludes_token_and_raw_state(
         {
             "base_url": "http://homeassistant.test:8123",
             "token": "secret-provider-token",
-            "household_load_entity_id": "sensor.household_energy",
+            "household_load_entities": [
+                {
+                    "entity_id": "sensor.household_energy",
+                    "state_class": "total_increasing",
+                    "unit": "kWh",
+                    "operation": "add",
+                }
+            ],
             "timeout_seconds": 5,
         }
     )

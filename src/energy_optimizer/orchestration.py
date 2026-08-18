@@ -8,7 +8,7 @@ import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping, TypeVar
 
 from pydantic import TypeAdapter
 
@@ -62,6 +62,7 @@ class ProviderDataSnapshot:
 
 
 PlanGenerator = Callable[[ProviderDataSnapshot], object]
+DataT = TypeVar("DataT")
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,36 @@ class OrchestrationCycle:
 
 class OrchestrationError(RuntimeError):
     """Raised when orchestration configuration cannot be composed safely."""
+
+
+def _make_freshness_checker(
+    data_type: type[DataT],
+    is_fresh: Callable[..., bool],
+) -> Callable[[object, datetime], bool]:
+    def check(data: object, now: datetime) -> bool:
+        return isinstance(data, data_type) and is_fresh(data, now=now)
+
+    return check
+
+
+def _make_provider_registration(
+    *,
+    name: str,
+    data_type: str,
+    data_class: type[DataT],
+    adapter: TypeAdapter[DataT],
+    fetch: Callable[[datetime, DataSourceScheduleConfiguration], DataT | None],
+    is_fresh: Callable[..., bool],
+    load: Callable[[], DataT | None],
+) -> ProviderRegistration:
+    return ProviderRegistration(
+        name=name,
+        data_type=data_type,
+        adapter=adapter,
+        fetch=fetch,
+        is_fresh=_make_freshness_checker(data_class, is_fresh),
+        load=load,
+    )
 
 
 class ProviderOrchestrator:
@@ -263,9 +294,7 @@ class ProviderOrchestrator:
                 data = registration.fetch(now, schedule)
                 if data is None:
                     attempt_completed = self._as_utc(cycle_clock())
-                    self._next_due[registration.name] = attempt_completed + timedelta(
-                        seconds=schedule.interval_seconds
-                    )
+                    self._set_next_due(registration.name, attempt_completed, schedule)
                     provider_runs.append(
                         ProviderRun(
                             source=registration.name,
@@ -288,9 +317,7 @@ class ProviderOrchestrator:
                 )
                 self._latest_data[registration.name] = saved_data
                 attempt_completed = self._as_utc(cycle_clock())
-                self._next_due[registration.name] = attempt_completed + timedelta(
-                    seconds=schedule.interval_seconds
-                )
+                self._set_next_due(registration.name, attempt_completed, schedule)
                 status: RunStatus
                 if self._has_suspect_quality(saved_data):
                     status = "suspect"
@@ -323,9 +350,7 @@ class ProviderOrchestrator:
                 )
             except Exception as error:
                 attempt_completed = self._as_utc(cycle_clock())
-                self._next_due[registration.name] = attempt_completed + timedelta(
-                    seconds=schedule.interval_seconds
-                )
+                self._set_next_due(registration.name, attempt_completed, schedule)
                 message = str(error) or error.__class__.__name__
                 provider_runs.append(
                     ProviderRun(
@@ -480,6 +505,16 @@ class ProviderOrchestrator:
             return False
         return now >= next_due
 
+    def _set_next_due(
+        self,
+        name: str,
+        completed_at: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> None:
+        self._next_due[name] = completed_at + timedelta(
+            seconds=schedule.interval_seconds
+        )
+
     @staticmethod
     def _key_for(data_type: str, data: object) -> ProviderDataKey:
         source = getattr(data, "source", None)
@@ -517,6 +552,254 @@ class ProviderOrchestrator:
         return value.astimezone(timezone.utc)
 
 
+ConfiguredRegistrationFactory = Callable[
+    [Configuration, OrchestrationConfiguration, ProviderDataStore],
+    ProviderRegistration | None,
+]
+
+
+def _build_household_load_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    if (
+        home_assistant is None
+        or home_assistant.household_load_entities is None
+        or "household_load" not in orchestration.sources
+    ):
+        return None
+
+    importer = HomeAssistantLoadImporter(home_assistant)
+    adapter = TypeAdapter(HouseholdLoadData)
+    key = ProviderDataKey(
+        data_type="household-load",
+        provider="home-assistant",
+        entity_id=home_assistant.household_load_source_id,
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> HouseholdLoadData | None:
+        end_time = now.replace(minute=0, second=0, microsecond=0)
+        persisted = store.load(key, adapter)
+        if persisted is None:
+            start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
+        else:
+            start_time = persisted.start_time + timedelta(hours=len(persisted.load_kw))
+        if start_time >= end_time:
+            return None
+        return importer.fetch(
+            start_time,
+            end_time,
+            schedule.history_lookback_seconds,
+            now=now,
+        )
+
+    def load() -> HouseholdLoadData | None:
+        return store.load(key, adapter)
+
+    return _make_provider_registration(
+        name="household_load",
+        data_type="household-load",
+        data_class=HouseholdLoadData,
+        adapter=adapter,
+        fetch=fetch,
+        is_fresh=importer.is_fresh,
+        load=load,
+    )
+
+
+def _build_pv_generation_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    forecast_solar = configuration.forecast_solar
+    if forecast_solar is None or "pv_generation" not in orchestration.sources:
+        return None
+
+    schedule = orchestration.sources["pv_generation"]
+    if (
+        schedule.enabled
+        and schedule.interval_seconds < FORECAST_SOLAR_MIN_INTERVAL_SECONDS
+    ):
+        raise OrchestrationError(
+            "pv_generation polling interval must be at least "
+            f"{FORECAST_SOLAR_MIN_INTERVAL_SECONDS} seconds for the "
+            "Forecast.Solar public rate limit"
+        )
+    importer = ForecastSolarImporter(forecast_solar)
+    adapter = TypeAdapter(PvGenerationData)
+    key = ProviderDataKey(
+        data_type="pv-generation",
+        provider="forecast.solar",
+        entity_id=forecast_solar.pv_generation_source_id,
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> PvGenerationData:
+        del schedule
+        start_time = now.replace(minute=0, second=0, microsecond=0)
+        return importer.fetch(start_time, now=now)
+
+    def load() -> PvGenerationData | None:
+        return store.load(key, adapter)
+
+    return _make_provider_registration(
+        name="pv_generation",
+        data_type="pv-generation",
+        data_class=PvGenerationData,
+        adapter=adapter,
+        fetch=fetch,
+        is_fresh=importer.is_fresh,
+        load=load,
+    )
+
+
+def _build_electricity_prices_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    awattar = configuration.awattar
+    if awattar is None or "electricity_prices" not in orchestration.sources:
+        return None
+
+    importer = AwattarImporter(awattar)
+    adapter = TypeAdapter(ElectricityPriceData)
+    key = ProviderDataKey(
+        data_type="electricity-prices",
+        provider="awattar.de",
+        entity_id=awattar.electricity_price_source_id,
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> ElectricityPriceData:
+        del schedule
+        start_time = now.replace(minute=0, second=0, microsecond=0)
+        return importer.fetch(start_time, now=now)
+
+    def load() -> ElectricityPriceData | None:
+        return store.load(key, adapter)
+
+    return _make_provider_registration(
+        name="electricity_prices",
+        data_type="electricity-prices",
+        data_class=ElectricityPriceData,
+        adapter=adapter,
+        fetch=fetch,
+        is_fresh=importer.is_fresh,
+        load=load,
+    )
+
+
+def _build_grid_flow_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    if (
+        home_assistant is None
+        or home_assistant.grid_import_entities is None
+        or home_assistant.grid_export_entities is None
+        or "grid_flow" not in orchestration.sources
+    ):
+        return None
+
+    importer = HomeAssistantGridFlowImporter(home_assistant)
+    adapter = TypeAdapter(GridFlowData)
+    key = ProviderDataKey(
+        data_type="grid-flow",
+        provider="home-assistant",
+        entity_id=home_assistant.grid_flow_source_id,
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> GridFlowData:
+        end_time = now.replace(minute=0, second=0, microsecond=0)
+        start_time = end_time - timedelta(hours=1)
+        return importer.fetch(
+            start_time,
+            end_time,
+            schedule.history_lookback_seconds,
+            now=now,
+        )
+
+    def load() -> GridFlowData | None:
+        return store.load(key, adapter)
+
+    return _make_provider_registration(
+        name="grid_flow",
+        data_type="grid-flow",
+        data_class=GridFlowData,
+        adapter=adapter,
+        fetch=fetch,
+        is_fresh=importer.is_fresh,
+        load=load,
+    )
+
+
+def _build_battery_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    if (
+        home_assistant is None
+        or home_assistant.battery is None
+        or "battery" not in orchestration.sources
+    ):
+        return None
+
+    importer = HomeAssistantBatteryImporter(home_assistant)
+    adapter = TypeAdapter(BatteryData)
+    key = ProviderDataKey(
+        data_type="battery",
+        provider="home-assistant",
+        entity_id=home_assistant.battery_source_id,
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> BatteryData:
+        del schedule
+        return importer.fetch(now=now)
+
+    def load() -> BatteryData | None:
+        return store.load(key, adapter)
+
+    return _make_provider_registration(
+        name="battery",
+        data_type="battery",
+        data_class=BatteryData,
+        adapter=adapter,
+        fetch=fetch,
+        is_fresh=importer.is_fresh,
+        load=load,
+    )
+
+
+_REGISTRATION_FACTORIES: tuple[ConfiguredRegistrationFactory, ...] = (
+    _build_household_load_registration,
+    _build_pv_generation_registration,
+    _build_electricity_prices_registration,
+    _build_grid_flow_registration,
+    _build_battery_registration,
+)
+
+
 def build_configured_orchestrator(
     configuration: Configuration,
     store: ProviderDataStore | None,
@@ -535,242 +818,10 @@ def build_configured_orchestrator(
         )
 
     registrations: list[ProviderRegistration] = []
-    if (
-        configuration.home_assistant is not None
-        and configuration.home_assistant.household_load_entities is not None
-        and "household_load" in orchestration.sources
-    ):
-        home_assistant = configuration.home_assistant
-        importer = HomeAssistantLoadImporter(home_assistant)
-
-        def fetch_household_load(
-            now: datetime,
-            schedule: DataSourceScheduleConfiguration,
-        ) -> HouseholdLoadData | None:
-            end_time = now.replace(minute=0, second=0, microsecond=0)
-            key = ProviderDataKey(
-                data_type="household-load",
-                provider="home-assistant",
-                entity_id=home_assistant.household_load_source_id,
-            )
-            persisted = store.load(key, TypeAdapter(HouseholdLoadData))
-            if persisted is None:
-                start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
-            else:
-                start_time = persisted.start_time + timedelta(
-                    hours=len(persisted.load_kw)
-                )
-            if start_time >= end_time:
-                return None
-            return importer.fetch(
-                start_time,
-                end_time,
-                schedule.history_lookback_seconds,
-                now=now,
-            )
-
-        registrations.append(
-            ProviderRegistration(
-                name="household_load",
-                data_type="household-load",
-                adapter=TypeAdapter(HouseholdLoadData),
-                fetch=fetch_household_load,
-                is_fresh=lambda data, now: (
-                    importer.is_fresh(data, now=now)
-                    if isinstance(data, HouseholdLoadData)
-                    else False
-                ),
-                load=lambda: store.load(
-                    ProviderDataKey(
-                        data_type="household-load",
-                        provider="home-assistant",
-                        entity_id=home_assistant.household_load_source_id,
-                    ),
-                    TypeAdapter(HouseholdLoadData),
-                ),
-            )
-        )
-
-    if (
-        configuration.forecast_solar is not None
-        and "pv_generation" in orchestration.sources
-    ):
-        schedule = orchestration.sources["pv_generation"]
-        if (
-            schedule.enabled
-            and schedule.interval_seconds < FORECAST_SOLAR_MIN_INTERVAL_SECONDS
-        ):
-            raise OrchestrationError(
-                "pv_generation polling interval must be at least "
-                f"{FORECAST_SOLAR_MIN_INTERVAL_SECONDS} seconds for the "
-                "Forecast.Solar public rate limit"
-            )
-        forecast_solar = configuration.forecast_solar
-        pv_importer = ForecastSolarImporter(forecast_solar)
-        adapter = TypeAdapter(PvGenerationData)
-
-        def fetch_pv_generation(
-            now: datetime,
-            schedule: DataSourceScheduleConfiguration,
-        ) -> PvGenerationData:
-            del schedule
-            start_time = now.replace(minute=0, second=0, microsecond=0)
-            return pv_importer.fetch(start_time, now=now)
-
-        def load_pv_generation() -> PvGenerationData | None:
-            return store.load(
-                ProviderDataKey(
-                    data_type="pv-generation",
-                    provider="forecast.solar",
-                    entity_id=forecast_solar.pv_generation_source_id,
-                ),
-                adapter,
-            )
-
-        registrations.append(
-            ProviderRegistration(
-                name="pv_generation",
-                data_type="pv-generation",
-                adapter=adapter,
-                fetch=fetch_pv_generation,
-                is_fresh=lambda data, now: (
-                    pv_importer.is_fresh(data, now=now)
-                    if isinstance(data, PvGenerationData)
-                    else False
-                ),
-                load=load_pv_generation,
-            )
-        )
-
-    if (
-        configuration.awattar is not None
-        and "electricity_prices" in orchestration.sources
-    ):
-        awattar = configuration.awattar
-        price_importer = AwattarImporter(awattar)
-        price_adapter = TypeAdapter(ElectricityPriceData)
-
-        def fetch_electricity_prices(
-            now: datetime,
-            schedule: DataSourceScheduleConfiguration,
-        ) -> ElectricityPriceData:
-            del schedule
-            start_time = now.replace(minute=0, second=0, microsecond=0)
-            return price_importer.fetch(start_time, now=now)
-
-        def load_electricity_prices() -> ElectricityPriceData | None:
-            return store.load(
-                ProviderDataKey(
-                    data_type="electricity-prices",
-                    provider="awattar.de",
-                    entity_id=awattar.electricity_price_source_id,
-                ),
-                price_adapter,
-            )
-
-        registrations.append(
-            ProviderRegistration(
-                name="electricity_prices",
-                data_type="electricity-prices",
-                adapter=price_adapter,
-                fetch=fetch_electricity_prices,
-                is_fresh=lambda data, now: (
-                    price_importer.is_fresh(data, now=now)
-                    if isinstance(data, ElectricityPriceData)
-                    else False
-                ),
-                load=load_electricity_prices,
-            )
-        )
-
-    if (
-        configuration.home_assistant is not None
-        and configuration.home_assistant.grid_import_entities is not None
-        and configuration.home_assistant.grid_export_entities is not None
-        and "grid_flow" in orchestration.sources
-    ):
-        home_assistant = configuration.home_assistant
-        grid_flow_importer = HomeAssistantGridFlowImporter(home_assistant)
-        grid_flow_adapter = TypeAdapter(GridFlowData)
-
-        def fetch_grid_flow(
-            now: datetime,
-            schedule: DataSourceScheduleConfiguration,
-        ) -> GridFlowData:
-            end_time = now.replace(minute=0, second=0, microsecond=0)
-            start_time = end_time - timedelta(hours=1)
-            return grid_flow_importer.fetch(
-                start_time,
-                end_time,
-                schedule.history_lookback_seconds,
-                now=now,
-            )
-
-        def load_grid_flow() -> GridFlowData | None:
-            return store.load(
-                ProviderDataKey(
-                    data_type="grid-flow",
-                    provider="home-assistant",
-                    entity_id=home_assistant.grid_flow_source_id,
-                ),
-                grid_flow_adapter,
-            )
-
-        registrations.append(
-            ProviderRegistration(
-                name="grid_flow",
-                data_type="grid-flow",
-                adapter=grid_flow_adapter,
-                fetch=fetch_grid_flow,
-                is_fresh=lambda data, now: (
-                    grid_flow_importer.is_fresh(data, now=now)
-                    if isinstance(data, GridFlowData)
-                    else False
-                ),
-                load=load_grid_flow,
-            )
-        )
-
-    if (
-        configuration.home_assistant is not None
-        and configuration.home_assistant.battery is not None
-        and "battery" in orchestration.sources
-    ):
-        home_assistant = configuration.home_assistant
-        battery_importer = HomeAssistantBatteryImporter(home_assistant)
-        battery_adapter = TypeAdapter(BatteryData)
-
-        def fetch_battery(
-            now: datetime,
-            schedule: DataSourceScheduleConfiguration,
-        ) -> BatteryData:
-            del schedule
-            return battery_importer.fetch(now=now)
-
-        def load_battery() -> BatteryData | None:
-            return store.load(
-                ProviderDataKey(
-                    data_type="battery",
-                    provider="home-assistant",
-                    entity_id=home_assistant.battery_source_id,
-                ),
-                battery_adapter,
-            )
-
-        registrations.append(
-            ProviderRegistration(
-                name="battery",
-                data_type="battery",
-                adapter=battery_adapter,
-                fetch=fetch_battery,
-                is_fresh=lambda data, now: (
-                    battery_importer.is_fresh(data, now=now)
-                    if isinstance(data, BatteryData)
-                    else False
-                ),
-                load=load_battery,
-            )
-        )
+    for factory in _REGISTRATION_FACTORIES:
+        registration = factory(configuration, orchestration, store)
+        if registration is not None:
+            registrations.append(registration)
 
     orchestrator = ProviderOrchestrator(
         configuration=orchestration,

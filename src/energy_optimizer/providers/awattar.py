@@ -16,7 +16,12 @@ from energy_optimizer.providers.interfaces import (
     ElectricityPriceData,
     SourceMetadata,
 )
-from energy_optimizer.providers.normalization import as_utc
+from energy_optimizer.providers.normalization import (
+    align_to_next_hour,
+    as_utc,
+    is_fresh,
+    validate_hourly_period,
+)
 
 logger = logging.getLogger(__name__)
 _HOUR = timedelta(hours=1)
@@ -88,12 +93,20 @@ class AwattarNormalizer:
             if end_time is not None
             else None
         )
-        self._validate_boundary(start, end)
+        validate_hourly_period(
+            start,
+            end,
+            error_factory=AwattarError,
+            start_message="aWATTar start_time must be aligned to the hour",
+            end_message="aWATTar end_time must be aligned to the hour",
+            order_message="aWATTar end_time must be after start_time",
+            check_order_first=False,
+        )
         intervals = self._parse_intervals(payload)
         if not intervals:
             raise AwattarError("aWATTar response contains no market-data intervals")
 
-        effective_start = max(start, self._next_hour(retrieved))
+        effective_start = max(start, align_to_next_hour(retrieved))
         selected = [
             interval
             for interval in intervals
@@ -191,22 +204,6 @@ class AwattarNormalizer:
             ) from error
         return timestamp
 
-    @staticmethod
-    def _next_hour(value: datetime) -> datetime:
-        return value.replace(minute=0, second=0, microsecond=0) + (
-            _HOUR if value.minute or value.second or value.microsecond else timedelta(0)
-        )
-
-    @staticmethod
-    def _validate_boundary(start: datetime, end: datetime | None) -> None:
-        if start.minute or start.second or start.microsecond:
-            raise AwattarError("aWATTar start_time must be aligned to the hour")
-        if end is not None:
-            if end <= start:
-                raise AwattarError("aWATTar end_time must be after start_time")
-            if end.minute or end.second or end.microsecond:
-                raise AwattarError("aWATTar end_time must be aligned to the hour")
-
 
 class AwattarImporter:
     """Fetch and normalize German aWATTar day-ahead prices."""
@@ -253,15 +250,11 @@ class AwattarImporter:
     def is_fresh(
         self, data: ElectricityPriceData, *, now: datetime | None = None
     ) -> bool:
-        current = as_utc(
-            now or datetime.now(timezone.utc),
+        return is_fresh(
+            data.retrieved_at,
+            self.configuration.max_data_age_seconds,
+            expires_at=data.expires_at,
+            now=now,
             error_factory=AwattarError,
-            message="aWATTar freshness times must include a timezone",
-        )
-        if current >= data.expires_at:
-            return False
-        threshold = self.configuration.max_data_age_seconds
-        return (
-            threshold is None
-            or (current - data.retrieved_at).total_seconds() < threshold
+            now_message="aWATTar freshness times must include a timezone",
         )

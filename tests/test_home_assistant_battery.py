@@ -1,19 +1,21 @@
 """Tests for the Home Assistant battery importer."""
 
 from datetime import datetime, timezone
-from typing import Any
 
 import httpx
 import pytest
 
-from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
+from home_assistant_fixtures import (
+    home_assistant_configuration_factory,
+    home_assistant_importer_factory,
+    home_assistant_state_payload,
+)
 
 START = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
-OBSERVATION = "2026-01-01T05:00:00+00:00"
 
 BATTERY_MAPPINGS = {
     "state_of_charge": {
@@ -51,27 +53,8 @@ BATTERY_MAPPINGS = {
 }
 
 
-def configuration(**overrides: Any) -> HomeAssistantConfiguration:
-    values: dict[str, Any] = {
-        "base_url": "http://homeassistant.test:8123",
-        "token": "test-token",
-        "battery": BATTERY_MAPPINGS,
-        "timeout_seconds": 5,
-        "max_data_age_seconds": 7200,
-    }
-    values.update(overrides)
-    return HomeAssistantConfiguration.model_validate(values)
-
-
-def payload(
-    entity_id: str, state: object, timestamp: str = OBSERVATION
-) -> dict[str, object]:
-    return {
-        "entity_id": entity_id,
-        "state": state,
-        "last_updated": timestamp,
-        "attributes": {},
-    }
+configuration = home_assistant_configuration_factory(battery=BATTERY_MAPPINGS)
+payload = home_assistant_state_payload
 
 
 def standard_payloads() -> dict[str, dict[str, object]]:
@@ -88,15 +71,7 @@ def standard_payloads() -> dict[str, dict[str, object]]:
     return {entity_id: payload(entity_id, state) for entity_id, state in states.items()}
 
 
-def importer(
-    handler: httpx.MockTransport | httpx.BaseTransport,
-    **configuration_overrides: Any,
-) -> tuple[HomeAssistantBatteryImporter, httpx.Client]:
-    client = httpx.Client(transport=handler)
-    return (
-        HomeAssistantBatteryImporter(configuration(**configuration_overrides), client),
-        client,
-    )
+importer = home_assistant_importer_factory(HomeAssistantBatteryImporter, configuration)
 
 
 def test_fetch_normalizes_battery_state_and_capabilities() -> None:

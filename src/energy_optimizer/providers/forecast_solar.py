@@ -18,7 +18,9 @@ from energy_optimizer.providers.interfaces import (
 )
 from energy_optimizer.providers.normalization import (
     as_utc,
+    is_fresh,
     validate_finite_non_negative,
+    validate_hourly_period,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +125,14 @@ class ForecastSolarNormalizer:
             if end_time is not None
             else self._available_end(periods, source_timezone)
         )
-        self._validate_period(start, end)
+        validate_hourly_period(
+            start,
+            end,
+            error_factory=ForecastSolarError,
+            start_message="Forecast.Solar start_time must be aligned to the hour",
+            end_message="Forecast.Solar end_time must be aligned to the hour",
+            order_message="Forecast.Solar end_time must be after start_time",
+        )
         required_dates = self._required_local_dates(start, end, source_timezone)
         missing_dates = required_dates - available_dates
         if missing_dates:
@@ -275,19 +284,6 @@ class ForecastSolarNormalizer:
         return local_midnight.astimezone(timezone.utc)
 
     @staticmethod
-    def _validate_period(start: datetime, end: datetime) -> None:
-        if end <= start:
-            raise ForecastSolarError("Forecast.Solar end_time must be after start_time")
-        if start.minute or start.second or start.microsecond:
-            raise ForecastSolarError(
-                "Forecast.Solar start_time must be aligned to the hour"
-            )
-        if end.minute or end.second or end.microsecond:
-            raise ForecastSolarError(
-                "Forecast.Solar end_time must be aligned to the hour"
-            )
-
-    @staticmethod
     def _add_period(
         energy: list[float],
         start: datetime,
@@ -364,15 +360,11 @@ class ForecastSolarImporter:
         now: datetime | None = None,
     ) -> bool:
         """Check forecast coverage and optional retrieval age."""
-        current_time = as_utc(
-            now or datetime.now(timezone.utc),
+        return is_fresh(
+            data.retrieved_at,
+            self.configuration.max_data_age_seconds,
+            expires_at=data.expires_at,
+            now=now,
             error_factory=ForecastSolarError,
-            message="Forecast.Solar freshness times must include a timezone",
-        )
-        if current_time >= data.expires_at:
-            return False
-        threshold = self.configuration.max_data_age_seconds
-        return (
-            threshold is None
-            or (current_time - data.retrieved_at).total_seconds() < threshold
+            now_message="Forecast.Solar freshness times must include a timezone",
         )
