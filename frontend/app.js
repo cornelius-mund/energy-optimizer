@@ -22,14 +22,24 @@
 
   const pad = (value) => String(value).padStart(2, "0");
   const isoDate = (date) => `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
-  const nextDate = (value) => {
-    const date = new Date(`${value}T00:00:00Z`);
-    date.setUTCDate(date.getUTCDate() + 1);
-    return isoDate(date);
+  const dateTimeInputValue = (value) => {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return `${isoDate(date)}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
   };
-  const todayValue = isoDate(new Date());
+  const utcTimestamp = (value) => `${value}:00Z`;
+  const parseInputTimestamp = (value) => new Date(utcTimestamp(value));
+  const isValidRange = (start, end) => {
+    const startTimestamp = parseInputTimestamp(start).getTime();
+    const endTimestamp = parseInputTimestamp(end).getTime();
+    return Number.isFinite(startTimestamp) && Number.isFinite(endTimestamp) && endTimestamp > startTimestamp;
+  };
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  const todayValue = dateTimeInputValue(today);
+  const tomorrowValue = dateTimeInputValue(new Date(today.getTime() + 24 * 60 * 60 * 1000));
   startInput.value = todayValue;
-  endInput.value = todayValue;
+  endInput.value = tomorrowValue;
 
   const setStatus = (message, kind = "") => {
     status.className = `status ${kind}`;
@@ -39,6 +49,10 @@
   const formatTimestamp = (value) => new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
   }).format(new Date(value));
+  const formatAxisTimestamp = (value) => {
+    const date = new Date(value);
+    return `${isoDate(date)} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}Z`;
+  };
 
   const addDetail = (label, value) => {
     const term = document.createElement("dt");
@@ -86,10 +100,29 @@
     power: series.filter((item) => ["household_load_actual", "pv_generation_forecast"].includes(item.id)),
     price: series.filter((item) => ["import_price_forecast", "export_price_forecast"].includes(item.id)),
   });
-  const adjustStartDate = (data) => {
-    if (scenario !== "actual" || !data.series?.[0]?.available_start_time) return;
-    const availableDate = isoDate(new Date(data.series[0].available_start_time));
-    if (availableDate > startInput.value) startInput.value = availableDate;
+  const coverageRange = (data) => {
+    const ranges = selectedSeries(data)
+      .filter((item) => item.available_start_time && item.available_end_time)
+      .map((item) => ({
+        start: new Date(item.available_start_time).getTime(),
+        end: new Date(item.available_end_time).getTime(),
+      }))
+      .filter(({ start, end }) => Number.isFinite(start) && Number.isFinite(end) && end > start);
+    if (!ranges.length) return null;
+    const start = Math.max(...ranges.map((range) => range.start));
+    const end = Math.min(...ranges.map((range) => range.end));
+    if (end <= start) return null;
+    return {
+      start: dateTimeInputValue(new Date(start)),
+      end: dateTimeInputValue(new Date(end)),
+    };
+  };
+  const alignRangeToCoverage = (data, start, end) => {
+    const coverage = coverageRange(data);
+    if (!coverage || (isValidRange(start, end)
+      && parseInputTimestamp(start) >= parseInputTimestamp(coverage.start)
+      && parseInputTimestamp(end) <= parseInputTimestamp(coverage.end))) return null;
+    return coverage;
   };
   const showPoint = (timestamp, value, unit, point) => {
     tooltip.textContent = `${formatTimestamp(timestamp)} · ${value} ${unit}`;
@@ -153,6 +186,18 @@
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("x", 4); label.setAttribute("y", y(value) + 4); label.setAttribute("class", "axis-label");
       label.textContent = value.toFixed(1); labels.append(label);
+    }
+    const timestamps = series.find((item) => item.timestamps.length)?.timestamps || [];
+    const tickCount = Math.min(5, timestamps.length);
+    for (let tick = 0; tick < tickCount; tick += 1) {
+      const index = tickCount === 1 ? 0 : Math.round(tick * (timestamps.length - 1) / (tickCount - 1));
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", x(index, timestamps.length));
+      label.setAttribute("y", "304");
+      label.setAttribute("class", "axis-label x-axis-label");
+      label.setAttribute("text-anchor", tick === 0 ? "start" : tick === tickCount - 1 ? "end" : "middle");
+      label.textContent = formatAxisTimestamp(timestamps[index]);
+      labels.append(label);
     }
     series.forEach((item, seriesIndex) => {
       const className = seriesClass(item, seriesIndex);
@@ -229,14 +274,14 @@
     });
   };
 
-  const load = async (start, end) => {
+  const load = async (start, end, correctionAttempted = false) => {
     content.hidden = true;
     setStatus(`Loading ${scenario === "forecast" ? "forecasts" : "imported actuals"}...`);
     diagnostic("debug", "data_load_started", { scenario, start, end });
     let requestId = "none";
     let responseStatus = "none";
     const params = new URLSearchParams({
-      start_time: `${start}T00:00:00Z`, end_time: `${nextDate(end)}T00:00:00Z`, scenario_kind: scenario,
+      start_time: utcTimestamp(start), end_time: utcTimestamp(end), scenario_kind: scenario,
     });
     try {
       const response = await fetch(`/api/v1/dashboard/data?${params}`);
@@ -246,7 +291,15 @@
       if (!response.ok) {
         throw new Error(data.detail || "The dashboard data could not be loaded.");
       }
-      adjustStartDate(data); renderHeader(data); renderDetails(data); renderChart(data); content.hidden = false;
+      const alignedRange = alignRangeToCoverage(data, start, end);
+      if (alignedRange && !correctionAttempted) {
+        startInput.value = alignedRange.start;
+        endInput.value = alignedRange.end;
+        diagnostic("info", "range_aligned_to_coverage", { scenario, start: alignedRange.start, end: alignedRange.end, requestId });
+        await load(alignedRange.start, alignedRange.end, true);
+        return;
+      }
+      renderHeader(data); renderDetails(data); renderChart(data); content.hidden = false;
       const count = selectedSeries(data).reduce((total, item) => total + item.values.filter((value) => value !== null).length, 0);
       diagnostic("debug", "data_load_completed", { scenario, status: data.status, series: selectedSeries(data).length, points: count, requestId });
       if (data.status === "unavailable") {
@@ -270,11 +323,15 @@
       const active = item === tab;
       item.classList.toggle("is-active", active); item.setAttribute("aria-selected", String(active));
     });
+    if (!isValidRange(startInput.value, endInput.value)) {
+      setStatus("End time must be later than the start time.", "error");
+      return;
+    }
     load(startInput.value, endInput.value);
   }));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (endInput.value < startInput.value) { setStatus("End date must be on or after the start date.", "error"); return; }
+    if (!isValidRange(startInput.value, endInput.value)) { setStatus("End time must be later than the start time.", "error"); return; }
     load(startInput.value, endInput.value);
   });
   renderHeader();

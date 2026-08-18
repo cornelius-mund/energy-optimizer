@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#10231f" />
-    <title>Energy data | Energy Optimizer</title>
+    <title>Energy dashboard | Energy Optimizer</title>
     <link rel="stylesheet" href="/dashboard/styles.css" />
   </head>
   <body>
@@ -12,7 +12,7 @@
       <header class="masthead">
         <div>
           <p class="eyebrow">Energy Optimizer / Field notes</p>
-          <h1>Historic energy data, without the guesswork.</h1>
+          <h1>Energy dashboard</h1>
           <p class="lede">
             Move between measured household load and the forecast inputs used for
             planning. Every point keeps its UTC timestamp and unit.
@@ -30,14 +30,14 @@
         <section class="controls" aria-labelledby="range-heading">
           <div class="section-heading">
             <p class="eyebrow">Time window</p>
-            <h2 id="range-heading">Choose a day or range</h2>
+            <h2 id="range-heading">Choose a UTC time window</h2>
           </div>
           <form id="range-form" class="range-form">
-            <label><span>Start</span><input id="start-date" name="start" type="date" required /></label>
-            <label><span>End</span><input id="end-date" name="end" type="date" required /></label>
+            <label><span>Start (UTC)</span><input id="start-date" name="start" type="datetime-local" step="3600" required /></label>
+            <label><span>End (UTC, exclusive)</span><input id="end-date" name="end" type="datetime-local" step="3600" required /></label>
             <button type="submit">Load data</button>
           </form>
-          <p class="range-help">Dates use UTC boundaries. The end date is included.</p>
+          <p class="range-help">Use UTC date and time boundaries. The end time is exclusive and must be later than the start.</p>
         </section>
       </section>
 

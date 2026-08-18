@@ -187,6 +187,8 @@ These are wholesale German market prices, not household tariffs: taxes, network
 charges, supplier margins, and feed-in adjustments are not included. The endpoint
 does not require an API key, but deployments should use a reasonable polling
 interval and configure `max_data_age_seconds` for freshness checks.
+The Forecast dashboard keeps the imported and exported price series separate while
+retaining the same timestamps and values for this single-market-price source.
 
 ### Normalized provider-data persistence
 
@@ -634,7 +636,7 @@ optional freshness threshold.
 ### Historic household-load dashboard
 
 Open `/dashboard/` to inspect imported household-load actuals. The dashboard
-supports a UTC day or inclusive date range and uses the read-only endpoint
+accepts UTC date-and-time boundaries, including sub-day ranges, and uses the read-only endpoint
 `GET /api/v1/historic/household-load?start_time=<inclusive>&end_time=<exclusive>`.
 The endpoint returns explicit hourly timestamps, `kW` values, source identity,
 requested and available coverage, retrieval metadata, validation status, and
@@ -649,6 +651,14 @@ The view labels the series as historic actuals and deliberately does not mix it
 with predicted inputs or optimization plans. The current slice displays
 household load; additional asset series can use the same dashboard contract as
 their provider imports become available.
+
+The range controls use an end-exclusive boundary: the end time must be later
+than the start time. If a requested actual or forecast range falls outside the
+available coverage, the dashboard replaces both controls with the available
+coverage and loads that range. If forecast coverage is unavailable, it keeps
+the unavailable state instead of inventing a range. The x-axis labels include
+each point's UTC date and time; chart points also expose their exact timestamp
+and value on pointer hover and keyboard focus.
 
 The dashboard also provides a Forecast tab backed by
 `GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify

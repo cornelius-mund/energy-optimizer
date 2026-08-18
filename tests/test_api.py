@@ -1,7 +1,7 @@
 """Tests for the HTTP API."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -15,7 +15,11 @@ from energy_optimizer.api import (
     configured_frontend_directory,
     dashboard_redirect,
 )
-from energy_optimizer.providers.interfaces import PvGenerationData, SourceMetadata
+from energy_optimizer.providers.interfaces import (
+    ElectricityPriceData,
+    PvGenerationData,
+    SourceMetadata,
+)
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
 
@@ -66,7 +70,7 @@ solver:
         response = client.get("/dashboard/")
 
     assert response.status_code == 200
-    assert "Historic energy data" in response.text
+    assert "Energy dashboard" in response.text
 
 
 def test_dashboard_serves_its_static_assets(
@@ -1012,6 +1016,99 @@ def test_forecast_dashboard_returns_pv_series_and_metadata(
     assert len(body["series"]) == 1
     assert body["series"][0]["scenario_kind"] == "forecast"
     assert body["series"][0]["values"] == [1.0, 2.0]
+
+
+def test_forecast_dashboard_returns_aligned_import_and_export_price_series(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = persistence_configuration(tmp_path)
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8") + "awattar: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    timestamps = (
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+    )
+    ProviderDataStore(tmp_path / "provider-data").save(
+        ProviderDataKey("electricity-prices", "awattar.de", "de"),
+        TypeAdapter(ElectricityPriceData),
+        ElectricityPriceData(
+            schema_version="1",
+            timestamps=timestamps,
+            interval_minutes=60,
+            import_price_eur_per_kwh=(0.10, 0.12),
+            export_price_eur_per_kwh=(0.10, 0.12),
+            unit="EUR/kWh",
+            source=SourceMetadata(provider="awattar.de", entity_id="de"),
+            retrieved_at=timestamps[0],
+            expires_at=timestamps[-1] + timedelta(hours=1),
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "forecast",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T02:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    series = {item["id"]: item for item in response.json()["series"]}
+    assert series["import_price_forecast"]["timestamps"] == [
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T01:00:00Z",
+    ]
+    assert series["import_price_forecast"]["values"] == [0.10, 0.12]
+    assert series["export_price_forecast"]["values"] == [0.10, 0.12]
+    assert series["import_price_forecast"]["unit"] == "EUR/kWh"
+    assert series["export_price_forecast"]["unit"] == "EUR/kWh"
+
+
+def test_forecast_dashboard_does_not_fabricate_an_empty_price_direction(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = persistence_configuration(tmp_path)
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8") + "awattar: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    ProviderDataStore(tmp_path / "provider-data").save(
+        ProviderDataKey("electricity-prices", "awattar.de", "de"),
+        TypeAdapter(ElectricityPriceData),
+        ElectricityPriceData(
+            schema_version="1",
+            timestamps=(start,),
+            interval_minutes=60,
+            import_price_eur_per_kwh=(0.10,),
+            export_price_eur_per_kwh=(),
+            unit="EUR/kWh",
+            source=SourceMetadata(provider="awattar.de", entity_id="de"),
+            retrieved_at=start,
+            expires_at=start + timedelta(hours=2),
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "forecast",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T01:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["series"]] == [
+        "import_price_forecast"
+    ]
 
 
 def test_forecast_dashboard_reports_unavailable_without_persistence(

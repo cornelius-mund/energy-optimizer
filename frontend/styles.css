@@ -47,7 +47,7 @@ h2 { margin-bottom: 0; font-size: 1.24rem; letter-spacing: -.025em; }
 .controls { display: grid; grid-template-columns: minmax(210px, 1fr) 2fr; gap: 20px 48px; align-items: end; padding: 26px 30px 23px; margin-bottom: 18px; }
 .range-form { display: flex; align-items: end; justify-content: end; gap: 12px; }
 label { display: grid; gap: 7px; color: var(--muted); font-size: .75rem; font-weight: 800; }
-input { width: 156px; padding: 11px 12px; border: 1px solid #c9d6cd; border-radius: 9px; color: var(--ink); background: #fff; font: inherit; }
+input { width: 210px; padding: 11px 12px; border: 1px solid #c9d6cd; border-radius: 9px; color: var(--ink); background: #fff; font: inherit; }
 input:focus, button:focus-visible, a:focus-visible { outline: 3px solid rgb(216 102 59 / 35%); outline-offset: 3px; }
 button { padding: 12px 17px; border: 0; border-radius: 9px; color: #fffdf8; background: var(--ink); font: inherit; font-size: .83rem; font-weight: 800; cursor: pointer; }
 button:hover { background: #28544b; }
@@ -72,6 +72,7 @@ svg { width: 100%; height: auto; overflow: visible; }
 .axis-unit { fill: var(--ink); font-size: 12px; font-weight: 800; }
 .grid-line { stroke: #dfe7e1; stroke-width: 1; }
 .axis-label { fill: #82918a; font-size: 12px; }
+.x-axis-label { font-size: 10px; }
 .area { fill: rgb(26 139 114 / 13%); }
 .line { fill: none; stroke: var(--green); stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
 .series-line { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }

@@ -9,6 +9,12 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     document = (FRONTEND / "index.html").read_text(encoding="utf-8")
 
     assert '<main class="shell">' in document
+    assert "<title>Energy dashboard | Energy Optimizer</title>" in document
+    assert "<h1>Energy dashboard</h1>" in document
+    assert document.count('type="datetime-local"') == 2
+    assert document.count('step="3600"') == 2
+    assert "End (UTC, exclusive)" in document
+    assert "The end time is exclusive" in document
     assert 'aria-live="polite"' in document
     assert 'id="chart"' in document
     assert 'id="power-chart"' in document
@@ -18,7 +24,10 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     assert 'role="tab"' in document
     javascript = (FRONTEND / "app.js").read_text(encoding="utf-8")
     assert "imported actuals" in javascript
-    assert "adjustStartDate" in javascript
+    assert "const alignRangeToCoverage = (data, start, end)" in javascript
+    assert "available_start_time" in javascript
+    assert "available_end_time" in javascript
+    assert "range_aligned_to_coverage" in javascript
     assert "point-tooltip" in document
     assert "pointerenter" in javascript
     assert 'setAttribute("tabindex", "0")' in javascript
@@ -53,6 +62,12 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     assert "price: series.filter" in javascript
     assert "item.textContent = `${label} (${unitForSeries(source)})`" in javascript
     assert "Missing intervals remain gaps." in javascript
+    assert "const formatAxisTimestamp = (value)" in javascript
+    assert "x-axis-label" in javascript
+    assert "start_time: utcTimestamp(start)" in javascript
+    assert "end_time: utcTimestamp(end)" in javascript
+    assert "End time must be later than the start time." in javascript
+    assert "if (!isValidRange(startInput.value, endInput.value))" in javascript
 
 
 def test_forecast_legend_is_data_driven() -> None:
