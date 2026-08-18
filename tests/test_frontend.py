@@ -89,6 +89,17 @@ def test_forecast_legend_is_data_driven() -> None:
     assert "labels.forEach(([" in javascript
 
 
+def test_forecast_coverage_preserves_price_windows_across_providers() -> None:
+    javascript = (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        "const start = Math.min(...ranges.map((range) => range.start));" in javascript
+    )
+    assert "const end = Math.max(...ranges.map((range) => range.end));" in javascript
+    assert "load(todayValue, tomorrowValue);" in javascript
+    assert "Missing intervals remain gaps" in javascript
+
+
 def test_dashboard_styles_define_mobile_layout() -> None:
     styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
 

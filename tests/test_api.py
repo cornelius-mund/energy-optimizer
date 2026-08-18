@@ -1069,6 +1069,72 @@ def test_forecast_dashboard_returns_aligned_import_and_export_price_series(
     assert series["export_price_forecast"]["unit"] == "EUR/kWh"
 
 
+def test_forecast_dashboard_preserves_prices_when_pv_coverage_starts_later(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    configuration = persistence_configuration(tmp_path)
+    configuration.write_text(
+        configuration.read_text(encoding="utf-8")
+        + "forecast_solar:\n"
+        + "  latitude: 52.52\n"
+        + "  longitude: 13.41\n"
+        + "  declination_degrees: 35\n"
+        + "  azimuth_degrees: 0\n"
+        + "  peak_power_kw: 8\n"
+        + "awattar: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    timestamps = (start, start + timedelta(hours=1))
+    store = ProviderDataStore(tmp_path / "provider-data")
+    store.save(
+        ProviderDataKey("pv-generation", "forecast.solar", "pv_generation"),
+        TypeAdapter(PvGenerationData),
+        PvGenerationData(
+            schema_version="1",
+            start_time=start + timedelta(hours=2),
+            interval_minutes=60,
+            generation_kw=(1.0, 2.0),
+            unit="kW",
+            source=SourceMetadata(provider="forecast.solar", entity_id="pv_generation"),
+            retrieved_at=start,
+            expires_at=start + timedelta(hours=5),
+        ),
+    )
+    store.save(
+        ProviderDataKey("electricity-prices", "awattar.de", "de"),
+        TypeAdapter(ElectricityPriceData),
+        ElectricityPriceData(
+            schema_version="1",
+            timestamps=timestamps,
+            interval_minutes=60,
+            import_price_eur_per_kwh=(0.10, 0.12),
+            export_price_eur_per_kwh=(0.10, 0.12),
+            unit="EUR/kWh",
+            source=SourceMetadata(provider="awattar.de", entity_id="de"),
+            retrieved_at=start,
+            expires_at=start + timedelta(hours=2),
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "forecast",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T04:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    series = {item["id"]: item for item in response.json()["series"]}
+    assert series["import_price_forecast"]["values"][:2] == [0.10, 0.12]
+    assert series["export_price_forecast"]["values"][:2] == [0.10, 0.12]
+    assert series["pv_generation_forecast"]["values"][:2] == [None, None]
+
+
 def test_forecast_dashboard_does_not_fabricate_an_empty_price_direction(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
