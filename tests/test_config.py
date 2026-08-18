@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from energy_optimizer.config import ConfigurationError, load_configuration
+from energy_optimizer.config import (
+    BatteryConstantConfiguration,
+    ConfigurationError,
+    HomeAssistantBatteryEntityConfiguration,
+    load_configuration,
+)
 
 CONFIG_MARKER = """  household_load_entities:
     - entity_id: sensor.household_load
@@ -210,8 +215,125 @@ def test_load_configuration_returns_battery_entity_mappings(tmp_path: Path) -> N
     assert configuration.home_assistant is not None
     assert configuration.home_assistant.battery is not None
     assert configuration.home_assistant.battery.state_of_charge.unit == "%"
-    assert configuration.home_assistant.battery.capacity.attribute == "capacity_kwh"
+    capacity = configuration.home_assistant.battery.capacity
+    assert isinstance(capacity, HomeAssistantBatteryEntityConfiguration)
+    assert capacity.attribute == "capacity_kwh"
     assert configuration.home_assistant.battery_source_id == "battery"
+
+
+def test_load_configuration_accepts_battery_constants(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            CONFIG_MARKER,
+            "  battery:\n"
+            "    state_of_charge:\n"
+            "      entity_id: sensor.battery_soc\n"
+            "      unit: '%'\n"
+            "    capacity:\n"
+            "      value: 28.7\n"
+            "      unit: kWh\n"
+            "    minimum_soc:\n"
+            "      value: 5\n"
+            "      unit: '%'\n"
+            "    maximum_soc:\n"
+            "      value: 100\n"
+            "      unit: '%'\n"
+            "    maximum_charge:\n"
+            "      value: 12\n"
+            "      unit: kW\n"
+            "    maximum_discharge:\n"
+            "      value: 12\n"
+            "      unit: kW\n"
+            "    charge_efficiency:\n"
+            "      value: 0.95\n"
+            "      unit: ratio\n"
+            "    discharge_efficiency:\n"
+            "      value: 0.9\n"
+            "      unit: ratio\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    battery = configuration.home_assistant.battery
+    assert battery is not None
+    assert isinstance(battery.capacity, BatteryConstantConfiguration)
+    assert battery.capacity.value == 28.7
+    assert battery.maximum_soc.unit == "%"
+
+
+def test_load_configuration_accepts_canonical_numeric_battery_constants(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            CONFIG_MARKER,
+            "  battery:\n"
+            "    state_of_charge:\n"
+            "      entity_id: sensor.battery_soc\n"
+            "      unit: '%'\n"
+            "    capacity: 28.7\n"
+            "    minimum_soc: 5\n"
+            "    maximum_soc: 100\n"
+            "    maximum_charge: 12\n"
+            "    maximum_discharge: 12\n"
+            "    charge_efficiency: 0.95\n"
+            "    discharge_efficiency: 0.9\n",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    battery = configuration.home_assistant.battery
+    assert battery is not None
+    assert isinstance(battery.capacity, BatteryConstantConfiguration)
+    assert battery.capacity.value == 28.7
+    assert battery.capacity.unit == "kWh"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("capacity", -1, "greater than zero"),
+        ("maximum_charge", 0, "greater than zero"),
+        ("minimum_soc", 101, "must not exceed 100"),
+        ("charge_efficiency", 1.1, "no greater than one"),
+    ],
+)
+def test_load_configuration_rejects_invalid_battery_constants(
+    tmp_path: Path,
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    path = tmp_path / "config.yaml"
+    document = VALID_CONFIGURATION.replace(
+        CONFIG_MARKER,
+        "  battery:\n"
+        "    state_of_charge:\n"
+        "      entity_id: sensor.battery_soc\n"
+        "      unit: '%'\n"
+        "    capacity: 28.7\n"
+        "    minimum_soc: 5\n"
+        "    maximum_soc: 100\n"
+        "    maximum_charge: 12\n"
+        "    maximum_discharge: 12\n"
+        "    charge_efficiency: 0.95\n"
+        "    discharge_efficiency: 0.9\n",
+    )
+    path.write_text(
+        document.replace(f"    {field}: ", f"    {field}: {value} # "),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match=message):
+        load_configuration(path)
 
 
 def test_load_configuration_rejects_invalid_battery_mapping_unit(

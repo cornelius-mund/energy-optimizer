@@ -96,40 +96,34 @@ home_assistant:
       operation: add
   # Long history ranges use contiguous requests of no more than seven days. The
   # orchestration lookback is applied only to the first request.
-  # Battery imports read the current state of each mapped Home Assistant entity.
-  # Values may be in the entity state or in a named attribute. The importer
-  # returns one current hourly value and persists the latest valid snapshot.
+  # Battery imports read the live state of the mapped Home Assistant entity.
+  # Static battery values may instead be constants using {value, unit}; numeric
+  # shorthand uses the canonical unit for the field. The importer returns one
+  # current hourly value and persists the latest valid snapshot.
   battery:
     state_of_charge:
       entity_id: sensor.battery_state_of_charge
       unit: '%'
     capacity:
-      entity_id: sensor.battery
-      attribute: capacity_kwh
+      value: 28.7
       unit: kWh
     minimum_soc:
-      entity_id: sensor.battery
-      attribute: minimum_soc_kwh
-      unit: kWh
+      value: 5
+      unit: '%'
     maximum_soc:
-      entity_id: sensor.battery
-      attribute: maximum_soc_kwh
-      unit: kWh
+      value: 100
+      unit: '%'
     maximum_charge:
-      entity_id: sensor.battery
-      attribute: maximum_charge_kw
+      value: 12
       unit: kW
     maximum_discharge:
-      entity_id: sensor.battery
-      attribute: maximum_discharge_kw
+      value: 12
       unit: kW
     charge_efficiency:
-      entity_id: sensor.battery
-      attribute: charge_efficiency
+      value: 0.95
       unit: ratio
     discharge_efficiency:
-      entity_id: sensor.battery
-      attribute: discharge_efficiency
+      value: 0.9
       unit: ratio
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.
