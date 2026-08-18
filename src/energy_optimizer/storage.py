@@ -647,7 +647,7 @@ def _slice_household_load(
         retrieved_at=_as_utc(data.retrieved_at),
         latest_observation_at=_as_utc(data.latest_observation_at),
         quality=_slice_quality(
-            data.quality, start_time, data.start_time, len(selected)
+            data.quality, selected[0][0], data.start_time, len(selected)
         ),
     )
 

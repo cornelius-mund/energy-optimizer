@@ -9,6 +9,7 @@ HOUSEHOLD_LOAD_MAX_VALUES = 87_672
 PV_GENERATION_SOURCE_ID = "pv_generation"
 GRID_FLOW_SOURCE_ID = "grid_flow"
 BATTERY_SOURCE_ID = "battery"
+ELECTRICITY_PRICE_SOURCE_ID = "de"
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ class PvGenerationData:
     source: SourceMetadata
     retrieved_at: datetime
     expires_at: datetime
+    generated_at: datetime | None = None
+    published_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,21 @@ class BatteryData:
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+
+
+@dataclass(frozen=True)
+class ElectricityPriceData:
+    """Normalized hourly electricity prices from a market provider."""
+
+    schema_version: Literal["1"]
+    timestamps: tuple[datetime, ...]
+    interval_minutes: Literal[60]
+    import_price_eur_per_kwh: tuple[float, ...]
+    export_price_eur_per_kwh: tuple[float, ...]
+    unit: Literal["EUR/kWh"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    expires_at: datetime
 
 
 class HouseholdLoadProvider(Protocol):
@@ -174,3 +192,24 @@ class BatteryProvider(Protocol):
         now: datetime | None = None,
     ) -> bool:
         """Report whether data is within the configured polling age threshold."""
+
+
+class ElectricityPriceProvider(Protocol):
+    """Retrieve normalized hourly electricity prices."""
+
+    def fetch(
+        self,
+        start_time: datetime,
+        end_time: datetime | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> ElectricityPriceData:
+        """Fetch prices for the requested half-open period."""
+
+    def is_fresh(
+        self,
+        data: ElectricityPriceData,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Report whether prices remain usable."""

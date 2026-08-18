@@ -29,6 +29,7 @@ src/energy_optimizer/
 │   ├── interfaces.py         # Provider contracts
 │   ├── http.py               # Shared bounded JSON HTTP requests
 │   ├── prices.py             # Electricity-price adapters
+│   ├── awattar.py            # German aWATTar EPEX Spot price adapter
 │   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast adapter
 │   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── home_assistant.py     # Household-load Home Assistant composition
@@ -225,6 +226,13 @@ stale observation remains usable historical actual data and is reported as
 stale, while corrupt or unrecoverable persistence is returned as a service
 error. The dashboard consumes this contract and labels its values as actuals;
 it does not infer provider semantics or combine forecasts and plans.
+
+The versioned dashboard read contract is exposed at
+`GET /api/v1/dashboard/data`. It uses one response envelope for actual,
+forecast, and plan scenarios, while each series carries its machine-readable
+scenario kind, unit, source or plan identity, requested and available coverage,
+freshness, validation status, and nullable missing intervals. Forecast reads use
+the latest complete persisted run and never combine overlapping provider runs.
 
 ### Optimization
 

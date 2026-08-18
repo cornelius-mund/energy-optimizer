@@ -327,9 +327,9 @@ def test_api_request_log_contains_request_context_and_not_request_body(
     configuration = tmp_path / "config.yaml"
     configuration.write_text(MINIMAL_CONFIGURATION, encoding="utf-8")
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
-    configure_logging("INFO")
+    configure_logging("DEBUG")
 
-    with caplog.at_level(logging.INFO, logger="energy_optimizer.api"):
+    with caplog.at_level(logging.DEBUG, logger="energy_optimizer.api"):
         with TestClient(app) as client:
             response = client.get(
                 "/health",
@@ -340,14 +340,16 @@ def test_api_request_log_contains_request_context_and_not_request_body(
         record
         for record in caplog.records
         if record.name == "energy_optimizer.api"
-        and record.getMessage().startswith("event=request_completed")
+        and record.getMessage().startswith("event=health_check_request")
     ]
     assert len(request_logs) == 1
+    assert request_logs[0].levelno == logging.DEBUG
     message = request_logs[0].getMessage()
     assert "method=GET" in message
     assert "path=/health" in message
     assert "status=200" in message
     assert "request_id=request-66" in message
+    assert "duration_ms=" in message
     assert response.headers["X-Request-ID"] == "request-66"
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "event=service_started" in messages
@@ -380,6 +382,29 @@ def test_api_failure_log_uses_error_level_without_payload(
     assert len(request_logs) == 1
     assert request_logs[0].levelno == logging.WARNING
     assert "do-not-log-this" not in request_logs[0].getMessage()
+
+
+def test_successful_non_health_request_remains_info(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(MINIMAL_CONFIGURATION, encoding="utf-8")
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    configure_logging("DEBUG")
+
+    with caplog.at_level(logging.DEBUG, logger="energy_optimizer.api"):
+        with TestClient(app) as client:
+            response = client.get("/dashboard", follow_redirects=False)
+
+    assert response.status_code == 307
+    request_logs = [
+        record
+        for record in caplog.records
+        if record.name == "energy_optimizer.api"
+        and record.getMessage().startswith("event=request_completed")
+    ]
+    assert len(request_logs) == 1
+    assert request_logs[0].levelno == logging.INFO
 
 
 def test_provider_failure_log_excludes_token_and_raw_state(

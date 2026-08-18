@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Annotated, AsyncIterator, Awaitable, Callable, Literal
+from typing import Annotated, AsyncIterator, Awaitable, Callable, Literal, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -28,9 +28,11 @@ from energy_optimizer.config import ConfigurationError, load_configuration
 from energy_optimizer.logging_config import configure_logging
 from energy_optimizer.orchestration import build_configured_orchestrator
 from energy_optimizer.providers.interfaces import (
+    ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
     IntervalQuality,
+    PvGenerationData,
 )
 from energy_optimizer.providers.interfaces import (
     SourceMetadata as ProviderSourceMetadata,
@@ -427,8 +429,84 @@ class HistoricHouseholdLoadResponse(BaseModel):
     freshness_checked_at: datetime
 
 
+class DashboardSeries(BaseModel):
+    """One aligned, provider-independent dashboard series."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    data_type: str = Field(min_length=1)
+    scenario_kind: Literal["actual", "forecast", "plan"]
+    timestamps: list[datetime]
+    values: list[float | None]
+    unit: str = Field(min_length=1)
+    source: SourceMetadata | None = None
+    requested_start_time: datetime
+    requested_end_time: datetime
+    available_start_time: datetime | None
+    available_end_time: datetime | None
+    retrieved_at: datetime | None
+    generated_at: datetime | None = None
+    published_at: datetime | None = None
+    freshness: Literal["fresh", "stale", "unknown"]
+    validation_status: Literal["valid", "suspect", "invalid"]
+    missing_intervals: list[datetime] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_series_alignment(self) -> "DashboardSeries":
+        """Require one value, including null gaps, for every timestamp."""
+        if len(self.timestamps) != len(self.values):
+            raise ValueError("timestamps and values must have the same length")
+        if any(
+            timestamp.tzinfo is None or timestamp.utcoffset() is None
+            for timestamp in self.timestamps
+        ):
+            raise ValueError("series timestamps must include a timezone")
+        if any(
+            later <= earlier
+            for earlier, later in zip(self.timestamps, self.timestamps[1:])
+        ):
+            raise ValueError("series timestamps must be in ascending order")
+        return self
+
+
+class DashboardPlanSummary(BaseModel):
+    """Optional plan-level diagnostics shared by dashboard consumers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["available", "empty", "infeasible", "unavailable"]
+    objective_value: float | None = None
+    diagnostics: list[str] = Field(default_factory=list)
+
+
+class DashboardDataResponse(BaseModel):
+    """Versioned read contract for actual, forecast, and plan dashboard data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"]
+    status: Literal[
+        "validated",
+        "partial",
+        "stale",
+        "empty",
+        "unavailable",
+        "invalid",
+        "infeasible",
+    ]
+    requested_start_time: datetime
+    requested_end_time: datetime
+    interval_minutes: Literal[60]
+    series: list[DashboardSeries]
+    diagnostics: list[str] = Field(default_factory=list)
+    plan_summary: DashboardPlanSummary | None = None
+
+
 HOUSEHOLD_LOAD_ADAPTER = TypeAdapter(HouseholdLoadData)
 GRID_FLOW_ADAPTER = TypeAdapter(GridFlowData)
+PV_GENERATION_ADAPTER = TypeAdapter(PvGenerationData)
+ELECTRICITY_PRICE_ADAPTER = TypeAdapter(ElectricityPriceData)
 
 
 class PvGenerationRequest(BaseModel):
@@ -707,12 +785,20 @@ async def log_requests(
         level = logging.ERROR
     elif status_code >= 400:
         level = logging.WARNING
+    elif request.method == "GET" and request.url.path == "/health":
+        level = logging.DEBUG
     else:
         level = logging.INFO
+    event = (
+        "health_check_request"
+        if request.method == "GET" and request.url.path == "/health"
+        else "request_completed"
+    )
     logger.log(
         level,
-        "event=request_completed component=api operation=request method=%s "
+        "event=%s component=api operation=request method=%s "
         "path=%s status=%s request_id=%s duration_ms=%.2f",
+        event,
         request.method,
         request.url.path,
         status_code,
@@ -1103,6 +1189,347 @@ def _household_load_freshness(
         datetime.now(timezone.utc) - data.latest_observation_at.astimezone(timezone.utc)
     ).total_seconds()
     return "fresh" if age_seconds <= max_age_seconds else "stale"
+
+
+def _dashboard_source(data: object) -> SourceMetadata:
+    """Map normalized provider identity to the dashboard response model."""
+    source = getattr(data, "source", None)
+    if not isinstance(source, ProviderSourceMetadata):
+        raise ProviderDataStoreError("normalized dashboard data has no source identity")
+    return SourceMetadata(provider=source.provider, entity_id=source.entity_id)
+
+
+def _dashboard_range(
+    start_time: datetime,
+    end_time: datetime,
+) -> tuple[datetime, datetime]:
+    """Validate and normalize one dashboard half-open hourly range."""
+    if any(
+        timestamp.tzinfo is None or timestamp.utcoffset() is None
+        for timestamp in (start_time, end_time)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="start_time and end_time must include a timezone",
+        )
+    start = start_time.astimezone(timezone.utc)
+    end = end_time.astimezone(timezone.utc)
+    if (
+        start.minute
+        or start.second
+        or start.microsecond
+        or end.minute
+        or end.second
+        or end.microsecond
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="dashboard range boundaries must be aligned to the hour",
+        )
+    if end <= start:
+        raise HTTPException(
+            status_code=422, detail="end_time must be later than start_time"
+        )
+    if end - start > timedelta(hours=MAX_HORIZON_HOURS):
+        raise HTTPException(
+            status_code=422,
+            detail=f"requested range must not exceed {MAX_HORIZON_HOURS} hours",
+        )
+    return start, end
+
+
+def _dashboard_response(
+    start: datetime,
+    end: datetime,
+    series: list[DashboardSeries],
+    diagnostics: list[str],
+    *,
+    plan_summary: DashboardPlanSummary | None = None,
+) -> DashboardDataResponse:
+    """Build the common envelope from explicit series states."""
+    if not series:
+        status: Literal[
+            "validated",
+            "partial",
+            "stale",
+            "empty",
+            "unavailable",
+            "invalid",
+            "infeasible",
+        ] = (
+            "invalid"
+            if any("invalid" in diagnostic for diagnostic in diagnostics)
+            else ("unavailable" if diagnostics else "empty")
+        )
+    elif any(item.freshness == "stale" for item in series):
+        status = "stale"
+    elif any(not item.timestamps for item in series):
+        status = "empty"
+    elif any(
+        (item.available_start_time is not None and item.available_start_time > start)
+        or (item.available_end_time is not None and item.available_end_time < end)
+        for item in series
+    ) or any(item.missing_intervals for item in series):
+        status = "partial"
+    else:
+        status = "validated"
+    return DashboardDataResponse(
+        schema_version="1",
+        status=status,
+        requested_start_time=start,
+        requested_end_time=end,
+        interval_minutes=60,
+        series=series,
+        diagnostics=diagnostics,
+        plan_summary=plan_summary,
+    )
+
+
+def _household_dashboard_series(
+    data: HistoricHouseholdLoadResponse,
+) -> DashboardSeries:
+    """Map the historic household-load response to the unified series shape."""
+    return DashboardSeries(
+        id="household_load_actual",
+        data_type="household_load",
+        scenario_kind="actual",
+        timestamps=data.timestamps,
+        values=cast(list[float | None], data.load_kw),
+        unit=data.unit,
+        source=data.source,
+        requested_start_time=data.start_time,
+        requested_end_time=data.end_time,
+        available_start_time=data.available_start_time,
+        available_end_time=data.available_end_time,
+        retrieved_at=data.retrieved_at,
+        freshness=data.freshness,
+        validation_status=data.validation_status,
+        missing_intervals=[
+            data.start_time + timedelta(hours=index)
+            for index in range(
+                int((data.end_time - data.start_time).total_seconds() // 3600)
+            )
+            if data.start_time + timedelta(hours=index) not in data.timestamps
+        ],
+    )
+
+
+def _pv_dashboard_series(
+    data: PvGenerationData,
+    start: datetime,
+    end: datetime,
+    freshness: Literal["fresh", "stale", "unknown"],
+) -> DashboardSeries:
+    """Map a persisted PV forecast to the common series shape."""
+    timestamps = [
+        data.start_time + timedelta(hours=index)
+        for index in range(len(data.generation_kw))
+    ]
+    values_by_timestamp = dict(zip(timestamps, data.generation_kw))
+    requested_timestamps = [
+        start + timedelta(hours=index)
+        for index in range(int((end - start).total_seconds() // 3600))
+    ]
+    selected = [
+        (timestamp, values_by_timestamp.get(timestamp))
+        for timestamp in requested_timestamps
+    ]
+    available_end = data.start_time + timedelta(hours=len(data.generation_kw))
+    return DashboardSeries(
+        id="pv_generation_forecast",
+        data_type="pv_generation",
+        scenario_kind="forecast",
+        timestamps=[timestamp for timestamp, _ in selected],
+        values=[value for _, value in selected],
+        unit=data.unit,
+        source=_dashboard_source(data),
+        requested_start_time=start,
+        requested_end_time=end,
+        available_start_time=data.start_time,
+        available_end_time=available_end,
+        retrieved_at=data.retrieved_at,
+        generated_at=data.generated_at,
+        published_at=data.published_at,
+        freshness=freshness,
+        validation_status="valid",
+        missing_intervals=[timestamp for timestamp, value in selected if value is None],
+    )
+
+
+def _price_dashboard_series(
+    data: ElectricityPriceData,
+    start: datetime,
+    end: datetime,
+    direction: Literal["import", "export"],
+    freshness: Literal["fresh", "stale", "unknown"],
+) -> DashboardSeries:
+    """Map one normalized price direction to a forecast series."""
+    values = (
+        data.import_price_eur_per_kwh
+        if direction == "import"
+        else data.export_price_eur_per_kwh
+    )
+    values_by_timestamp = dict(zip(data.timestamps, values))
+    requested_timestamps = [
+        start + timedelta(hours=index)
+        for index in range(int((end - start).total_seconds() // 3600))
+    ]
+    selected = [
+        (timestamp, values_by_timestamp.get(timestamp))
+        for timestamp in requested_timestamps
+    ]
+    return DashboardSeries(
+        id=f"{direction}_price_forecast",
+        data_type=f"{direction}_price",
+        scenario_kind="forecast",
+        timestamps=[timestamp for timestamp, _ in selected],
+        values=[value for _, value in selected],
+        unit=data.unit,
+        source=_dashboard_source(data),
+        requested_start_time=start,
+        requested_end_time=end,
+        available_start_time=data.timestamps[0],
+        available_end_time=data.timestamps[-1] + timedelta(hours=1),
+        retrieved_at=data.retrieved_at,
+        freshness=freshness,
+        validation_status="valid",
+        missing_intervals=[timestamp for timestamp, value in selected if value is None],
+    )
+
+
+def _forecast_dashboard_data(
+    request: Request,
+    start: datetime,
+    end: datetime,
+) -> DashboardDataResponse:
+    """Load the latest coherent persisted forecast series."""
+    configuration = request.app.state.configuration
+    store = request.app.state.provider_data_store
+    if store is None:
+        return _dashboard_response(
+            start, end, [], ["forecast data persistence is not configured"]
+        )
+
+    series: list[DashboardSeries] = []
+    diagnostics: list[str] = []
+    if configuration.forecast_solar is not None:
+        key = ProviderDataKey(
+            data_type="pv-generation",
+            provider="forecast.solar",
+            entity_id=configuration.forecast_solar.pv_generation_source_id,
+        )
+        try:
+            data = store.load(key, PV_GENERATION_ADAPTER)
+        except ProviderDataStoreError:
+            data = None
+            diagnostics.append("PV forecast data is invalid and could not be recovered")
+        if data is None:
+            diagnostics.append("PV forecast data is unavailable")
+        else:
+            from energy_optimizer.providers.forecast_solar import ForecastSolarImporter
+
+            importer = ForecastSolarImporter(configuration.forecast_solar)
+            freshness: Literal["fresh", "stale", "unknown"] = (
+                "fresh" if importer.is_fresh(data) else "stale"
+            )
+            series.append(_pv_dashboard_series(data, start, end, freshness))
+
+    if configuration.awattar is not None:
+        key = ProviderDataKey(
+            data_type="electricity-prices",
+            provider="awattar.de",
+            entity_id=configuration.awattar.electricity_price_source_id,
+        )
+        try:
+            data = store.load(key, ELECTRICITY_PRICE_ADAPTER)
+        except ProviderDataStoreError:
+            data = None
+            diagnostics.append(
+                "electricity-price forecast data is invalid and could not be recovered"
+            )
+        if data is None:
+            diagnostics.append("electricity-price forecast data is unavailable")
+        else:
+            from energy_optimizer.providers.awattar import AwattarImporter
+
+            price_importer = AwattarImporter(configuration.awattar)
+            price_freshness: Literal["fresh", "stale", "unknown"] = (
+                "fresh" if price_importer.is_fresh(data) else "stale"
+            )
+            series.extend(
+                (
+                    _price_dashboard_series(
+                        data, start, end, "import", price_freshness
+                    ),
+                    _price_dashboard_series(
+                        data, start, end, "export", price_freshness
+                    ),
+                )
+            )
+    return _dashboard_response(start, end, series, diagnostics)
+
+
+@app.get(
+    "/api/v1/dashboard/data",
+    response_model=DashboardDataResponse,
+    responses={503: {"description": "Dashboard data persistence is unavailable"}},
+)
+def dashboard_data(
+    request: Request,
+    start_time: datetime = Query(description="Inclusive timezone-aware range start"),
+    end_time: datetime = Query(description="Exclusive timezone-aware range end"),
+    scenario_kind: Literal["actual", "forecast", "plan"] = Query("actual"),
+) -> DashboardDataResponse:
+    """Return the versioned dashboard contract without mixing scenarios."""
+    start, end = _dashboard_range(start_time, end_time)
+    if scenario_kind == "forecast":
+        return _forecast_dashboard_data(request, start, end)
+    if scenario_kind == "plan":
+        return _dashboard_response(
+            start,
+            end,
+            [],
+            ["optimization plan data is unavailable"],
+            plan_summary=DashboardPlanSummary(status="unavailable"),
+        )
+    if request.app.state.provider_data_store is None:
+        return _dashboard_response(
+            start,
+            end,
+            [],
+            ["household-load data persistence is not configured"],
+        )
+    try:
+        actuals = historic_household_load(request, start, end)
+    except HTTPException as error:
+        if error.status_code in {404, 503}:
+            return _dashboard_response(start, end, [], [str(error.detail)])
+        raise
+    return _dashboard_response(
+        start,
+        end,
+        [_household_dashboard_series(actuals)],
+        (
+            ["no household-load points are available in the requested range"]
+            if actuals.status == "empty"
+            else []
+        ),
+    )
+
+
+@app.get(
+    "/api/v1/forecast",
+    response_model=DashboardDataResponse,
+    include_in_schema=False,
+)
+def forecast_data(
+    request: Request,
+    start_time: datetime = Query(description="Inclusive timezone-aware range start"),
+    end_time: datetime = Query(description="Exclusive timezone-aware range end"),
+) -> DashboardDataResponse:
+    """Return forecast data through the dashboard forecast read path."""
+    start, end = _dashboard_range(start_time, end_time)
+    return _forecast_dashboard_data(request, start, end)
 
 
 @app.post("/api/v1/pv-generation", response_model=PvGenerationResponse)

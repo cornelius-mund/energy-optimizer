@@ -38,6 +38,9 @@ orchestration:
     pv_generation:
       enabled: true
       interval_seconds: 3600
+    electricity_prices:
+      enabled: true
+      interval_seconds: 3600
   optimization:
     # Enable after an optimization plan generator is available.
     enabled: false
@@ -53,6 +56,13 @@ forecast_solar:
   declination_degrees: 35
   azimuth_degrees: 0
   peak_power_kw: 8
+  timeout_seconds: 10
+  max_data_age_seconds: 7200
+
+# Optional German EPEX Spot market prices from aWATTar. No API key is required.
+# Values are wholesale EUR/MWh converted to the normalized EUR/kWh contract.
+awattar:
+  base_url: https://api.awattar.de/v1/marketdata
   timeout_seconds: 10
   max_data_age_seconds: 7200
 

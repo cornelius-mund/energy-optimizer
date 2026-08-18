@@ -173,6 +173,56 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/dashboard/data:
+    get:
+      summary: Dashboard Data
+      description: Return the versioned dashboard contract without mixing scenarios.
+      operationId: dashboard_data_api_v1_dashboard_data_get
+      parameters:
+      - name: start_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          description: Inclusive timezone-aware range start
+          title: Start Time
+        description: Inclusive timezone-aware range start
+      - name: end_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          description: Exclusive timezone-aware range end
+          title: End Time
+        description: Exclusive timezone-aware range end
+      - name: scenario_kind
+        in: query
+        required: false
+        schema:
+          enum:
+          - actual
+          - forecast
+          - plan
+          type: string
+          default: actual
+          title: Scenario Kind
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardDataResponse'
+        '503':
+          description: Dashboard data persistence is unavailable
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/pv-generation:
     post:
       summary: Pv Generation
@@ -426,6 +476,201 @@ components:
       - power_unit
       title: BatteryResponse
       description: Response returned after battery data passes validation.
+    DashboardDataResponse:
+      properties:
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+        status:
+          type: string
+          enum:
+          - validated
+          - partial
+          - stale
+          - empty
+          - unavailable
+          - invalid
+          - infeasible
+          title: Status
+        requested_start_time:
+          type: string
+          format: date-time
+          title: Requested Start Time
+        requested_end_time:
+          type: string
+          format: date-time
+          title: Requested End Time
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+        series:
+          items:
+            $ref: '#/components/schemas/DashboardSeries'
+          type: array
+          title: Series
+        diagnostics:
+          items:
+            type: string
+          type: array
+          title: Diagnostics
+        plan_summary:
+          anyOf:
+          - $ref: '#/components/schemas/DashboardPlanSummary'
+          - type: 'null'
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - status
+      - requested_start_time
+      - requested_end_time
+      - interval_minutes
+      - series
+      title: DashboardDataResponse
+      description: Versioned read contract for actual, forecast, and plan dashboard
+        data.
+    DashboardPlanSummary:
+      properties:
+        status:
+          type: string
+          enum:
+          - available
+          - empty
+          - infeasible
+          - unavailable
+          title: Status
+        objective_value:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Objective Value
+        diagnostics:
+          items:
+            type: string
+          type: array
+          title: Diagnostics
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      title: DashboardPlanSummary
+      description: Optional plan-level diagnostics shared by dashboard consumers.
+    DashboardSeries:
+      properties:
+        id:
+          type: string
+          minLength: 1
+          title: Id
+        data_type:
+          type: string
+          minLength: 1
+          title: Data Type
+        scenario_kind:
+          type: string
+          enum:
+          - actual
+          - forecast
+          - plan
+          title: Scenario Kind
+        timestamps:
+          items:
+            type: string
+            format: date-time
+          type: array
+          title: Timestamps
+        values:
+          items:
+            anyOf:
+            - type: number
+            - type: 'null'
+          type: array
+          title: Values
+        unit:
+          type: string
+          minLength: 1
+          title: Unit
+        source:
+          anyOf:
+          - $ref: '#/components/schemas/SourceMetadata'
+          - type: 'null'
+        requested_start_time:
+          type: string
+          format: date-time
+          title: Requested Start Time
+        requested_end_time:
+          type: string
+          format: date-time
+          title: Requested End Time
+        available_start_time:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Available Start Time
+        available_end_time:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Available End Time
+        retrieved_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Retrieved At
+        generated_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Generated At
+        published_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Published At
+        freshness:
+          type: string
+          enum:
+          - fresh
+          - stale
+          - unknown
+          title: Freshness
+        validation_status:
+          type: string
+          enum:
+          - valid
+          - suspect
+          - invalid
+          title: Validation Status
+        missing_intervals:
+          items:
+            type: string
+            format: date-time
+          type: array
+          title: Missing Intervals
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - data_type
+      - scenario_kind
+      - timestamps
+      - values
+      - unit
+      - requested_start_time
+      - requested_end_time
+      - available_start_time
+      - available_end_time
+      - retrieved_at
+      - freshness
+      - validation_status
+      title: DashboardSeries
+      description: One aligned, provider-independent dashboard series.
     ElectricityPriceRequest:
       properties:
         schema_version:

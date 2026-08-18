@@ -6,7 +6,7 @@ from pathlib import Path
 DOCKERFILE = Path(__file__).parents[1] / "Dockerfile"
 
 
-def test_healthcheck_runs_every_minute_with_existing_probe_settings() -> None:
+def test_healthcheck_runs_every_ten_seconds_with_existing_probe_settings() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
     match = re.search(
@@ -16,7 +16,7 @@ def test_healthcheck_runs_every_minute_with_existing_probe_settings() -> None:
 
     assert match is not None
     assert match.group("options") == (
-        "--interval=60s --timeout=3s --start-period=5s --retries=3"
+        "--interval=10s --timeout=3s --start-period=5s --retries=3"
     )
     assert match.group("command") == (
         'python -c "import urllib.request; '
