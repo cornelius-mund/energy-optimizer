@@ -168,7 +168,7 @@
   const renderGraph = (definition, series) => {
     const { element, grid, labels, points, seriesPaths, axisUnit, title, description } = definition;
     grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
-    element.hidden = false;
+      element.removeAttribute("hidden");
     const unit = unitForSeries(series[0]);
     axisUnit.textContent = unit;
     title.textContent = `${series.map(seriesLabel).join(" and ")} (${unit})`;
@@ -227,7 +227,7 @@
 
   const renderChart = (data) => {
     Object.values(chartDefinitions).forEach(({ element, grid, labels, points, seriesPaths }) => {
-      element.hidden = true;
+      element.setAttribute("hidden", "");
       grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
     });
     hidePoint();
