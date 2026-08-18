@@ -110,13 +110,14 @@ class AwattarNormalizer:
             )
 
         timestamps = tuple(interval[0] for interval in selected)
-        prices = tuple(interval[2] for interval in selected)
+        market_prices = tuple(interval[2] for interval in selected)
         return ElectricityPriceData(
             schema_version="1",
             timestamps=timestamps,
             interval_minutes=60,
-            import_price_eur_per_kwh=prices,
-            export_price_eur_per_kwh=prices,
+            # aWATTar provides one market price, which applies to both directions.
+            import_price_eur_per_kwh=market_prices,
+            export_price_eur_per_kwh=market_prices,
             unit="EUR/kWh",
             source=SourceMetadata(
                 provider="awattar.de", entity_id=ELECTRICITY_PRICE_SOURCE_ID
