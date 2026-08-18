@@ -113,6 +113,13 @@ def test_dashboard_initial_empty_state_does_not_format_missing_series() -> None:
     )
 
 
+def test_dashboard_toggles_svg_visibility_attributes_explicitly() -> None:
+    javascript = (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    assert 'element.removeAttribute("hidden");' in javascript
+    assert 'element.setAttribute("hidden", "");' in javascript
+
+
 def test_dashboard_styles_define_mobile_layout() -> None:
     styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
 
