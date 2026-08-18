@@ -92,6 +92,8 @@ def _seed_forecasts(
     start: datetime,
     *,
     price_start: datetime | None = None,
+    import_prices: tuple[float, ...] = (0.18, 0.22),
+    export_prices: tuple[float, ...] = (0.08, 0.10),
 ) -> None:
     """Seed normalized forecast records as a real provider would persist them."""
     retrieved_at = datetime.now(UTC)
@@ -111,9 +113,11 @@ def _seed_forecasts(
             expires_at=start + timedelta(hours=2),
         ),
     )
-    timestamps = (
-        effective_price_start,
-        effective_price_start + timedelta(hours=1),
+    if len(import_prices) != len(export_prices):
+        raise ValueError("price directions must contain the same number of values")
+    timestamps = tuple(
+        effective_price_start + timedelta(hours=index)
+        for index in range(len(import_prices))
     )
     store.save(
         ProviderDataKey("electricity-prices", "awattar.de", "de"),
@@ -122,8 +126,8 @@ def _seed_forecasts(
             schema_version="1",
             timestamps=timestamps,
             interval_minutes=60,
-            import_price_eur_per_kwh=(0.18, 0.22),
-            export_price_eur_per_kwh=(0.08, 0.10),
+            import_price_eur_per_kwh=import_prices,
+            export_price_eur_per_kwh=export_prices,
             unit="EUR/kWh",
             source=SourceMetadata(provider="awattar.de", entity_id="de"),
             retrieved_at=retrieved_at,
@@ -170,6 +174,60 @@ def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) 
     expect(page.locator("#legend")).to_contain_text("PV generation (kW)")
     expect(page.locator("#legend")).to_contain_text("Import price (EUR/kWh)")
     expect(page.locator("#legend")).to_contain_text("Export price (EUR/kWh)")
+    price_ticks = page.locator("#price-labels .axis-label:not(.x-axis-label)")
+    expect(price_ticks).to_have_count(5)
+    tick_labels = price_ticks.all_text_contents()
+    tick_values = [float(label) for label in tick_labels]
+    assert min(tick_values) <= 0.08
+    assert max(tick_values) >= 0.22
+    assert max(tick_values) < 0.5
+    assert all(len(label.rsplit(".", 1)[-1]) >= 2 for label in tick_labels)
+
+
+def test_price_axis_handles_negative_flat_values(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify a flat negative price series gets a finite focused domain."""
+    start, end = _window()
+    _seed_forecasts(
+        e2e_server,
+        start,
+        import_prices=(-0.10, -0.10),
+        export_prices=(-0.10, -0.10),
+    )
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    page.locator("#forecast-tab").click()
+    _load_range(page, start, end)
+
+    price_ticks = page.locator("#price-labels .axis-label:not(.x-axis-label)")
+    expect(price_ticks).to_have_count(5)
+    tick_values = [float(label) for label in price_ticks.all_text_contents()]
+    assert min(tick_values) < -0.10
+    assert max(tick_values) > -0.10
+    assert max(tick_values) < 0
+
+
+def test_price_axis_handles_flat_zero_values(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify a flat zero price series gets a domain on both sides of zero."""
+    start, end = _window()
+    _seed_forecasts(
+        e2e_server,
+        start,
+        import_prices=(0.0, 0.0),
+        export_prices=(0.0, 0.0),
+    )
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    page.locator("#forecast-tab").click()
+    _load_range(page, start, end)
+
+    price_ticks = page.locator("#price-labels .axis-label:not(.x-axis-label)")
+    expect(price_ticks).to_have_count(5)
+    tick_values = [float(label) for label in price_ticks.all_text_contents()]
+    assert min(tick_values) < 0 < max(tick_values)
 
 
 def test_invalid_range_is_rejected_without_an_api_request(
@@ -264,6 +322,11 @@ def test_partial_coverage_is_shown_as_a_gap(e2e_server: LiveServer, page: Page) 
     expect(page.locator("#status")).to_have_class("status warning")
     expect(page.locator("#power-points circle")).to_have_count(2)
     expect(page.locator("#price-points circle")).to_have_count(4)
+    price_ticks = page.locator("#price-labels .axis-label:not(.x-axis-label)")
+    expect(price_ticks).to_have_count(5)
+    assert all(
+        float(label) == float(label) for label in price_ticks.all_text_contents()
+    )
     for path in page.locator(".series-line").all():
         path_data = path.get_attribute("d")
         assert path_data is not None
