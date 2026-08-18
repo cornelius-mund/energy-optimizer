@@ -1386,13 +1386,19 @@ def _price_dashboard_series(
     end: datetime,
     direction: Literal["import", "export"],
     freshness: Literal["fresh", "stale", "unknown"],
-) -> DashboardSeries:
+) -> DashboardSeries | None:
     """Map one normalized price direction to a forecast series."""
     values = (
         data.import_price_eur_per_kwh
         if direction == "import"
         else data.export_price_eur_per_kwh
     )
+    if not values:
+        return None
+    if len(data.timestamps) != len(values):
+        raise ProviderDataStoreError(
+            f"persisted {direction}-price forecast values are misaligned"
+        )
     values_by_timestamp = dict(zip(data.timestamps, values))
     requested_timestamps = [
         start + timedelta(hours=index)
@@ -1486,16 +1492,19 @@ def _forecast_dashboard_data(
             price_freshness: Literal["fresh", "stale", "unknown"] = (
                 "fresh" if price_importer.is_fresh(data) else "stale"
             )
-            series.extend(
-                (
-                    _price_dashboard_series(
-                        data, start, end, "import", price_freshness
-                    ),
-                    _price_dashboard_series(
-                        data, start, end, "export", price_freshness
-                    ),
-                )
-            )
+            for direction in ("import", "export"):
+                try:
+                    direction_series = _price_dashboard_series(
+                        data, start, end, direction, price_freshness
+                    )
+                except ProviderDataStoreError:
+                    diagnostics.append(
+                        f"{direction}-price forecast data is invalid and could not "
+                        "be recovered"
+                    )
+                    continue
+                if direction_series is not None:
+                    series.append(direction_series)
     response = _dashboard_response(start, end, series, diagnostics)
     if response.status == "unavailable":
         logger.warning(

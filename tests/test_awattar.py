@@ -82,6 +82,7 @@ def test_fetch_keeps_all_intervals_when_retrieval_is_before_first_hour() -> None
 
     assert data.timestamps == (START, START + timedelta(hours=1))
     assert data.import_price_eur_per_kwh == (0.1, 0.12)
+    assert data.export_price_eur_per_kwh == data.import_price_eur_per_kwh
 
 
 @pytest.mark.parametrize(

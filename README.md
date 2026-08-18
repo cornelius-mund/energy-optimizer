@@ -187,6 +187,8 @@ These are wholesale German market prices, not household tariffs: taxes, network
 charges, supplier margins, and feed-in adjustments are not included. The endpoint
 does not require an API key, but deployments should use a reasonable polling
 interval and configure `max_data_age_seconds` for freshness checks.
+The Forecast dashboard keeps the imported and exported price series separate while
+retaining the same timestamps and values for this single-market-price source.
 
 ### Normalized provider-data persistence
 
