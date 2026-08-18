@@ -26,6 +26,10 @@ from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    HomeAssistantBatteryEfficiencyImporter,
+    calculate_battery_efficiency,
+)
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
@@ -33,6 +37,8 @@ from energy_optimizer.providers.home_assistant_grid_flow import (
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryData,
+    BatteryEfficiencyData,
+    BatteryEfficiencyHistoryData,
     ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
@@ -775,7 +781,17 @@ def _build_battery_registration(
         schedule: DataSourceScheduleConfiguration,
     ) -> BatteryData:
         del schedule
-        return importer.fetch(now=now)
+        efficiency_data = store.load(
+            ProviderDataKey(
+                data_type="battery-efficiency",
+                provider="home-assistant",
+                entity_id="battery_efficiency",
+            ),
+            TypeAdapter(BatteryEfficiencyData),
+        )
+        if efficiency_data is None:
+            return importer.fetch(now=now)
+        return importer.fetch(now=now, efficiency_data=efficiency_data)
 
     def load() -> BatteryData | None:
         return store.load(key, adapter)
@@ -791,12 +807,106 @@ def _build_battery_registration(
     )
 
 
+def _build_battery_efficiency_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    battery = home_assistant.battery if home_assistant is not None else None
+    calculation = battery.efficiency_calculation if battery is not None else None
+    if (
+        home_assistant is None
+        or calculation is None
+        or "battery_efficiency" not in orchestration.sources
+    ):
+        return None
+
+    importer = HomeAssistantBatteryEfficiencyImporter(home_assistant)
+    history_adapter = TypeAdapter(BatteryEfficiencyHistoryData)
+    result_adapter = TypeAdapter(BatteryEfficiencyData)
+    history_key = ProviderDataKey(
+        data_type="battery-efficiency-history",
+        provider="home-assistant",
+        entity_id="battery_efficiency_history",
+    )
+    result_key = ProviderDataKey(
+        data_type="battery-efficiency",
+        provider="home-assistant",
+        entity_id="battery_efficiency",
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> BatteryEfficiencyData:
+        del schedule
+        end_time = now.replace(minute=0, second=0, microsecond=0)
+        persisted = store.load(history_key, history_adapter)
+        start_time = calculation.history_start
+        if start_time is None:
+            start_time = (
+                persisted.start_time
+                if persisted is not None
+                else end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
+            )
+        history = importer.fetch(start_time, end_time, now=now)
+        store.save(history_key, history_adapter, history)
+        capacity: float | None = None
+        battery_data = store.load(
+            ProviderDataKey("battery", "home-assistant", "battery"),
+            TypeAdapter(BatteryData),
+        )
+        if battery_data is not None:
+            capacity = battery_data.capacity_kwh
+        elif battery is not None and hasattr(battery.capacity, "value"):
+            capacity = float(battery.capacity.value)
+            if battery.capacity.unit == "Wh":
+                capacity /= 1000
+        result = calculate_battery_efficiency(
+            history,
+            calculation,
+            capacity_kwh=capacity,
+            now=now,
+        )
+        store.save(result_key, result_adapter, result)
+        return result
+
+    def load() -> BatteryEfficiencyData | None:
+        return store.load(result_key, result_adapter)
+
+    return _make_provider_registration(
+        name="battery_efficiency",
+        data_type="battery-efficiency",
+        data_class=BatteryEfficiencyData,
+        adapter=result_adapter,
+        fetch=fetch,
+        is_fresh=lambda data, now=None: _efficiency_history_is_fresh(
+            importer, store, history_key, history_adapter, now
+        ),
+        load=load,
+    )
+
+
+def _efficiency_history_is_fresh(
+    importer: HomeAssistantBatteryEfficiencyImporter,
+    store: ProviderDataStore,
+    key: ProviderDataKey,
+    adapter: TypeAdapter[BatteryEfficiencyHistoryData],
+    now: datetime | None,
+) -> bool:
+    """Check freshness of the history backing a calculated result."""
+    history = store.load(key, adapter)
+    return history is not None and importer.is_fresh(history, now=now)
+
+
 _REGISTRATION_FACTORIES: tuple[ConfiguredRegistrationFactory, ...] = (
     _build_household_load_registration,
     _build_pv_generation_registration,
     _build_electricity_prices_registration,
     _build_grid_flow_registration,
     _build_battery_registration,
+    _build_battery_efficiency_registration,
 )
 
 

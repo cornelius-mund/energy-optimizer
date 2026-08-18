@@ -8,6 +8,7 @@ from energy_optimizer.config import (
     BatteryConstantConfiguration,
     ConfigurationError,
     HomeAssistantBatteryEntityConfiguration,
+    HomeAssistantConfiguration,
     load_configuration,
 )
 
@@ -198,13 +199,9 @@ def test_load_configuration_returns_battery_entity_mappings(tmp_path: Path) -> N
             "      entity_id: sensor.battery\n"
             "      attribute: maximum_discharge_kw\n"
             "      unit: kW\n"
-            "    charge_efficiency:\n"
+            "    battery_efficiency:\n"
             "      entity_id: sensor.battery\n"
-            "      attribute: charge_efficiency\n"
-            "      unit: ratio\n"
-            "    discharge_efficiency:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: discharge_efficiency\n"
+            "      attribute: battery_efficiency\n"
             "      unit: ratio\n",
         ),
         encoding="utf-8",
@@ -245,11 +242,8 @@ def test_load_configuration_accepts_battery_constants(tmp_path: Path) -> None:
             "    maximum_discharge:\n"
             "      value: 12\n"
             "      unit: kW\n"
-            "    charge_efficiency:\n"
-            "      value: 0.95\n"
-            "      unit: ratio\n"
-            "    discharge_efficiency:\n"
-            "      value: 0.9\n"
+            "    battery_efficiency:\n"
+            "      value: 0.85\n"
             "      unit: ratio\n",
         ),
         encoding="utf-8",
@@ -263,6 +257,100 @@ def test_load_configuration_accepts_battery_constants(tmp_path: Path) -> None:
     assert isinstance(battery.capacity, BatteryConstantConfiguration)
     assert battery.capacity.value == 28.7
     assert battery.maximum_soc.unit == "%"
+
+
+def test_load_configuration_accepts_calculated_efficiency_configuration(
+    tmp_path: Path,
+) -> None:
+    del tmp_path
+
+    def energy_entity(name: str) -> dict[str, object]:
+        return {
+            "entity_id": f"sensor.{name}",
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "add",
+        }
+
+    def leg(name: str) -> dict[str, list[dict[str, object]]]:
+        return {
+            "energy_in": [energy_entity(f"{name}_in")],
+            "energy_out": [energy_entity(f"{name}_out")],
+        }
+
+    configuration = HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "test-token",
+            "timeout_seconds": 5,
+            "battery": {
+                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                "capacity": 28.7,
+                "minimum_soc": 5,
+                "maximum_soc": 100,
+                "maximum_charge": 12,
+                "maximum_discharge": 12,
+                "efficiency_calculation": {
+                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                    "battery": leg("battery"),
+                    "inverter_charge": leg("charge"),
+                    "inverter_discharge": leg("discharge"),
+                },
+            },
+        }
+    )
+
+    assert configuration.battery is not None
+    battery = configuration.battery
+    assert battery.efficiency_calculation is not None
+    assert battery.efficiency_calculation.battery.energy_in[0].entity_id == (
+        "sensor.battery_in"
+    )
+
+
+def test_load_configuration_warns_when_fixed_battery_efficiency_overrides_calculated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    energy_entity = {
+        "entity_id": "sensor.energy",
+        "state_class": "total_increasing",
+        "unit": "kWh",
+        "operation": "add",
+    }
+    battery = {
+        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+        "capacity": 10,
+        "minimum_soc": 1,
+        "maximum_soc": 10,
+        "maximum_charge": 4,
+        "maximum_discharge": 4,
+        "battery_efficiency": 0.85,
+        "efficiency_calculation": {
+            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+            "battery": {
+                "energy_in": [energy_entity],
+                "energy_out": [energy_entity],
+            },
+            "inverter_charge": {
+                "energy_in": [energy_entity],
+                "energy_out": [energy_entity],
+            },
+            "inverter_discharge": {
+                "energy_in": [energy_entity],
+                "energy_out": [energy_entity],
+            },
+        },
+    }
+    HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "test-token",
+            "timeout_seconds": 5,
+            "battery": battery,
+        }
+    )
+
+    assert "fixed_over_calculated" in caplog.text
 
 
 def test_load_configuration_accepts_canonical_numeric_battery_constants(
@@ -281,8 +369,7 @@ def test_load_configuration_accepts_canonical_numeric_battery_constants(
             "    maximum_soc: 100\n"
             "    maximum_charge: 12\n"
             "    maximum_discharge: 12\n"
-            "    charge_efficiency: 0.95\n"
-            "    discharge_efficiency: 0.9\n",
+            "    battery_efficiency: 0.85\n",
         ),
         encoding="utf-8",
     )
@@ -303,7 +390,7 @@ def test_load_configuration_accepts_canonical_numeric_battery_constants(
         ("capacity", -1, "greater than zero"),
         ("maximum_charge", 0, "greater than zero"),
         ("minimum_soc", 101, "must not exceed 100"),
-        ("charge_efficiency", 1.1, "no greater than one"),
+        ("battery_efficiency", 1.1, "no greater than one"),
     ],
 )
 def test_load_configuration_rejects_invalid_battery_constants(
@@ -324,8 +411,7 @@ def test_load_configuration_rejects_invalid_battery_constants(
         "    maximum_soc: 100\n"
         "    maximum_charge: 12\n"
         "    maximum_discharge: 12\n"
-        "    charge_efficiency: 0.95\n"
-        "    discharge_efficiency: 0.9\n",
+        "    battery_efficiency: 0.85\n",
     )
     path.write_text(
         document.replace(f"    {field}: ", f"    {field}: {value} # "),
@@ -362,11 +448,8 @@ def test_load_configuration_rejects_invalid_battery_mapping_unit(
             "    maximum_discharge:\n"
             "      entity_id: sensor.battery_maximum_discharge\n"
             "      unit: kW\n"
-            "    charge_efficiency:\n"
-            "      entity_id: sensor.battery_charge_efficiency\n"
-            "      unit: ratio\n"
-            "    discharge_efficiency:\n"
-            "      entity_id: sensor.battery_discharge_efficiency\n"
+            "    battery_efficiency:\n"
+            "      entity_id: sensor.battery_efficiency\n"
             "      unit: ratio\n",
         ),
         encoding="utf-8",
@@ -403,11 +486,8 @@ def test_load_configuration_rejects_reused_battery_entity_and_attribute(
         "    maximum_discharge:\n"
         "      entity_id: sensor.battery_maximum_discharge\n"
         "      unit: kW\n"
-        "    charge_efficiency:\n"
-        "      entity_id: sensor.battery_charge_efficiency\n"
-        "      unit: ratio\n"
-        "    discharge_efficiency:\n"
-        "      entity_id: sensor.battery_discharge_efficiency\n"
+        "    battery_efficiency:\n"
+        "      entity_id: sensor.battery_efficiency\n"
         "      unit: ratio\n",
     )
     path.write_text(document, encoding="utf-8")

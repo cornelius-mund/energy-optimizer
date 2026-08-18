@@ -13,6 +13,7 @@ from playwright.sync_api import Page, Request, Route, expect
 from pydantic import TypeAdapter
 
 from energy_optimizer.providers.interfaces import (
+    BatteryEfficiencyData,
     ElectricityPriceData,
     PvGenerationData,
     SourceMetadata,
@@ -153,6 +154,47 @@ def test_actuals_render_from_api_to_browser(
     expect(page.locator("#power-points circle")).to_have_count(2)
     expect(page.locator("#details")).to_contain_text("home-assistant")
     expect(page.locator("#details")).to_contain_text("kW")
+
+
+def test_efficiency_tab_renders_battery_and_inverter_components(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify calculated component diagnostics are visible in the browser."""
+    start, end = _window()
+    retrieved_at = datetime.now(UTC)
+    ProviderDataStore(e2e_server.data_directory).save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="ok",
+            inverter_charge_efficiency=0.9,
+            inverter_discharge_efficiency=0.8,
+            battery_efficiency=0.85,
+            round_trip_efficiency=0.612,
+            history_start=start,
+            history_end=end - timedelta(hours=1),
+            battery_throughput_kwh=5,
+            charge_throughput_kwh=10,
+            discharge_throughput_kwh=10,
+            complete_cycle_count=1,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=retrieved_at,
+            latest_observation_at=retrieved_at,
+        ),
+    )
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    page.locator("#efficiency-tab").click()
+    _load_range(page, start, end)
+
+    expect(page.locator("#efficiency-chart")).to_be_visible()
+    expect(page.locator("#efficiency-points circle")).to_have_count(4)
+    expect(page.locator("#legend")).to_contain_text("Battery round-trip efficiency")
+    expect(page.locator("#legend")).to_contain_text("Inverter charge efficiency")
 
 
 def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) -> None:

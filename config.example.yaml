@@ -35,6 +35,9 @@ orchestration:
     battery:
       enabled: true
       interval_seconds: 300
+    battery_efficiency:
+      enabled: true
+      interval_seconds: 86400
     pv_generation:
       enabled: true
       interval_seconds: 3600
@@ -121,12 +124,37 @@ home_assistant:
     maximum_discharge:
       value: 12
       unit: kW
-    charge_efficiency:
-      value: 0.95
+    battery_efficiency:
+      value: 0.85
       unit: ratio
-    discharge_efficiency:
-      value: 0.9
-      unit: ratio
+    # Optional calculated efficiency. A configured battery_efficiency takes
+    # precedence and emits a warning. Inverter values are not battery fields.
+    # efficiency_calculation:
+    #   state_of_charge:
+    #     entity_id: sensor.battery_state_of_charge
+    #     unit: '%'
+    #   history_start: 2020-01-01T00:00:00+00:00
+    #   full_soc_threshold_percent: 100
+    #   minimum_battery_throughput_kwh: 10
+    #   minimum_inverter_charge_throughput_kwh: 10
+    #   minimum_inverter_discharge_throughput_kwh: 10
+    #   battery:
+    #     energy_in:
+    #       - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}
+    #     energy_out:
+    #       - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}
+    #   inverter_charge:
+    #     energy_in:
+    #       - {entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh, operation: add}
+    #     energy_out:
+    #       - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}
+    #       - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}
+    #   inverter_discharge:
+    #     energy_in:
+    #       - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}
+    #       - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}
+    #     energy_out:
+    #       - {entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh, operation: add}
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.
   max_data_age_seconds: 7200

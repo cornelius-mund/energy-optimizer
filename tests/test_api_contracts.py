@@ -195,8 +195,7 @@ def test_battery_contract_accepts_a_valid_request(
         "initial_soc_kwh": 5.0,
         "maximum_charge_kw": 4.0,
         "maximum_discharge_kw": 4.0,
-        "charge_efficiency": 0.95,
-        "discharge_efficiency": 0.95,
+        "battery_efficiency": 0.9,
         "unit": "kWh",
         "power_unit": "kW",
         "source": {
@@ -230,7 +229,7 @@ def test_battery_contract_rejects_invalid_payloads(
         ({**battery_request, "maximum_soc_kwh": 1.0}, "minimum_soc_kwh"),
         ({**battery_request, "initial_soc_kwh": 1.0}, "initial_soc_kwh"),
         ({**battery_request, "maximum_charge_kw": 0.0}, "maximum_charge_kw"),
-        ({**battery_request, "charge_efficiency": 0.0}, "charge_efficiency"),
+        ({**battery_request, "battery_efficiency": 0.0}, "battery_efficiency"),
         ({**battery_request, "interval_minutes": 30}, "interval_minutes"),
         (
             {**battery_request, "start_time": "2026-01-01T00:00:00"},
@@ -268,8 +267,7 @@ def test_battery_contract_rejects_non_finite_values(
         "initial_soc_kwh",
         "maximum_charge_kw",
         "maximum_discharge_kw",
-        "charge_efficiency",
-        "discharge_efficiency",
+        "battery_efficiency",
     )
     for field in scalar_fields:
         for value in non_finite_values:

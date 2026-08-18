@@ -89,6 +89,10 @@
     pv_generation_forecast: "PV generation",
     import_price_forecast: "Import price",
     export_price_forecast: "Export price",
+    inverter_charge_efficiency_actual: "Inverter charge efficiency",
+    inverter_discharge_efficiency_actual: "Inverter discharge efficiency",
+    battery_efficiency_actual: "Battery round-trip efficiency",
+    round_trip_efficiency_actual: "Complete round-trip efficiency",
   }[item.id] || item.id);
   const chartDefinitions = {
     power: {
@@ -111,10 +115,21 @@
       title: document.querySelector("#price-chart-title"),
       description: document.querySelector("#price-chart-description"),
     },
+    efficiency: {
+      element: document.querySelector("#efficiency-chart"),
+      grid: document.querySelector("#efficiency-grid-lines"),
+      labels: document.querySelector("#efficiency-labels"),
+      points: document.querySelector("#efficiency-points"),
+      seriesPaths: document.querySelector("#efficiency-series-paths"),
+      axisUnit: document.querySelector("#efficiency-axis-unit"),
+      title: document.querySelector("#efficiency-chart-title"),
+      description: document.querySelector("#efficiency-chart-description"),
+    },
   };
   const chartSeries = (series) => ({
     power: series.filter((item) => ["household_load_actual", "pv_generation_forecast"].includes(item.id)),
     price: series.filter((item) => ["import_price_forecast", "export_price_forecast"].includes(item.id)),
+    efficiency: series.filter((item) => item.data_type === "battery_efficiency"),
   });
   const coverageRange = (data) => {
     const ranges = selectedSeries(data)
@@ -177,6 +192,7 @@
     addDetail("Coverage", first.available_start_time ? `${formatTimestamp(first.available_start_time)} to ${formatTimestamp(first.available_end_time)}` : "No points in range");
     addDetail("Freshness", first.freshness);
     addDetail("Retrieved", first.retrieved_at ? formatTimestamp(first.retrieved_at) : "Not available");
+    (data.diagnostics || []).forEach((diagnostic) => addDetail("Diagnostic", diagnostic));
     if (first.generated_at) addDetail("Generated", formatTimestamp(first.generated_at));
     if (first.published_at) addDetail("Published", formatTimestamp(first.published_at));
   };
@@ -256,12 +272,13 @@
 
   const renderHeader = (data = {}) => {
     const forecast = scenario === "forecast";
+    const efficiency = scenario === "efficiency";
     const series = selectedSeries(data);
     const hasPv = hasSeriesData(series, "pv_generation_forecast");
     const hasImportPrice = hasSeriesData(series, "import_price_forecast");
     const hasExportPrice = hasSeriesData(series, "export_price_forecast");
-    badge.innerHTML = `<span></span> ${forecast ? "Forecast inputs" : "Historic actuals"}`;
-    eyebrow.textContent = forecast ? "Planning inputs" : "Imported series";
+    badge.innerHTML = `<span></span> ${forecast ? "Forecast inputs" : efficiency ? "Measured diagnostics" : "Historic actuals"}`;
+    eyebrow.textContent = forecast ? "Planning inputs" : efficiency ? "Efficiency components" : "Imported series";
     if (forecast) {
       const forecastTypes = [];
       if (hasPv) forecastTypes.push("PV");
@@ -269,12 +286,16 @@
       heading.textContent = forecastTypes.length
         ? `${forecastTypes.join(" and ")} forecast`
         : "Forecast";
+    } else if (efficiency) {
+      heading.textContent = "Battery and inverter efficiency";
     } else {
       heading.textContent = "Household load";
     }
     interpretation.textContent = forecast
       ? "Forecasts are predictions, not measured actuals. Missing intervals remain gaps and are never treated as zero."
-      : "These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.";
+      : efficiency
+        ? "These ratios are calculated from measured battery and inverter energy. Battery efficiency is one full-cycle value; inverter charge and discharge are separate conversion values."
+        : "These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.";
     legend.replaceChildren();
     const labels = forecast
       ? [
@@ -282,6 +303,8 @@
         ["import_price_forecast", "Import price", "legend-1"],
         ["export_price_forecast", "Export price", "legend-2"],
       ].filter(([id]) => hasSeriesData(series, id))
+      : efficiency
+        ? series.filter((item) => hasSeriesData([item], item.id)).map((item, index) => [item.id, seriesLabel(item), `legend-${index}`])
       : series.some((item) => hasSeriesData([item], "household_load_actual"))
         ? [["household_load_actual", "Household load", "legend-0"]]
         : [];
@@ -296,7 +319,12 @@
 
   const load = async (start, end, correctionAttempted = false) => {
     content.hidden = true;
-    setStatus(`Loading ${scenario === "forecast" ? "forecasts" : "imported actuals"}...`);
+    const label = scenario === "forecast"
+      ? "forecasts"
+      : scenario === "efficiency"
+        ? "efficiency diagnostics"
+        : "imported actuals";
+    setStatus(`Loading ${label}...`);
     diagnostic("debug", "data_load_started", { scenario, start, end });
     let requestId = "none";
     let responseStatus = "none";
@@ -337,7 +365,7 @@
   };
 
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
-    scenario = tab.id === "forecast-tab" ? "forecast" : "actual";
+      scenario = tab.id === "forecast-tab" ? "forecast" : tab.id === "efficiency-tab" ? "efficiency" : "actual";
     diagnostic("info", "tab_clicked", { tab: tab.id, scenario });
     document.querySelectorAll(".tab").forEach((item) => {
       const active = item === tab;

@@ -63,6 +63,8 @@ home_assistant:
       operation: add
   timeout_seconds: 10
   max_data_age_seconds: 3600
+orchestration:
+  enabled: false
 """,
         encoding="utf-8",
     )

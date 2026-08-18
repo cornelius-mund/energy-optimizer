@@ -57,8 +57,8 @@ details.
 `POST /api/v1/battery` validates normalized hourly battery state and capability
 data. The versioned request contains timezone-aware `start_time`,
 `interval_minutes: 60`, one to 87,672 `state_of_charge_kwh` values, capacity and
-SOC bounds in kWh, initial SOC, charge and discharge power limits in kW,
-charge and discharge efficiencies from greater than zero through one,
+SOC bounds in kWh, initial SOC, charge and discharge power limits in kW, one
+battery round-trip efficiency from greater than zero through one,
 `unit: "kWh"`, `power_unit: "kW"`, and optional source metadata.
 
 Example:
@@ -75,8 +75,7 @@ Example:
   "initial_soc_kwh": 5.0,
   "maximum_charge_kw": 4.0,
   "maximum_discharge_kw": 4.0,
-  "charge_efficiency": 0.95,
-  "discharge_efficiency": 0.95,
+  "battery_efficiency": 0.9,
   "unit": "kWh",
   "power_unit": "kW",
   "source": {
@@ -126,16 +125,42 @@ battery:
   maximum_soc: {value: 100, unit: '%'}
   maximum_charge: {value: 12, unit: kW}
   maximum_discharge: {value: 12, unit: kW}
-  charge_efficiency: {value: 0.95, unit: ratio}
-  discharge_efficiency: {value: 0.9, unit: ratio}
+  battery_efficiency: {value: 0.85, unit: ratio}
+  efficiency_calculation:
+    state_of_charge: {entity_id: sensor.battery_state_of_charge, unit: '%'}
+    history_start: 2020-01-01T00:00:00+00:00
+    full_soc_threshold_percent: 100
+    battery:
+      energy_in: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}]
+      energy_out: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}]
+    inverter_charge:
+      energy_in: [{entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh, operation: add}]
+      energy_out: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}]
+    inverter_discharge:
+      energy_in: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}]
+      energy_out: [{entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh, operation: add}]
 ```
+
+Calculated efficiency is configured separately under `battery.efficiency_calculation`.
+It contains signed `energy_in` and `energy_out` entity lists for the battery,
+inverter charge, and inverter discharge components, plus the historical state of
+charge entity. Battery efficiency is one full-cycle round-trip value detected
+from consecutive full-SoC boundaries. Inverter charge and discharge efficiencies
+are independent inverter measurements. The complete ratio is their product with
+the battery ratio. A configured `battery_efficiency` takes precedence over the
+calculated battery value and emits a warning. The dashboard exposes these values
+through `scenario_kind=efficiency`.
+
+The selected ranges are persisted as aligned hourly history. The calculator uses
+all retained history, or all history since `history_start`, and never uses a
+rolling window.
 
 Live state, cumulative counters, and historical measurements remain provider
 backed; constants are intended for static installation parameters only.
 
-The importer does not reconstruct historic SOC. Historic battery data and
-measurement alignment for installation efficiency calculations are separate
-follow-up behavior.
+Calculated efficiency ingestion reconstructs historical state of charge through
+the dedicated history endpoint and persists aligned hourly battery/inverter
+measurements before the daily calculation.
 
 ## Household-load API
 

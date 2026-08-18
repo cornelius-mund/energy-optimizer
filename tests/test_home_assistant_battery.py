@@ -42,12 +42,8 @@ BATTERY_MAPPINGS = {
         "entity_id": "sensor.battery_maximum_discharge",
         "unit": "kW",
     },
-    "charge_efficiency": {
-        "entity_id": "sensor.battery_charge_efficiency",
-        "unit": "%",
-    },
-    "discharge_efficiency": {
-        "entity_id": "sensor.battery_discharge_efficiency",
+    "battery_efficiency": {
+        "entity_id": "sensor.battery_efficiency",
         "unit": "ratio",
     },
 }
@@ -65,8 +61,7 @@ def standard_payloads() -> dict[str, dict[str, object]]:
         "sensor.battery_maximum_soc": 10,
         "sensor.battery_maximum_charge": 4000,
         "sensor.battery_maximum_discharge": 4,
-        "sensor.battery_charge_efficiency": 95,
-        "sensor.battery_discharge_efficiency": 0.9,
+        "sensor.battery_efficiency": 0.85,
     }
     return {entity_id: payload(entity_id, state) for entity_id, state in states.items()}
 
@@ -97,8 +92,7 @@ def test_fetch_normalizes_battery_state_and_capabilities() -> None:
     assert data.initial_soc_kwh == 5.0
     assert data.maximum_charge_kw == 4.0
     assert data.maximum_discharge_kw == 4.0
-    assert data.charge_efficiency == 0.95
-    assert data.discharge_efficiency == 0.9
+    assert data.battery_efficiency == 0.85
     assert data.source.entity_id == "battery"
     assert data.retrieved_at == START
     assert data.latest_observation_at == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
@@ -135,15 +129,10 @@ def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> No
             "unit": "kW",
             "attribute": "maximum_discharge_kw",
         },
-        "charge_efficiency": {
+        "battery_efficiency": {
             "entity_id": "sensor.battery",
             "unit": "ratio",
-            "attribute": "charge_efficiency",
-        },
-        "discharge_efficiency": {
-            "entity_id": "sensor.battery",
-            "unit": "ratio",
-            "attribute": "discharge_efficiency",
+            "attribute": "battery_efficiency",
         },
     }
     requests = 0
@@ -161,8 +150,7 @@ def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> No
                     "maximum_soc_kwh": 10,
                     "maximum_charge_kw": 4,
                     "maximum_discharge_kw": 4,
-                    "charge_efficiency": 0.95,
-                    "discharge_efficiency": 0.9,
+                    "battery_efficiency": 0.85,
                 },
             },
         )
@@ -189,8 +177,7 @@ def test_fetch_uses_constants_without_requesting_static_entities() -> None:
         "maximum_soc": {"value": 10, "unit": "kWh"},
         "maximum_charge": {"value": 4, "unit": "kW"},
         "maximum_discharge": {"value": 4, "unit": "kW"},
-        "charge_efficiency": {"value": 95, "unit": "%"},
-        "discharge_efficiency": {"value": 0.9, "unit": "ratio"},
+        "battery_efficiency": {"value": 0.85, "unit": "ratio"},
     }
     requests: list[str] = []
 
@@ -211,8 +198,7 @@ def test_fetch_uses_constants_without_requesting_static_entities() -> None:
     assert data.maximum_soc_kwh == 10
     assert data.maximum_charge_kw == 4
     assert data.maximum_discharge_kw == 4
-    assert data.charge_efficiency == 0.95
-    assert data.discharge_efficiency == 0.9
+    assert data.battery_efficiency == 0.85
     assert data.latest_observation_at == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
 
 
@@ -231,8 +217,7 @@ def test_fetch_allows_unavailable_entity_state_when_all_values_use_attributes() 
             "maximum_soc",
             "maximum_charge",
             "maximum_discharge",
-            "charge_efficiency",
-            "discharge_efficiency",
+            "battery_efficiency",
         )
     }
     mapping["state_of_charge"] = {
@@ -254,8 +239,7 @@ def test_fetch_allows_unavailable_entity_state_when_all_values_use_attributes() 
                         "maximum_soc": 10,
                         "maximum_charge": 4,
                         "maximum_discharge": 4,
-                        "charge_efficiency": 0.95,
-                        "discharge_efficiency": 0.9,
+                        "battery_efficiency": 0.85,
                     },
                 },
             )

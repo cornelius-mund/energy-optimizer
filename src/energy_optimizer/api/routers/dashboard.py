@@ -20,7 +20,11 @@ from energy_optimizer.api.schemas import (
 )
 from energy_optimizer.api.series import align_hourly_values
 from energy_optimizer.api.validation import require_aware_timestamps
-from energy_optimizer.providers.interfaces import ElectricityPriceData, PvGenerationData
+from energy_optimizer.providers.interfaces import (
+    BatteryEfficiencyData,
+    ElectricityPriceData,
+    PvGenerationData,
+)
 from energy_optimizer.providers.interfaces import (
     SourceMetadata as ProviderSourceMetadata,
 )
@@ -229,6 +233,100 @@ def _price_dashboard_series(
     )
 
 
+def _battery_efficiency_dashboard_series(
+    data: BatteryEfficiencyData,
+    start: datetime,
+    end: datetime,
+    name: str,
+) -> DashboardSeries:
+    """Map one calculated efficiency component to a scalar actual series."""
+    value = getattr(data, name)
+    timestamp = (
+        data.history_end - timedelta(hours=1)
+        if data.history_end is not None
+        else data.latest_observation_at
+    )
+    in_range = value is not None and start <= timestamp < end
+    return DashboardSeries(
+        id=f"{name}_actual",
+        data_type="battery_efficiency",
+        scenario_kind="actual",
+        timestamps=[timestamp] if in_range else [],
+        values=[value] if in_range else [],
+        unit="ratio",
+        source=_dashboard_source(data),
+        requested_start_time=start,
+        requested_end_time=end,
+        available_start_time=data.history_start,
+        available_end_time=data.history_end,
+        retrieved_at=data.retrieved_at,
+        freshness="unknown",
+        validation_status="valid" if data.status == "ok" else "suspect",
+        missing_intervals=[] if in_range else [timestamp],
+    )
+
+
+def _efficiency_dashboard_data(
+    request: Request,
+    start: datetime,
+    end: datetime,
+) -> DashboardDataResponse:
+    """Return the latest calculated efficiency components for the dashboard."""
+    store = request.app.state.provider_data_store
+    if store is None:
+        return _dashboard_response(
+            start, end, [], ["battery efficiency persistence is not configured"]
+        )
+    from energy_optimizer.api.routers.context import BATTERY_EFFICIENCY_ADAPTER
+
+    key = ProviderDataKey(
+        data_type="battery-efficiency",
+        provider="home-assistant",
+        entity_id="battery_efficiency",
+    )
+    try:
+        data = store.load(key, BATTERY_EFFICIENCY_ADAPTER)
+    except ProviderDataStoreError:
+        return _dashboard_response(
+            start,
+            end,
+            [],
+            ["battery efficiency data is invalid and could not be recovered"],
+        )
+    if data is None:
+        return _dashboard_response(
+            start, end, [], ["battery efficiency data is unavailable"]
+        )
+    names = (
+        ("inverter_charge_efficiency", "Inverter charge efficiency"),
+        ("inverter_discharge_efficiency", "Inverter discharge efficiency"),
+        ("battery_efficiency", "Battery round-trip efficiency"),
+        ("round_trip_efficiency", "Complete round-trip efficiency"),
+    )
+    diagnostics = list(data.warnings)
+    diagnostics.extend(
+        (
+            f"history: {data.history_start} to {data.history_end}",
+            f"battery throughput: {data.battery_throughput_kwh:.3f} kWh",
+            f"inverter charge throughput: {data.charge_throughput_kwh:.3f} kWh",
+            f"inverter discharge throughput: {data.discharge_throughput_kwh:.3f} kWh",
+            f"complete cycles: {data.complete_cycle_count}",
+        )
+    )
+    if data.status != "ok":
+        diagnostics.insert(0, f"battery efficiency result status: {data.status}")
+    return _dashboard_response(
+        start,
+        end,
+        [
+            _battery_efficiency_dashboard_series(data, start, end, name)
+            for name, label in names
+            if getattr(data, name) is not None
+        ],
+        diagnostics,
+    )
+
+
 def _forecast_dashboard_data(
     request: Request,
     start: datetime,
@@ -330,7 +428,9 @@ def dashboard_data(
     request: Request,
     start_time: datetime = Query(description="Inclusive timezone-aware range start"),
     end_time: datetime = Query(description="Exclusive timezone-aware range end"),
-    scenario_kind: Literal["actual", "forecast", "plan"] = Query("actual"),
+    scenario_kind: Literal["actual", "forecast", "plan", "efficiency"] = Query(
+        "actual"
+    ),
 ) -> DashboardDataResponse:
     """Return the versioned dashboard contract without mixing scenarios."""
     start, end = _dashboard_range(start_time, end_time)
@@ -344,6 +444,8 @@ def dashboard_data(
             ["optimization plan data is unavailable"],
             plan_summary=DashboardPlanSummary(status="unavailable"),
         )
+    if scenario_kind == "efficiency":
+        return _efficiency_dashboard_data(request, start, end)
     if request.app.state.provider_data_store is None:
         return _dashboard_response(
             start,

@@ -119,8 +119,7 @@ def battery_request() -> dict[str, object]:
         "initial_soc_kwh": 5.0,
         "maximum_charge_kw": 4.0,
         "maximum_discharge_kw": 4.0,
-        "charge_efficiency": 0.95,
-        "discharge_efficiency": 0.95,
+        "battery_efficiency": 0.9,
         "unit": "kWh",
         "power_unit": "kW",
         "source": {
