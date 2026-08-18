@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
+from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
@@ -95,6 +96,61 @@ def test_fetch_normalizes_import_and_export_entities() -> None:
     assert data.source.entity_id == "grid_flow"
     assert data.retrieved_at == NOW
     assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+
+
+def test_household_load_and_grid_flow_normalize_a_reused_entity_independently() -> None:
+    shared_entity = "sensor.main_grid_total_in"
+    export_entity = "sensor.main_grid_total_out"
+    shared_configuration = home_assistant_configuration_factory(
+        household_load_entities=[
+            {
+                "entity_id": shared_entity,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+        grid_import_entities=[
+            {
+                "entity_id": shared_entity,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+        grid_export_entities=[
+            {
+                "entity_id": export_entity,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )()
+    responses = {
+        shared_entity: standard_payload(shared_entity),
+        export_entity: standard_payload(export_entity),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        household_load = HomeAssistantLoadImporter(shared_configuration, client).fetch(
+            START, END, now=NOW
+        )
+        grid_flow = HomeAssistantGridFlowImporter(shared_configuration, client).fetch(
+            START, END, now=NOW
+        )
+    finally:
+        client.close()
+
+    assert household_load.load_kw == (1.0, 2.0, 3.0, 4.0)
+    assert grid_flow.import_kw == (1.0, 2.0, 3.0, 4.0)
+    assert grid_flow.export_kw == (1.0, 2.0, 3.0, 4.0)
 
 
 def test_fetch_supports_multiple_signed_entities_per_channel() -> None:

@@ -94,6 +94,8 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
+  # Entity IDs may be reused across household-load and grid-flow categories,
+  # but must not be repeated within one category.
   # Long history ranges use contiguous requests of no more than seven days. The
   # orchestration lookback is applied only to the first request.
   # Battery imports read the live state of the mapped Home Assistant entity.
