@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main, devel]
   pull_request:
 
 permissions:
@@ -73,7 +74,6 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
