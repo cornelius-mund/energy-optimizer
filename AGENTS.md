@@ -40,7 +40,8 @@ A feature delivers direct user value.
 Each feature includes all required engineering work:
 
 - Implementation
-- Automated tests
+- Automated tests, including a browser end-to-end test (see the End-to-End
+  Tests section) that covers the feature, unless a documented exception applies
 - Documentation
 - Configuration changes
 - Deployment or infrastructure changes
@@ -104,6 +105,9 @@ An issue is complete when:
 
 - All acceptance criteria are met.
 - Appropriate automated tests are added or updated.
+- Every new or changed user-facing capability is covered by a new or extended
+  browser end-to-end test, or the feature issue documents an approved exception
+  explaining why no end-to-end coverage applies.
 - Relevant documentation is updated.
 - Required configuration and deployment changes are included.
 - Errors and important edge cases are handled explicitly.
@@ -246,6 +250,25 @@ Before completing work:
 - Keep tests independent of external APIs by mocking provider requests.
 - Test Docker startup and the health endpoint once container packaging exists.
 
+### End-to-End Tests
+
+- Every feature must be covered by a browser end-to-end test, either newly
+  added or extended, unless the feature issue documents an approved exception.
+- Use the Playwright-based browser E2E framework with the `e2e` pytest marker.
+- Run the ordinary suite without browser binaries via
+  `uv run pytest -m "not e2e"`.
+- Run the browser suite via `uv run pytest -m e2e`, which boots the real
+  application through the production uvicorn entry point against isolated,
+  deterministic test configuration and data.
+- Exercise the feature through the browser and assert observable outcomes that
+  map to the feature's acceptance criteria.
+- Keep end-to-end tests deterministic and independent of live external
+  providers by using seeded test data and mocked provider requests.
+- Prefer extending an existing end-to-end test when the feature builds on an
+  established flow; add a new test when it introduces a distinct flow.
+- Features with no user-facing surface may omit an end-to-end test only when
+  the feature issue records the justification.
+
 ### Coverage
 
 - Aim for at least 80% overall coverage.
@@ -266,6 +289,9 @@ The workflow should:
 - Run `uv run ruff format --check .`.
 - Run `uv run mypy .`.
 - Run `uv run pytest --cov --cov-report=term-missing`.
+- Run the ordinary suite with `uv run pytest -m "not e2e"`.
+- Run a separate browser end-to-end job that installs Chromium and runs
+  `uv run pytest -m e2e`, reporting logs on failure.
 - Use `permissions: contents: read` unless a job requires more.
 - Cache Python dependencies where practical.
 
