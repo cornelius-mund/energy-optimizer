@@ -17,6 +17,8 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     assert "The end time is exclusive" in document
     assert 'aria-live="polite"' in document
     assert 'id="chart"' in document
+    assert 'id="power-chart"' in document
+    assert 'id="price-chart"' in document
     assert "Historic actuals" in document
     assert "Forecast" in document
     assert 'role="tab"' in document
@@ -47,6 +49,19 @@ def test_dashboard_assets_include_accessible_actuals_view() -> None:
     assert "const seriesClass = (item, index)" in javascript
     assert 'export_price_forecast: "series-2"' in javascript
     assert "seriesClass(item, seriesIndex)" in javascript
+    assert "const unitForSeries = (item)" in javascript
+    assert '"EUR/kWh"' in javascript
+    assert 'id="power-axis-unit"' in document
+    assert 'id="price-axis-unit"' in document
+    assert 'id="power-chart-description"' in document
+    assert 'id="price-chart-description"' in document
+    assert "Charts are separated by unit" in document
+    assert "unitForSeries(item)" in javascript
+    assert "const chartSeries = (series)" in javascript
+    assert "power: series.filter" in javascript
+    assert "price: series.filter" in javascript
+    assert "item.textContent = `${label} (${unitForSeries(source)})`" in javascript
+    assert "Missing intervals remain gaps." in javascript
     assert "const formatAxisTimestamp = (value)" in javascript
     assert "x-axis-label" in javascript
     assert "start_time: utcTimestamp(start)" in javascript
