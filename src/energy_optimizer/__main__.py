@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from energy_optimizer.logging_config import bootstrap_logging
 
 
@@ -13,8 +15,8 @@ def main() -> None:
 
     uvicorn.run(
         "energy_optimizer.api:app",
-        host="0.0.0.0",
-        port=8000,
+        host=os.environ.get("ENERGY_OPTIMIZER_HOST", "0.0.0.0"),
+        port=int(os.environ.get("ENERGY_OPTIMIZER_PORT", "8000")),
         log_config=None,
         access_log=False,
     )

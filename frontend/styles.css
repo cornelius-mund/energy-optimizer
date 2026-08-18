@@ -58,6 +58,7 @@ button:hover { background: #28544b; }
 .status.error { color: #812f28; background: #f9e5df; }
 .status.warning { color: #765522; background: #f8edcc; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(280px, .85fr); gap: 18px; }
+.dashboard-grid[hidden] { display: none; }
 .card { padding: 28px 30px; }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; color: var(--muted); font-size: .8rem; }

@@ -466,4 +466,21 @@ Check static OpenAPI documentation against FastAPI-generated schema:
 uv run pytest tests/test_openapi.py
 ```
 
+### Browser end-to-end tests
+
+The dashboard E2E suite starts the real service entry point with an isolated
+temporary data store and exercises the rendered dashboard in Chromium. Install
+the browser once in the development environment, then run:
+
+```bash
+uv run playwright install chromium
+uv run pytest -m e2e
+```
+
+Run the ordinary test suite without browser tests with:
+
+```bash
+uv run pytest -m "not e2e"
+```
+
 See [`docs/api.md`](docs/api.md) for the endpoint reference and request examples.
