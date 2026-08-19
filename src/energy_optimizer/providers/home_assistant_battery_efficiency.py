@@ -90,12 +90,14 @@ class HomeAssistantBatteryEfficiencyImporter:
                     start,
                     end,
                     label=f"battery efficiency {name} input",
+                    allow_negative=True,
                 ),
                 self._aggregator.aggregate(
                     leg.energy_out,
                     start,
                     end,
                     label=f"battery efficiency {name} output",
+                    allow_negative=True,
                 ),
             )
         soc = self._fetch_state_of_charge(

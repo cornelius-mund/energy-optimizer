@@ -95,8 +95,21 @@ class HomeAssistantEnergyAggregator:
         history_lookback_seconds: float = 0,
         *,
         label: str,
+        allow_negative: bool = False,
     ) -> HomeAssistantEnergySeries:
-        """Fetch, align, and combine all configured entity contributions."""
+        """Fetch, align, and combine all configured entity contributions.
+
+        ``allow_negative`` treats the combined signed expression as a net
+        directional flow: a negative hourly value is clamped to zero for that
+        hour instead of raising an error. This suits calculated
+        battery-efficiency legs, where a signed expression nets one directional
+        energy flow against another (for example battery charging energy minus
+        directly consumed PV yield) and a negative net simply means none of
+        that flow occurred, with the remainder belonging to a different leg or
+        to export. Non-finite values are always rejected. Strict rejection of
+        any negative combined value remains the default, which household load
+        and grid flow rely on to catch misconfigured add/subtract operations.
+        """
         started_at = perf_counter()
         entity_count = len(entities or [])
         try:
@@ -106,6 +119,7 @@ class HomeAssistantEnergyAggregator:
                 end_time,
                 history_lookback_seconds,
                 label=label,
+                allow_negative=allow_negative,
             )
             logger.info(
                 "event=home_assistant_history_aggregate component=home_assistant "
@@ -143,6 +157,7 @@ class HomeAssistantEnergyAggregator:
         history_lookback_seconds: float,
         *,
         label: str,
+        allow_negative: bool = False,
     ) -> HomeAssistantEnergySeries:
         """Fetch, align, and combine entity contributions without summary logs."""
         start = self._as_utc(start_time)
@@ -197,11 +212,16 @@ class HomeAssistantEnergyAggregator:
                     quality[index] = item
 
         for index, value in enumerate(values):
-            if not math.isfinite(value) or value < -1e-9:
+            if not math.isfinite(value):
                 raise HomeAssistantError(
-                    f"combined Home Assistant {label} data contains a negative or "
+                    f"combined Home Assistant {label} data contains a "
                     f"non-finite value at hour {index}; check add and subtract "
                     "operations"
+                )
+            if value < -1e-9 and not allow_negative:
+                raise HomeAssistantError(
+                    f"combined Home Assistant {label} data contains a negative "
+                    f"value at hour {index}; check add and subtract operations"
                 )
             values[index] = max(0.0, value)
 
