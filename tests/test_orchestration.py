@@ -972,6 +972,146 @@ def test_configured_efficiency_orchestrator_fetches_only_missing_hours(
     assert len(persisted.state_of_charge_percent) == 3
 
 
+def test_configured_efficiency_orchestrator_persists_through_a_suspect_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A suspect hour must not block persistence or force a full history refetch.
+
+    Regression test for issue #157: previously, any suspect hour anywhere in
+    the requested window made the importer raise before the history could be
+    saved, so the source could never advance past it and kept re-requesting
+    the entire configured history on every scheduled attempt.
+    """
+
+    fetch_calls: list[tuple[datetime, datetime]] = []
+
+    class FakeSuspectEfficiencyImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime,
+            *,
+            now: datetime | None = None,
+        ) -> BatteryEfficiencyHistoryData:
+            fetch_calls.append((start_time, end_time))
+            hours = int((end_time - start_time).total_seconds() // 3600)
+            quality = tuple(
+                IntervalQuality(status="suspect", reason="counter_reset")
+                if index == 0
+                else IntervalQuality()
+                for index in range(hours)
+            )
+            return BatteryEfficiencyHistoryData(
+                schema_version="1",
+                start_time=start_time,
+                interval_minutes=60,
+                battery_energy_in_kwh=(1.0,) * hours,
+                battery_energy_out_kwh=(0.0,) * hours,
+                inverter_charge_energy_in_kwh=(1.0,) * hours,
+                inverter_charge_energy_out_kwh=(1.0,) * hours,
+                inverter_discharge_energy_in_kwh=(1.0,) * hours,
+                inverter_discharge_energy_out_kwh=(1.0,) * hours,
+                state_of_charge_percent=(50.0,) * (hours + 1),
+                unit="kWh",
+                source=SourceMetadata(
+                    provider="home-assistant", entity_id="battery_efficiency_history"
+                ),
+                retrieved_at=now or start_time,
+                latest_observation_at=now or end_time,
+                quality=quality,
+            )
+
+        def is_fresh(self, *_: object, **__: object) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
+        FakeSuspectEfficiencyImporter,
+    )
+    energy_entity = {
+        "entity_id": "sensor.energy",
+        "state_class": "total_increasing",
+        "unit": "kWh",
+        "operation": "add",
+    }
+    leg = {"energy_in": [energy_entity], "energy_out": [energy_entity]}
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "timeout_seconds": 5,
+                "battery": {
+                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                    "capacity": 10,
+                    "minimum_soc": 1,
+                    "maximum_soc": 10,
+                    "maximum_charge": 4,
+                    "maximum_discharge": 4,
+                    "efficiency_calculation": {
+                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                        "history_start": START.isoformat(),
+                        "battery": leg,
+                        "inverter_charge": leg,
+                        "inverter_discharge": leg,
+                    },
+                },
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "battery_efficiency": DataSourceScheduleConfiguration(
+                    interval_seconds=3600
+                )
+            },
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+
+    first_cycle = orchestrator.run_due(START + timedelta(hours=1), force=True)
+    second_cycle = orchestrator.run_due(START + timedelta(hours=2), force=True)
+
+    # The run must not fail: the suspect hour is flagged, not fatal.
+    assert first_cycle.provider_runs[0].status == "suspect"
+
+    # The history must be persisted despite the suspect hour, so the second
+    # attempt only requests the newly missing hour instead of refetching the
+    # entire configured history again.
+    assert fetch_calls == [
+        (START, START + timedelta(hours=1)),
+        (START + timedelta(hours=1), START + timedelta(hours=2)),
+    ]
+
+    history_key = ProviderDataKey(
+        "battery-efficiency-history",
+        "home-assistant",
+        "battery_efficiency_history",
+    )
+    persisted = store.load(history_key, TypeAdapter(BatteryEfficiencyHistoryData))
+    assert persisted is not None
+    assert persisted.start_time == START
+    assert len(persisted.battery_energy_in_kwh) == 2
+
+    result_key = ProviderDataKey(
+        "battery-efficiency", "home-assistant", "battery_efficiency"
+    )
+    result = store.load(result_key, TypeAdapter(BatteryEfficiencyData))
+    assert result is not None
+    assert any(item.status == "suspect" for item in result.quality)
+
+    del second_cycle
+
+
 def test_configured_forecast_solar_orchestrator_rejects_fast_polling(
     tmp_path: Path,
 ) -> None:

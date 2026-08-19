@@ -118,6 +118,7 @@ class BatteryEfficiencyHistoryData:
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+    quality: tuple[IntervalQuality, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class BatteryEfficiencyData:
     retrieved_at: datetime
     latest_observation_at: datetime
     warnings: tuple[str, ...] = ()
+    quality: tuple[IntervalQuality, ...] = ()
 
 
 @dataclass(frozen=True)
