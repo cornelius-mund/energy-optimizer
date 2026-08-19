@@ -271,6 +271,13 @@
           numericValue.value = String(value);
           numericValue.textContent = String(value);
           valueCell.append(numericValue, ` ${unitForSeries(item)}`);
+          if (item.is_default) {
+            const marker = document.createElement("span");
+            marker.className = "efficiency-default-marker";
+            marker.textContent = " (default)";
+            marker.title = "Fallback ratio used because this component was not calculable.";
+            valueCell.append(marker);
+          }
           efficiencySummary.append(label, valueCell);
         });
       if (efficiencySummary.childElementCount) efficiencySummary.removeAttribute("hidden");

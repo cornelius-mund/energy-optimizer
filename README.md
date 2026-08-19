@@ -124,7 +124,8 @@ Configuration is expected to contain parameters such as:
   warning. Before the first complete cycle is available, live battery snapshots
   use a documented 95% default instead of failing. The dashboard's Efficiency
   tab displays the calculated components as raw ratio summaries over retained
-  history.
+  history; any component that cannot be calculated is shown as a marked 95%
+  ratio default.
 - Electric vehicle parameters
 - Heat-pump parameters
 - Solver settings

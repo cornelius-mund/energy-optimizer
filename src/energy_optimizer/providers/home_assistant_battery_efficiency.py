@@ -25,6 +25,7 @@ from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import (
     BATTERY_EFFICIENCY_HISTORY_SOURCE_ID,
     BATTERY_EFFICIENCY_SOURCE_ID,
+    DEFAULT_EFFICIENCY_RATIO,
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
@@ -530,8 +531,6 @@ def calculate_battery_efficiency(
             warnings=("state-of-charge history contains invalid values",),
         )
 
-    _check_state_of_charge_balance(history, configuration, capacity_kwh, warnings)
-
     full_indices: list[int] = []
     was_below_full = True
     for index, value in enumerate(history.state_of_charge_percent):
@@ -555,73 +554,85 @@ def calculate_battery_efficiency(
     charge_out = sum(history.inverter_charge_energy_out_kwh)
     discharge_in = sum(history.inverter_discharge_energy_in_kwh)
     discharge_out = sum(history.inverter_discharge_energy_out_kwh)
+    invalid = False
+    battery_efficiency: float | None = None
+    charge_efficiency: float | None = None
+    discharge_efficiency: float | None = None
     if not cycles:
-        return _result(
-            history,
-            retrieved_at,
-            "insufficient_data",
-            warnings=("no complete full-SoC battery cycle is available",),
-        )
-    if battery_in <= 0:
-        return _result(
-            history,
-            retrieved_at,
-            "invalid",
-            warnings=("battery efficiency has a zero throughput denominator",),
-        )
+        warnings.append("no complete full-SoC battery cycle is available")
+    elif battery_in <= 0:
+        invalid = True
+        warnings.append("battery efficiency has a zero throughput denominator")
+    elif battery_in < configuration.minimum_battery_throughput_kwh:
+        warnings.append("battery throughput is below the configured minimum")
+    else:
+        try:
+            battery_efficiency = _ratio(battery_out, battery_in, "battery")
+        except ValueError as error:
+            invalid = True
+            warnings.append(str(error))
+
     if charge_in <= 0:
-        return _result(
-            history,
-            retrieved_at,
-            "invalid",
-            warnings=("inverter charge efficiency has a zero throughput denominator",),
-        )
+        invalid = True
+        warnings.append("inverter charge efficiency has a zero throughput denominator")
+    elif charge_in < configuration.minimum_inverter_charge_throughput_kwh:
+        warnings.append("inverter charge throughput is below the configured minimum")
+    else:
+        try:
+            charge_efficiency = _ratio(charge_out, charge_in, "inverter charge")
+        except ValueError as error:
+            invalid = True
+            warnings.append(str(error))
+
     if discharge_in <= 0:
-        return _result(
-            history,
-            retrieved_at,
-            "invalid",
-            warnings=(
-                "inverter discharge efficiency has a zero throughput denominator",
-            ),
+        invalid = True
+        warnings.append(
+            "inverter discharge efficiency has a zero throughput denominator"
         )
-    if battery_in < configuration.minimum_battery_throughput_kwh:
-        return _result(
-            history,
-            retrieved_at,
-            "insufficient_data",
-            warnings=("battery throughput is below the configured minimum",),
+    elif discharge_in < configuration.minimum_inverter_discharge_throughput_kwh:
+        warnings.append("inverter discharge throughput is below the configured minimum")
+    else:
+        try:
+            discharge_efficiency = _ratio(
+                discharge_out, discharge_in, "inverter discharge"
+            )
+        except ValueError as error:
+            invalid = True
+            warnings.append(str(error))
+
+    round_trip_efficiency = (
+        charge_efficiency * battery_efficiency * discharge_efficiency
+        if charge_efficiency is not None
+        and battery_efficiency is not None
+        and discharge_efficiency is not None
+        else None
+    )
+    status = (
+        "invalid"
+        if invalid
+        else (
+            "insufficient_data"
+            if any(
+                value is None
+                for value in (
+                    battery_efficiency,
+                    charge_efficiency,
+                    discharge_efficiency,
+                    round_trip_efficiency,
+                )
+            )
+            else "ok"
         )
-    if charge_in < configuration.minimum_inverter_charge_throughput_kwh:
-        return _result(
-            history,
-            retrieved_at,
-            "insufficient_data",
-            warnings=("inverter charge throughput is below the configured minimum",),
-        )
-    if discharge_in < configuration.minimum_inverter_discharge_throughput_kwh:
-        return _result(
-            history,
-            retrieved_at,
-            "insufficient_data",
-            warnings=("inverter discharge throughput is below the configured minimum",),
-        )
-    try:
-        battery_efficiency = _ratio(battery_out, battery_in, "battery")
-        charge_efficiency = _ratio(charge_out, charge_in, "inverter charge")
-        discharge_efficiency = _ratio(discharge_out, discharge_in, "inverter discharge")
-    except ValueError as error:
-        return _result(history, retrieved_at, "invalid", warnings=(str(error),))
+    )
+    _check_state_of_charge_balance(history, configuration, capacity_kwh, warnings)
     return _result(
         history,
         retrieved_at,
-        "ok",
+        status,
         inverter_charge_efficiency=charge_efficiency,
         inverter_discharge_efficiency=discharge_efficiency,
         battery_efficiency=battery_efficiency,
-        round_trip_efficiency=(
-            charge_efficiency * battery_efficiency * discharge_efficiency
-        ),
+        round_trip_efficiency=round_trip_efficiency,
         battery_throughput_kwh=battery_in,
         charge_throughput_kwh=charge_in,
         discharge_throughput_kwh=discharge_in,
@@ -755,13 +766,42 @@ def _result(
     warnings: tuple[str, ...] = (),
 ) -> BatteryEfficiencyData:
     """Build a consistently shaped result for valid and unusable histories."""
+    components = {
+        "inverter_charge_efficiency": inverter_charge_efficiency,
+        "inverter_discharge_efficiency": inverter_discharge_efficiency,
+        "battery_efficiency": battery_efficiency,
+        "round_trip_efficiency": round_trip_efficiency,
+    }
+    defaulted_components = tuple(
+        name for name, value in components.items() if value is None
+    )
+    default_warnings = tuple(
+        f"{name} uses default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
+        for name in defaulted_components
+    )
     return BatteryEfficiencyData(
         schema_version="1",
         status=status,  # type: ignore[arg-type]
-        inverter_charge_efficiency=inverter_charge_efficiency,
-        inverter_discharge_efficiency=inverter_discharge_efficiency,
-        battery_efficiency=battery_efficiency,
-        round_trip_efficiency=round_trip_efficiency,
+        inverter_charge_efficiency=(
+            inverter_charge_efficiency
+            if inverter_charge_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        ),
+        inverter_discharge_efficiency=(
+            inverter_discharge_efficiency
+            if inverter_discharge_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        ),
+        battery_efficiency=(
+            battery_efficiency
+            if battery_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        ),
+        round_trip_efficiency=(
+            round_trip_efficiency
+            if round_trip_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        ),
         history_start=history.start_time,
         history_end=history.start_time
         + timedelta(hours=len(history.battery_energy_in_kwh)),
@@ -775,8 +815,9 @@ def _result(
         ),
         retrieved_at=retrieved_at,
         latest_observation_at=history.latest_observation_at,
-        warnings=warnings,
+        warnings=tuple(dict.fromkeys((*warnings, *default_warnings))),
         quality=history.quality,
+        defaulted_components=defaulted_components,
     )
 
 

@@ -22,6 +22,9 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert 'id="price-chart"' in document
     assert 'id="efficiency-summary"' in document
     assert 'id="efficiency-chart"' not in document
+    assert "efficiency-default-marker" in (FRONTEND / "app.js").read_text(
+        encoding="utf-8"
+    )
     assert 'role="tab"' in document
     assert 'aria-controls="dashboard-panel"' in document
     assert 'id="point-tooltip"' in document

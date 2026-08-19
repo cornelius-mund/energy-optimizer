@@ -379,6 +379,7 @@ class DashboardSeries(BaseModel):
     freshness: Literal["fresh", "stale", "unknown"]
     validation_status: Literal["valid", "suspect", "invalid"]
     missing_intervals: list[datetime] = Field(default_factory=list)
+    is_default: bool = False
 
     @model_validator(mode="after")
     def validate_series_alignment(self) -> "DashboardSeries":

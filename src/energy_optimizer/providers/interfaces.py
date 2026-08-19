@@ -12,6 +12,7 @@ BATTERY_SOURCE_ID = "battery"
 BATTERY_EFFICIENCY_SOURCE_ID = "battery_efficiency"
 BATTERY_EFFICIENCY_HISTORY_SOURCE_ID = "battery_efficiency_history"
 ELECTRICITY_PRICE_SOURCE_ID = "de"
+DEFAULT_EFFICIENCY_RATIO = 0.95
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,7 @@ class BatteryEfficiencyData:
     latest_observation_at: datetime
     warnings: tuple[str, ...] = ()
     quality: tuple[IntervalQuality, ...] = ()
+    defaulted_components: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

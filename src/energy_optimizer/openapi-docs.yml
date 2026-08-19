@@ -643,6 +643,10 @@ components:
             format: date-time
           type: array
           title: Missing Intervals
+        is_default:
+          type: boolean
+          title: Is Default
+          default: false
       additionalProperties: false
       type: object
       required:

@@ -261,8 +261,13 @@ def _battery_efficiency_dashboard_series(
         available_end_time=data.history_end,
         retrieved_at=data.retrieved_at,
         freshness="unknown",
-        validation_status="valid" if data.status == "ok" else "suspect",
+        validation_status=(
+            "valid"
+            if data.status == "ok" and name not in data.defaulted_components
+            else "suspect"
+        ),
         missing_intervals=[] if in_range else [timestamp],
+        is_default=name in data.defaulted_components,
     )
 
 
@@ -298,9 +303,9 @@ def _efficiency_dashboard_data(
             start, end, [], ["battery efficiency data is unavailable"]
         )
     names = (
+        ("battery_efficiency", "Battery round-trip efficiency"),
         ("inverter_charge_efficiency", "Inverter charge efficiency"),
         ("inverter_discharge_efficiency", "Inverter discharge efficiency"),
-        ("battery_efficiency", "Battery round-trip efficiency"),
         ("round_trip_efficiency", "Complete round-trip efficiency"),
     )
     diagnostics = list(data.warnings)
@@ -315,6 +320,10 @@ def _efficiency_dashboard_data(
     )
     if data.status != "ok":
         diagnostics.insert(0, f"battery efficiency result status: {data.status}")
+    if data.defaulted_components:
+        diagnostics.append(
+            "defaulted efficiency components: " + ", ".join(data.defaulted_components)
+        )
     return _dashboard_response(
         start,
         end,
