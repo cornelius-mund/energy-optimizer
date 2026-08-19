@@ -1,10 +1,12 @@
 """Tests for measured battery and inverter efficiency calculation."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 import pytest
+from _pytest.logging import LogCaptureFixture
 
 from energy_optimizer.config import (
     BatteryEfficiencyLegConfiguration,
@@ -370,6 +372,73 @@ def test_importer_rejects_soc_history_with_no_usable_records(
             importer.fetch(START, START + timedelta(hours=1))
     finally:
         client.close()
+
+
+def test_importer_carries_forward_soc_across_an_unchanged_state_gap() -> None:
+    """Home Assistant only logs a row when a state changes.
+
+    An hour with no new SOC row does not mean the value is missing; it means
+    the value has not changed since the previous observation. The importer
+    must carry that value forward instead of failing.
+    """
+    configuration = importer_configuration()
+    start = START
+    end = START + timedelta(hours=4)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id != "sensor.soc":
+            return httpx.Response(200, json=home_assistant_history_payload(entity_id))
+        # No row is recorded for hours 1 and 2: the SOC value did not change
+        # between the hour-0 and hour-3 observations.
+        readings = [
+            ("2026-01-01T00:00:00+00:00", "50"),
+            ("2026-01-01T03:00:00+00:00", "50"),
+            ("2026-01-01T04:00:00+00:00", "60"),
+        ]
+        return httpx.Response(
+            200,
+            json=home_assistant_history_payload(
+                entity_id, readings, unit="%", state_class="measurement"
+            ),
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        data = importer.fetch(start, end, now=end)
+    finally:
+        client.close()
+
+    assert data.state_of_charge_percent == (50.0, 50.0, 50.0, 50.0, 60.0)
+
+
+def test_importer_logs_soc_history_requests_at_debug_level(
+    caplog: LogCaptureFixture,
+) -> None:
+    configuration = importer_configuration()
+    start = START
+    end = START + timedelta(hours=1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        return httpx.Response(200, json=home_assistant_history_payload(entity_id))
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
+            importer.fetch(start, end, now=end)
+    finally:
+        client.close()
+
+    history_requests = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=home_assistant_history_request")
+    ]
+    assert history_requests
+    assert all(record.levelno == logging.DEBUG for record in history_requests)
 
 
 def test_importer_clamps_pv_surplus_instead_of_failing_the_refresh() -> None:
