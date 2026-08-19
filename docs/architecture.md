@@ -168,6 +168,15 @@ represents a net directional flow instead of an absolute total, such as the
 measured battery-efficiency legs, opt into `allow_negative`, which clamps a
 negative hourly net to zero for that hour rather than failing; a non-finite
 value is always rejected regardless of this option.
+The measured battery-efficiency importer aligns the six energy legs and
+state-of-charge history, then carries any suspect quality on those hours
+through to the persisted history and the calculated result instead of
+rejecting the fetch: a suspect hour must not prevent the surrounding,
+unaffected hours from being persisted, since the incremental history store
+can then only ever request the genuinely missing tail on the next scheduled
+attempt instead of re-fetching the complete configured history. Orchestration
+marks a run containing suspect quality as `suspect` rather than `failed`,
+which still blocks that result from feeding automatic optimization triggers.
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns

@@ -290,6 +290,73 @@ def test_importer_fetches_and_aligns_home_assistant_history() -> None:
     assert len(data.state_of_charge_percent) == 5
 
 
+def test_importer_persists_history_despite_a_suspect_interval() -> None:
+    """A reset/spike anomaly on one leg must not fail the entire fetch.
+
+    Regression test for issue #157: the aligned history used to reject the
+    whole requested window whenever any hour anywhere in it carried a suspect
+    quality flag, which meant the source could never persist and always
+    retried the same full history range.
+    """
+    configuration = importer_configuration()
+    start = START
+    end = START + timedelta(hours=4)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id == "sensor.soc":
+            readings = [
+                (f"2026-01-01T0{hour}:00:00+00:00", str(value))
+                for hour, value in enumerate((50, 60, 70, 80, 90))
+            ]
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(
+                    entity_id, readings, unit="%", state_class="measurement"
+                ),
+            )
+        if entity_id == "sensor.battery_in":
+            # The counter decreases at hour 3 without a matching last_reset
+            # change, which HomeAssistantEnergyAggregator correctly flags as
+            # a suspect counter_reset for that hour.
+            readings = [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "1"),
+                ("2026-01-01T02:00:00+00:00", "3"),
+                ("2026-01-01T03:00:00+00:00", "2"),
+                ("2026-01-01T04:00:00+00:00", "10"),
+            ]
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(entity_id, readings),
+            )
+        return httpx.Response(
+            200,
+            json=home_assistant_history_payload(entity_id),
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        data = importer.fetch(start, end, now=end)
+    finally:
+        client.close()
+
+    assert len(data.battery_energy_in_kwh) == 4
+    assert len(data.quality) == 4
+    assert data.quality[2].status == "suspect"
+    assert [item.status for index, item in enumerate(data.quality) if index != 2] == [
+        "valid",
+        "valid",
+        "valid",
+    ]
+
+    result = calculate_battery_efficiency(
+        data, calculation_configuration(), capacity_kwh=10, now=end
+    )
+    assert any(item.status == "suspect" for item in result.quality)
+
+
 def test_importer_reports_home_assistant_history_failure() -> None:
     configuration = importer_configuration()
     client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(503)))

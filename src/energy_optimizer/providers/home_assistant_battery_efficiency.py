@@ -28,6 +28,7 @@ from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
+    IntervalQuality,
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import (
@@ -109,7 +110,9 @@ class HomeAssistantBatteryEfficiencyImporter:
             start,
             end + timedelta(hours=1),
         )
-        aligned_start, aligned_end, aligned = self._align_history(series, soc, end)
+        aligned_start, aligned_end, aligned, quality = self._align_history(
+            series, soc, end
+        )
         retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
         latest_observation_at = min(
             [item.latest_observation_at for pair in series.values() for item in pair]
@@ -133,6 +136,7 @@ class HomeAssistantBatteryEfficiencyImporter:
             ),
             retrieved_at=retrieved_at,
             latest_observation_at=min(latest_observation_at, aligned_end),
+            quality=quality,
         )
 
     def is_fresh(
@@ -294,7 +298,12 @@ class HomeAssistantBatteryEfficiencyImporter:
         series: dict[str, tuple[HomeAssistantEnergySeries, HomeAssistantEnergySeries]],
         soc: tuple[datetime, tuple[float, ...], datetime],
         requested_end: datetime,
-    ) -> tuple[datetime, datetime, dict[str, tuple[float, ...]]]:
+    ) -> tuple[
+        datetime,
+        datetime,
+        dict[str, tuple[float, ...]],
+        tuple[IntervalQuality, ...],
+    ]:
         starts = [item.start_time for pair in series.values() for item in pair] + [
             soc[0]
         ]
@@ -319,14 +328,19 @@ class HomeAssistantBatteryEfficiencyImporter:
                 raise HomeAssistantError(
                     "battery efficiency energy histories are misaligned"
                 )
-            if item.quality and any(
-                value.status == "suspect"
-                for value in item.quality[offset : offset + count]
-            ):
-                raise HomeAssistantError(
-                    "battery efficiency history contains suspect energy intervals"
-                )
             return result
+
+        # A reset, spike, or recovery transition on any leg already contributes
+        # zero energy for its hour (see home_assistant_energy.py); it must not
+        # block persistence of the surrounding, unaffected hours. Instead, the
+        # suspect status is carried onto the calculated result so orchestration
+        # can flag the run without losing incremental progress.
+        quality = [IntervalQuality()] * count
+        for item in [value for pair in series.values() for value in pair]:
+            offset = int((start - item.start_time).total_seconds() // 3600)
+            for index, interval in enumerate(item.quality[offset : offset + count]):
+                if interval.status == "suspect":
+                    quality[index] = interval
 
         soc_offset = int((start - soc[0]).total_seconds() // 3600)
         soc_values = soc[1][soc_offset : soc_offset + count + 1]
@@ -346,6 +360,7 @@ class HomeAssistantBatteryEfficiencyImporter:
                 "discharge_out": values(series["inverter_discharge"][1]),
                 "soc": tuple(soc_values),
             },
+            tuple(quality),
         )
 
     def _history_url(
@@ -365,6 +380,19 @@ class HomeAssistantBatteryEfficiencyImporter:
             error_factory=HomeAssistantError,
             message="Home Assistant efficiency times must include a timezone",
         )
+
+
+def _full_quality(data: BatteryEfficiencyHistoryData) -> tuple[IntervalQuality, ...]:
+    """Return one quality entry per hour, defaulting missing entries to valid.
+
+    Test fixtures and older data may omit ``quality`` entirely (the field
+    defaults to an empty tuple); treat that as "no known anomalies" so
+    concatenation stays aligned with the energy arrays.
+    """
+    count = len(data.battery_energy_in_kwh)
+    if len(data.quality) == count:
+        return data.quality
+    return (IntervalQuality(),) * count
 
 
 def merge_battery_efficiency_history(
@@ -416,6 +444,7 @@ def merge_battery_efficiency_history(
         state_of_charge_percent=(
             existing.state_of_charge_percent[:-1] + incoming.state_of_charge_percent
         ),
+        quality=_full_quality(existing) + _full_quality(incoming),
     )
     return bound_battery_efficiency_history(merged)
 
@@ -429,6 +458,7 @@ def bound_battery_efficiency_history(
     if count <= max_hours:
         return data
     offset = count - max_hours
+    quality = _full_quality(data)
     return replace(
         data,
         start_time=data.start_time + timedelta(hours=offset),
@@ -443,6 +473,7 @@ def bound_battery_efficiency_history(
             data.inverter_discharge_energy_out_kwh[offset:]
         ),
         state_of_charge_percent=data.state_of_charge_percent[offset:],
+        quality=quality[offset:],
     )
 
 
@@ -688,6 +719,7 @@ def _select_history(
             inverter_discharge_energy_in_kwh=(),
             inverter_discharge_energy_out_kwh=(),
             state_of_charge_percent=(),
+            quality=(),
         )
     return replace(
         history,
@@ -703,6 +735,7 @@ def _select_history(
             offset:
         ],
         state_of_charge_percent=history.state_of_charge_percent[offset:],
+        quality=_full_quality(history)[offset:],
     )
 
 
@@ -743,6 +776,7 @@ def _result(
         retrieved_at=retrieved_at,
         latest_observation_at=history.latest_observation_at,
         warnings=warnings,
+        quality=history.quality,
     )
 
 
