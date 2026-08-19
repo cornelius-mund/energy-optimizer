@@ -161,7 +161,13 @@ summary at warning level after the complete entity set has been processed.
 Each cumulative-energy mapping may additionally define a physical upper bound
 for one hourly delta in kWh. The bound is applied after unit conversion and
 before signed aggregation; an exceeded bound produces zero energy and suspect
-quality with reason `physical_limit_exceeded`.
+quality with reason `physical_limit_exceeded`. By default, a negative combined
+hourly value fails the aggregate outright, since `household_load` and
+`grid_flow` totals must never be negative. Callers whose signed expression
+represents a net directional flow instead of an absolute total, such as the
+measured battery-efficiency legs, opt into `allow_negative`, which clamps a
+negative hourly net to zero for that hour rather than failing; a non-finite
+value is always rejected regardless of this option.
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns

@@ -298,6 +298,99 @@ def test_importer_reports_home_assistant_history_failure() -> None:
     client.close()
 
 
+def test_importer_clamps_pv_surplus_instead_of_failing_the_refresh() -> None:
+    """PV yield exceeding battery charging in one hour is ordinary export.
+
+    The remainder was exported rather than stored, so the ``inverter_charge``
+    leg's net directional expression is negative for that hour. This must not
+    fail the fetch; the leg's value for that hour is clamped to zero instead.
+    """
+
+    def leg(name: str) -> dict[str, list[dict[str, object]]]:
+        return {
+            "energy_in": [entity(f"{name}_in")],
+            "energy_out": [entity(f"{name}_out")],
+        }
+
+    configuration = home_assistant_configuration_factory(
+        battery={
+            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+            "capacity": {"value": 10, "unit": "kWh"},
+            "minimum_soc": {"value": 1, "unit": "kWh"},
+            "maximum_soc": {"value": 10, "unit": "kWh"},
+            "maximum_charge": {"value": 4, "unit": "kW"},
+            "maximum_discharge": {"value": 4, "unit": "kW"},
+            "efficiency_calculation": {
+                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                "battery": leg("battery"),
+                "inverter_charge": {
+                    "energy_in": [entity("charge_in")],
+                    "energy_out": [
+                        entity("charging_battery_energy"),
+                        entity("pv_yield", "subtract"),
+                    ],
+                },
+                "inverter_discharge": leg("discharge"),
+            },
+        }
+    )()
+    start = START
+    end = START + timedelta(hours=1)
+
+    def reading(value: float) -> list[tuple[str, str]]:
+        return [
+            ("2026-01-01T00:00:00+00:00", "0"),
+            ("2026-01-01T01:00:00+00:00", str(value)),
+        ]
+
+    responses = {
+        "sensor.soc": home_assistant_history_payload(
+            "sensor.soc",
+            [("2026-01-01T00:00:00+00:00", "50"), ("2026-01-01T01:00:00+00:00", "55")],
+            unit="%",
+            state_class="measurement",
+        ),
+        "sensor.battery_in": home_assistant_history_payload(
+            "sensor.battery_in", reading(0.5)
+        ),
+        "sensor.battery_out": home_assistant_history_payload(
+            "sensor.battery_out", reading(0.0)
+        ),
+        "sensor.charge_in": home_assistant_history_payload(
+            "sensor.charge_in", reading(0.2)
+        ),
+        # Battery charged 0.738 kWh from all sources this hour.
+        "sensor.charging_battery_energy": home_assistant_history_payload(
+            "sensor.charging_battery_energy", reading(0.738)
+        ),
+        # Combined PV yield of 1.54 kWh exceeded the battery charge; the
+        # surplus was exported rather than stored.
+        "sensor.pv_yield": home_assistant_history_payload(
+            "sensor.pv_yield", reading(1.54)
+        ),
+        "sensor.discharge_in": home_assistant_history_payload(
+            "sensor.discharge_in", reading(0.0)
+        ),
+        "sensor.discharge_out": home_assistant_history_payload(
+            "sensor.discharge_out", reading(0.0)
+        ),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        return httpx.Response(200, json=responses[entity_id])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        data = importer.fetch(start, end, now=end)
+    finally:
+        client.close()
+
+    assert data.inverter_charge_energy_out_kwh == (0.0,)
+    assert data.inverter_charge_energy_in_kwh == (0.2,)
+
+
 def test_merge_extends_persisted_history_with_new_hours() -> None:
     existing = history()
     incoming = history(

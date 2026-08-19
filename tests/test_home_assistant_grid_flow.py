@@ -201,6 +201,52 @@ def test_fetch_supports_multiple_signed_entities_per_channel() -> None:
     assert data.export_kw == (1.0, 2.0, 3.0, 4.0)
 
 
+def test_fetch_rejects_negative_combined_import() -> None:
+    second_import = "sensor.grid_import_submeter"
+    responses = {
+        ENTITY_ID: history_payload(
+            ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "0.1"),
+                ("2026-01-01T02:00:00+00:00", "0.2"),
+                ("2026-01-01T03:00:00+00:00", "0.3"),
+                ("2026-01-01T04:00:00+00:00", "0.4"),
+            ],
+        ),
+        second_import: standard_payload(second_import),
+        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        grid_import_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": second_import,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "subtract",
+            },
+        ],
+    )
+    try:
+        with pytest.raises(HomeAssistantError, match="negative"):
+            provider.fetch(START, END, now=NOW)
+    finally:
+        client.close()
+
+
 def test_fetch_aligns_channels_to_the_latest_available_start() -> None:
     responses = {
         ENTITY_ID: standard_payload(ENTITY_ID),

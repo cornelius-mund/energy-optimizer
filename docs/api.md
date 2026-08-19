@@ -161,6 +161,19 @@ so the daily recompute does not re-fetch the complete history from Home
 Assistant each time. The calculator itself uses all retained history, or all
 history since `history_start`, and never uses a rolling window.
 
+Each leg's signed `energy_in`/`energy_out` expression is a net directional
+energy flow, not an absolute cumulative total. For a DC-coupled installation,
+`inverter_charge.energy_out` above nets the battery's total charging energy
+against the directly consumed PV yield to isolate the AC-sourced share; in any
+hour where PV production exceeds the battery's charging energy, that
+expression's net value is negative because the surplus was exported rather
+than stored. This is an ordinary condition, not invalid data: a negative net
+value for one of these three legs (`battery`, `inverter_charge`,
+`inverter_discharge`) is clamped to zero for that hour instead of failing the
+provider refresh. Household load and grid flow are unaffected by this and
+continue to reject any negative combined value outright, since those totals
+are not directional net expressions.
+
 The state-of-charge validation checks physical plausibility, not round-trip
 loss: during an hour with only charging (or only discharging) energy measured,
 the stored energy change can never exceed what was delivered, nor exceed what
