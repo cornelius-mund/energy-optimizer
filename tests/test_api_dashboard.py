@@ -193,7 +193,7 @@ def test_efficiency_dashboard_marks_default_component_values(
             inverter_charge_efficiency=0.95,
             inverter_discharge_efficiency=0.8,
             battery_efficiency=0.85,
-            round_trip_efficiency=0.95,
+            round_trip_efficiency=0.646,
             history_start=start,
             history_end=start + timedelta(hours=2),
             battery_throughput_kwh=5,
@@ -206,10 +206,7 @@ def test_efficiency_dashboard_marks_default_component_values(
             ),
             retrieved_at=start,
             latest_observation_at=start,
-            defaulted_components=(
-                "inverter_charge_efficiency",
-                "round_trip_efficiency",
-            ),
+            defaulted_components=("inverter_charge_efficiency",),
         ),
     )
 
@@ -229,7 +226,8 @@ def test_efficiency_dashboard_marks_default_component_values(
     assert series["inverter_discharge_efficiency_actual"]["is_default"] is False
     assert series["inverter_charge_efficiency_actual"]["is_default"] is True
     assert series["inverter_charge_efficiency_actual"]["values"] == [0.95]
-    assert series["round_trip_efficiency_actual"]["is_default"] is True
+    assert series["round_trip_efficiency_actual"]["values"] == [0.646]
+    assert series["round_trip_efficiency_actual"]["is_default"] is False
 
 
 def test_forecast_dashboard_returns_aligned_import_and_export_price_series(

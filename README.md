@@ -125,7 +125,8 @@ Configuration is expected to contain parameters such as:
   use a documented 95% default instead of failing. The dashboard's Efficiency
   tab displays the calculated components as raw ratio summaries over retained
   history; any component that cannot be calculated is shown as a marked 95%
-  ratio default.
+  ratio default. Complete round-trip efficiency is always calculated from the
+  three effective component ratios, including defaults.
 - Electric vehicle parameters
 - Heat-pump parameters
 - Solver settings

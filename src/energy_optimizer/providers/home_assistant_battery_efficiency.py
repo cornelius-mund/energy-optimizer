@@ -601,11 +601,21 @@ def calculate_battery_efficiency(
             warnings.append(str(error))
 
     round_trip_efficiency = (
-        charge_efficiency * battery_efficiency * discharge_efficiency
-        if charge_efficiency is not None
-        and battery_efficiency is not None
-        and discharge_efficiency is not None
-        else None
+        (
+            battery_efficiency
+            if battery_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        )
+        * (
+            charge_efficiency
+            if charge_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        )
+        * (
+            discharge_efficiency
+            if discharge_efficiency is not None
+            else DEFAULT_EFFICIENCY_RATIO
+        )
     )
     status = (
         "invalid"
@@ -618,7 +628,6 @@ def calculate_battery_efficiency(
                     battery_efficiency,
                     charge_efficiency,
                     discharge_efficiency,
-                    round_trip_efficiency,
                 )
             )
             else "ok"
