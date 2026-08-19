@@ -158,8 +158,11 @@ of failing; this only applies to calculated mode without a fixed
 Ingestion persists the aligned hourly history under its own record and requests
 only the hours after the previously persisted history on every scheduled run,
 so the daily recompute does not re-fetch the complete history from Home
-Assistant each time. The calculator itself uses all retained history, or all
-history since `history_start`, and never uses a rolling window.
+Assistant each time. Empty Home Assistant chunks before an entity's retained
+history begins are skipped during bootstrap; the resulting history starts at
+the earliest complete retained hour and does not fabricate earlier values. The
+calculator itself uses all retained history, or all history since `history_start`,
+and never uses a rolling window.
 
 Each leg's signed `energy_in`/`energy_out` expression is a net directional
 energy flow, not an absolute cumulative total. For a DC-coupled installation,
