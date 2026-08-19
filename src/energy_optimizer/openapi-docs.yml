@@ -205,6 +205,7 @@ paths:
           - actual
           - forecast
           - plan
+          - efficiency
           type: string
           default: actual
           title: Scenario Kind
@@ -351,18 +352,12 @@ components:
           exclusiveMinimum: 0.0
           title: Maximum Discharge Kw
           description: Maximum discharging power in kW
-        charge_efficiency:
+        battery_efficiency:
           type: number
           maximum: 1.0
           exclusiveMinimum: 0.0
-          title: Charge Efficiency
-          description: Fraction of charging energy retained by the battery
-        discharge_efficiency:
-          type: number
-          maximum: 1.0
-          exclusiveMinimum: 0.0
-          title: Discharge Efficiency
-          description: Fraction of battery energy delivered during discharge
+          title: Battery Efficiency
+          description: Measured battery round-trip efficiency
         unit:
           type: string
           const: kWh
@@ -391,8 +386,7 @@ components:
       - initial_soc_kwh
       - maximum_charge_kw
       - maximum_discharge_kw
-      - charge_efficiency
-      - discharge_efficiency
+      - battery_efficiency
       - unit
       - power_unit
       title: BatteryRequest
@@ -438,12 +432,9 @@ components:
         maximum_discharge_kw:
           type: number
           title: Maximum Discharge Kw
-        charge_efficiency:
+        battery_efficiency:
           type: number
-          title: Charge Efficiency
-        discharge_efficiency:
-          type: number
-          title: Discharge Efficiency
+          title: Battery Efficiency
         unit:
           type: string
           const: kWh
@@ -470,8 +461,7 @@ components:
       - initial_soc_kwh
       - maximum_charge_kw
       - maximum_discharge_kw
-      - charge_efficiency
-      - discharge_efficiency
+      - battery_efficiency
       - unit
       - power_unit
       title: BatteryResponse

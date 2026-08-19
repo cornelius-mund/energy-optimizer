@@ -173,14 +173,16 @@ API layer. The orchestration layer owns those policies.
 `HomeAssistantBatteryImporter` is intentionally separate from the cumulative
 energy helper because battery state of charge and capabilities are instantaneous
 state values. It reads the live state-of-charge entity, while static capability
-limits and efficiencies may be supplied as validated constants or as configured
+limits and the one battery round-trip efficiency may be supplied as validated constants or as configured
 Home Assistant state entities. Entity values can optionally select a named
 attribute; all values are converted to the battery contract, and one current SOC
-value is returned together with scalar capability limits and efficiencies. Only
+value is returned together with scalar capability limits and the one battery
+round-trip efficiency. Only
 entity-backed values determine freshness, and a failure in any required mapping
-prevents a partial snapshot from being returned. Historic SOC reconstruction is
-not part of this provider; consumers that need measurement history must use a
-dedicated history importer and alignment policy.
+prevents a partial snapshot from being returned. Historic SOC reconstruction for
+efficiency calculations is handled by the dedicated measured-efficiency importer,
+which aligns configured battery and inverter expressions with state-of-charge
+history before persisting it for the daily calculation.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or
@@ -189,8 +191,13 @@ data type, provider, and entity identifier. Atomic replacement, validation on
 read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
-JSON model. Grid-flow persistence replaces the latest validated record; historic
-range retention is deferred to the unified multi-asset history feature.
+JSON model. Grid-flow persistence replaces the latest validated record; measured
+battery-efficiency history is persisted as one aligned multi-series record.
+Each scheduled recompute requests only the hours after the previously
+persisted history from Home Assistant, merges them into the retained record,
+and bounds retention to the same ten-year limit as household-load history, so
+the daily calculation only pays the cost of a complete history fetch once,
+not on every run.
 Household-load history uses one self-contained hourly observation
 per line in an NDJSON file. API submissions may append overlapping corrections,
 and reads select the latest record for each timestamp before discarding values

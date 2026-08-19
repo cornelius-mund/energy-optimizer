@@ -23,7 +23,8 @@
 
       <nav class="tabs" aria-label="Dashboard views">
         <button class="tab is-active" id="actuals-tab" type="button" role="tab" aria-selected="true" aria-controls="dashboard-panel">Historic actuals</button>
-        <button class="tab" id="forecast-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Forecast</button>
+       <button class="tab" id="forecast-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Forecast</button>
+       <button class="tab" id="efficiency-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Efficiency</button>
       </nav>
 
       <section id="dashboard-panel" class="panel" role="tabpanel" aria-labelledby="actuals-tab">
@@ -63,7 +64,7 @@
                 <g id="power-points"></g>
                 <g id="power-labels"></g>
               </svg>
-              <svg id="price-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="price-chart-title price-chart-description" hidden>
+               <svg id="price-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="price-chart-title price-chart-description" hidden>
                 <title id="price-chart-title">Electricity prices (EUR/kWh)</title>
                 <desc id="price-chart-description">Hourly electricity prices in EUR/kWh.</desc>
                 <text class="axis-unit" id="price-axis-unit" x="4" y="12">EUR/kWh</text>
@@ -71,7 +72,16 @@
                 <g id="price-series-paths"></g>
                 <g id="price-points"></g>
                 <g id="price-labels"></g>
-              </svg>
+               </svg>
+               <svg id="efficiency-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="efficiency-chart-title efficiency-chart-description" hidden>
+                 <title id="efficiency-chart-title">Efficiency data (ratio)</title>
+                 <desc id="efficiency-chart-description">Measured efficiency ratios.</desc>
+                 <text class="axis-unit" id="efficiency-axis-unit" x="4" y="12">ratio</text>
+                 <g id="efficiency-grid-lines"></g>
+                 <g id="efficiency-series-paths"></g>
+                 <g id="efficiency-points"></g>
+                 <g id="efficiency-labels"></g>
+               </svg>
             </div>
             <div id="point-tooltip" class="point-tooltip" role="status" aria-live="polite" hidden></div>
           </div>

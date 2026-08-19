@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -24,6 +24,7 @@ from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import (
     BATTERY_SOURCE_ID,
     BatteryData,
+    BatteryEfficiencyData,
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
@@ -31,6 +32,8 @@ from energy_optimizer.providers.normalization import as_utc, parse_aware_timesta
 logger = logging.getLogger(__name__)
 
 __all__ = ["HomeAssistantBatteryImporter", "HomeAssistantError"]
+
+DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE = 0.95
 
 
 class HomeAssistantBatteryImporter:
@@ -49,7 +52,12 @@ class HomeAssistantBatteryImporter:
         self.battery_configuration = configuration.battery
         self._http = JsonHttpClient(client)
 
-    def fetch(self, *, now: datetime | None = None) -> BatteryData:
+    def fetch(
+        self,
+        *,
+        now: datetime | None = None,
+        efficiency_data: BatteryEfficiencyData | None = None,
+    ) -> BatteryData:
         """Fetch and normalize all configured battery mappings atomically."""
         retrieved_at = as_utc(
             now or datetime.now(timezone.utc),
@@ -94,11 +102,12 @@ class HomeAssistantBatteryImporter:
             values["maximum_discharge"],
             self._value("maximum_discharge", values["maximum_discharge"], records),
         )
-        charge_efficiency = self._convert_efficiency(
-            "charge_efficiency", values["charge_efficiency"], records
-        )
-        discharge_efficiency = self._convert_efficiency(
-            "discharge_efficiency", values["discharge_efficiency"], records
+        battery_efficiency = self._efficiency_value(
+            "battery_efficiency",
+            values["battery_efficiency"],
+            records,
+            efficiency_data,
+            default=DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE,
         )
         self._validate_values(
             capacity=capacity,
@@ -107,8 +116,7 @@ class HomeAssistantBatteryImporter:
             initial_soc=initial_soc,
             maximum_charge=maximum_charge,
             maximum_discharge=maximum_discharge,
-            charge_efficiency=charge_efficiency,
-            discharge_efficiency=discharge_efficiency,
+            battery_efficiency=battery_efficiency,
         )
         latest_observation_at = min(
             self._record_timestamp(records, name) for name in mappings
@@ -124,8 +132,7 @@ class HomeAssistantBatteryImporter:
             initial_soc_kwh=initial_soc,
             maximum_charge_kw=maximum_charge,
             maximum_discharge_kw=maximum_discharge,
-            charge_efficiency=charge_efficiency,
-            discharge_efficiency=discharge_efficiency,
+            battery_efficiency=battery_efficiency,
             unit="kWh",
             power_unit="kW",
             source=SourceMetadata(
@@ -244,8 +251,9 @@ class HomeAssistantBatteryImporter:
             "maximum_soc": configuration.maximum_soc,
             "maximum_charge": configuration.maximum_charge,
             "maximum_discharge": configuration.maximum_discharge,
-            "charge_efficiency": configuration.charge_efficiency,
-            "discharge_efficiency": configuration.discharge_efficiency,
+            "battery_efficiency": cast(
+                BatteryConfigurationValue, configuration.battery_efficiency
+            ),
         }
 
     def _value(
@@ -318,6 +326,40 @@ class HomeAssistantBatteryImporter:
     ) -> float:
         return self._convert(name, value, self._value(name, value, records))
 
+    def _efficiency_value(
+        self,
+        name: str,
+        value: BatteryConfigurationValue | None,
+        records: dict[str, dict[str, Any]],
+        calculated: BatteryEfficiencyData | None,
+        *,
+        default: float | None = None,
+    ) -> float:
+        """Resolve fixed values, then a completed calculation, then a default.
+
+        A live battery snapshot must remain available even before the first
+        complete measured efficiency cycle exists, so calculated mode falls
+        back to ``default`` (documented as 95%) instead of failing the whole
+        snapshot while measurement history is still accumulating.
+        """
+        if value is not None:
+            return self._convert_efficiency(name, value, records)
+        if calculated is not None and calculated.status == "ok":
+            resolved = getattr(calculated, name)
+            if resolved is not None:
+                return float(resolved)
+        if default is not None:
+            if self.battery_configuration.efficiency_calculation is not None:
+                logger.info(
+                    "event=battery_efficiency_default_used "
+                    "component=home_assistant operation=fetch field=%s "
+                    "reason=calculation_not_ready default=%s",
+                    name,
+                    default,
+                )
+            return default
+        raise HomeAssistantError(f"Home Assistant battery {name} is not configured")
+
     def _record_timestamp(
         self,
         records: dict[str, dict[str, Any]],
@@ -341,8 +383,7 @@ class HomeAssistantBatteryImporter:
         initial_soc: float,
         maximum_charge: float,
         maximum_discharge: float,
-        charge_efficiency: float,
-        discharge_efficiency: float,
+        battery_efficiency: float,
     ) -> None:
         values = {
             "capacity": capacity,
@@ -351,8 +392,7 @@ class HomeAssistantBatteryImporter:
             "initial_soc": initial_soc,
             "maximum_charge": maximum_charge,
             "maximum_discharge": maximum_discharge,
-            "charge_efficiency": charge_efficiency,
-            "discharge_efficiency": discharge_efficiency,
+            "battery_efficiency": battery_efficiency,
         }
         for name, value in values.items():
             if not math.isfinite(value):
@@ -384,7 +424,7 @@ class HomeAssistantBatteryImporter:
                 "Home Assistant battery state of charge is outside configured SOC "
                 "limits"
             )
-        if not 0 < charge_efficiency <= 1 or not 0 < discharge_efficiency <= 1:
+        if not 0 < battery_efficiency <= 1:
             raise HomeAssistantError(
                 "Home Assistant battery efficiencies must be greater than zero and "
                 "no greater than one"

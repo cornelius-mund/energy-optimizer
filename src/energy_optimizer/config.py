@@ -2,6 +2,7 @@
 
 import logging
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -93,6 +94,68 @@ type BatteryConfigurationValue = (
 )
 
 
+class BatteryEfficiencyLegConfiguration(BaseModel):
+    """Signed cumulative-energy entities making up one measured efficiency leg."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    energy_in: list[HomeAssistantEnergyEntityConfiguration] = Field(min_length=1)
+    energy_out: list[HomeAssistantEnergyEntityConfiguration] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_entities(self) -> "BatteryEfficiencyLegConfiguration":
+        """Reject duplicate entities within one expression side."""
+        for side, entities in (
+            ("energy_in", self.energy_in),
+            ("energy_out", self.energy_out),
+        ):
+            entity_ids = [entity.entity_id for entity in entities]
+            if len(entity_ids) != len(set(entity_ids)):
+                raise ValueError(
+                    f"battery efficiency {side} entities must not contain duplicates"
+                )
+        if {entity.entity_id for entity in self.energy_in} & {
+            entity.entity_id for entity in self.energy_out
+        }:
+            logger.warning(
+                "event=configuration_efficiency_entity_reuse "
+                "component=configuration reason=entity_used_on_both_sides"
+            )
+        return self
+
+
+class HomeAssistantBatteryEfficiencyConfiguration(BaseModel):
+    """Configuration for measured battery and inverter efficiency components."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    battery: BatteryEfficiencyLegConfiguration
+    inverter_charge: BatteryEfficiencyLegConfiguration
+    inverter_discharge: BatteryEfficiencyLegConfiguration
+    state_of_charge: HomeAssistantBatteryEntityConfiguration
+    history_start: datetime | None = None
+    full_soc_threshold_percent: float = Field(default=100, gt=0, le=100)
+    minimum_battery_throughput_kwh: float = Field(default=0.1, gt=0)
+    minimum_inverter_charge_throughput_kwh: float = Field(default=0.1, gt=0)
+    minimum_inverter_discharge_throughput_kwh: float = Field(default=0.1, gt=0)
+    soc_balance_tolerance_kwh: float = Field(default=1.0, gt=0)
+
+    @model_validator(mode="after")
+    def validate_history_start(self) -> "HomeAssistantBatteryEfficiencyConfiguration":
+        """Require an unambiguous history boundary when one is configured."""
+        if self.history_start is not None and (
+            self.history_start.tzinfo is None or self.history_start.utcoffset() is None
+        ):
+            raise ValueError(
+                "battery.efficiency_calculation.history_start must include a timezone"
+            )
+        if self.state_of_charge.unit != "%":
+            raise ValueError(
+                "battery.efficiency_calculation.state_of_charge must use %"
+            )
+        return self
+
+
 class HomeAssistantBatteryConfiguration(BaseModel):
     """Home Assistant battery state and static capability configuration."""
 
@@ -104,8 +167,8 @@ class HomeAssistantBatteryConfiguration(BaseModel):
     maximum_soc: BatteryConfigurationValue
     maximum_charge: BatteryConfigurationValue
     maximum_discharge: BatteryConfigurationValue
-    charge_efficiency: BatteryConfigurationValue
-    discharge_efficiency: BatteryConfigurationValue
+    battery_efficiency: BatteryConfigurationValue | None = None
+    efficiency_calculation: HomeAssistantBatteryEfficiencyConfiguration | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -119,8 +182,7 @@ class HomeAssistantBatteryConfiguration(BaseModel):
             "maximum_soc": "%",
             "maximum_charge": "kW",
             "maximum_discharge": "kW",
-            "charge_efficiency": "ratio",
-            "discharge_efficiency": "ratio",
+            "battery_efficiency": "ratio",
         }
         normalized = dict(values)
         for name, unit in defaults.items():
@@ -150,12 +212,28 @@ class HomeAssistantBatteryConfiguration(BaseModel):
         }.items():
             if value.unit not in {"W", "kW"}:
                 raise ValueError(f"battery.{name} must use W or kW")
-        for name, value in {
-            "charge_efficiency": self.charge_efficiency,
-            "discharge_efficiency": self.discharge_efficiency,
-        }.items():
-            if value.unit not in {"%", "ratio"}:
+        efficiency_values: dict[str, BatteryConfigurationValue | None] = {
+            "battery_efficiency": self.battery_efficiency,
+        }
+        for name, efficiency_value in efficiency_values.items():
+            if efficiency_value is None:
+                continue
+            if efficiency_value.unit not in {"%", "ratio"}:
                 raise ValueError(f"battery.{name} must use % or ratio")
+        if self.efficiency_calculation is not None:
+            for name, fixed_value in (("battery_efficiency", self.battery_efficiency),):
+                if fixed_value is not None:
+                    logger.warning(
+                        "event=configuration_efficiency_precedence "
+                        "component=configuration field=battery.%s "
+                        "precedence=fixed_over_calculated",
+                        name,
+                    )
+        if self.efficiency_calculation is None and self.battery_efficiency is None:
+            raise ValueError(
+                "battery.battery_efficiency must be configured unless "
+                "efficiency_calculation is configured"
+            )
         self._validate_constants()
         return self
 
@@ -184,7 +262,7 @@ class HomeAssistantBatteryConfiguration(BaseModel):
             if constant.unit == "%" and constant.value > 100:
                 raise ValueError(f"battery.{name} percentage must not exceed 100")
 
-        for name in ("charge_efficiency", "discharge_efficiency"):
+        for name in ("battery_efficiency",):
             constant = constants.get(name)
             if constant is None:
                 continue
@@ -272,8 +350,7 @@ class HomeAssistantConfiguration(BaseModel):
                 self.battery.maximum_soc,
                 self.battery.maximum_charge,
                 self.battery.maximum_discharge,
-                self.battery.charge_efficiency,
-                self.battery.discharge_efficiency,
+                self.battery.battery_efficiency,
             )
             battery_mappings = tuple(
                 value

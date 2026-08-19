@@ -192,11 +192,8 @@ class BatteryRequest(BaseModel):
     maximum_discharge_kw: Annotated[float, Field(gt=0, le=100000)] = Field(
         description="Maximum discharging power in kW"
     )
-    charge_efficiency: Annotated[float, Field(gt=0, le=1)] = Field(
-        description="Fraction of charging energy retained by the battery"
-    )
-    discharge_efficiency: Annotated[float, Field(gt=0, le=1)] = Field(
-        description="Fraction of battery energy delivered during discharge"
+    battery_efficiency: Annotated[float, Field(gt=0, le=1)] = Field(
+        description="Measured battery round-trip efficiency"
     )
     unit: Literal["kWh"] = Field(description="Unit used by energy fields")
     power_unit: Literal["kW"] = Field(description="Unit used by power fields")
@@ -213,8 +210,7 @@ class BatteryRequest(BaseModel):
         "initial_soc_kwh",
         "maximum_charge_kw",
         "maximum_discharge_kw",
-        "charge_efficiency",
-        "discharge_efficiency",
+        "battery_efficiency",
         mode="before",
     )
     @classmethod
@@ -261,8 +257,7 @@ class BatteryResponse(BaseModel):
     initial_soc_kwh: float
     maximum_charge_kw: float
     maximum_discharge_kw: float
-    charge_efficiency: float
-    discharge_efficiency: float
+    battery_efficiency: float
     unit: Literal["kWh"]
     power_unit: Literal["kW"]
     source: SourceMetadata | None = None

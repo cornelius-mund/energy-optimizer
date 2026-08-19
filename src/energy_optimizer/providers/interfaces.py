@@ -9,6 +9,8 @@ HOUSEHOLD_LOAD_MAX_VALUES = 87_672
 PV_GENERATION_SOURCE_ID = "pv_generation"
 GRID_FLOW_SOURCE_ID = "grid_flow"
 BATTERY_SOURCE_ID = "battery"
+BATTERY_EFFICIENCY_SOURCE_ID = "battery_efficiency"
+BATTERY_EFFICIENCY_HISTORY_SOURCE_ID = "battery_efficiency_history"
 ELECTRICITY_PRICE_SOURCE_ID = "de"
 
 
@@ -90,13 +92,55 @@ class BatteryData:
     initial_soc_kwh: float
     maximum_charge_kw: float
     maximum_discharge_kw: float
-    charge_efficiency: float
-    discharge_efficiency: float
+    battery_efficiency: float
     unit: Literal["kWh"]
     power_unit: Literal["kW"]
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+
+
+@dataclass(frozen=True)
+class BatteryEfficiencyHistoryData:
+    """Aligned measured energy and state-of-charge history for efficiency work."""
+
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    battery_energy_in_kwh: tuple[float, ...]
+    battery_energy_out_kwh: tuple[float, ...]
+    inverter_charge_energy_in_kwh: tuple[float, ...]
+    inverter_charge_energy_out_kwh: tuple[float, ...]
+    inverter_discharge_energy_in_kwh: tuple[float, ...]
+    inverter_discharge_energy_out_kwh: tuple[float, ...]
+    state_of_charge_percent: tuple[float, ...]
+    unit: Literal["kWh"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    latest_observation_at: datetime
+
+
+@dataclass(frozen=True)
+class BatteryEfficiencyData:
+    """Calculated efficiency components and their measurement diagnostics."""
+
+    schema_version: Literal["1"]
+    status: Literal["ok", "insufficient_data", "invalid"]
+    inverter_charge_efficiency: float | None
+    inverter_discharge_efficiency: float | None
+    battery_efficiency: float | None
+    round_trip_efficiency: float | None
+    history_start: datetime | None
+    history_end: datetime | None
+    battery_throughput_kwh: float
+    charge_throughput_kwh: float
+    discharge_throughput_kwh: float
+    complete_cycle_count: int
+    unit: Literal["ratio"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    latest_observation_at: datetime
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,7 @@ import logging
 from pydantic import TypeAdapter
 
 from energy_optimizer.providers.interfaces import (
+    BatteryEfficiencyData,
     ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
@@ -17,3 +18,4 @@ HOUSEHOLD_LOAD_ADAPTER = TypeAdapter(HouseholdLoadData)
 GRID_FLOW_ADAPTER = TypeAdapter(GridFlowData)
 PV_GENERATION_ADAPTER = TypeAdapter(PvGenerationData)
 ELECTRICITY_PRICE_ADAPTER = TypeAdapter(ElectricityPriceData)
+BATTERY_EFFICIENCY_ADAPTER = TypeAdapter(BatteryEfficiencyData)

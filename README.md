@@ -116,6 +116,14 @@ Configuration is expected to contain parameters such as:
 - Electricity pricing behavior
 - PV system parameters
 - Battery parameters
+- Battery and inverter efficiency can be calculated from complete Home Assistant
+  history. Battery efficiency is one full-cycle round-trip value; inverter charge
+  and discharge efficiencies are independent measured conversion values. Configure
+  signed energy entity lists under `battery.efficiency_calculation` to account for
+  DC-coupled MPPT/PV paths. Fixed `battery_efficiency` takes precedence with a
+  warning. Before the first complete cycle is available, live battery snapshots
+  use a documented 95% default instead of failing. The dashboard's Efficiency
+  tab displays the calculated components.
 - Electric vehicle parameters
 - Heat-pump parameters
 - Solver settings

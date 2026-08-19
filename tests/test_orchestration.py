@@ -28,6 +28,8 @@ from energy_optimizer.orchestration import (
 )
 from energy_optimizer.providers.interfaces import (
     BatteryData,
+    BatteryEfficiencyData,
+    BatteryEfficiencyHistoryData,
     GridFlowData,
     HouseholdLoadData,
     IntervalQuality,
@@ -104,8 +106,7 @@ def battery_data(now: datetime) -> BatteryData:
         initial_soc_kwh=5.0,
         maximum_charge_kw=4.0,
         maximum_discharge_kw=4.0,
-        charge_efficiency=0.95,
-        discharge_efficiency=0.9,
+        battery_efficiency=0.95,
         unit="kWh",
         power_unit="kW",
         source=SourceMetadata(provider="home-assistant", entity_id="battery"),
@@ -719,12 +720,8 @@ def test_configured_battery_orchestrator_persists_battery_state(
             "entity_id": "sensor.battery_discharge",
             "unit": "kW",
         },
-        "charge_efficiency": {
-            "entity_id": "sensor.battery_charge_efficiency",
-            "unit": "ratio",
-        },
-        "discharge_efficiency": {
-            "entity_id": "sensor.battery_discharge_efficiency",
+        "battery_efficiency": {
+            "entity_id": "sensor.battery_efficiency",
             "unit": "ratio",
         },
     }
@@ -759,6 +756,220 @@ def test_configured_battery_orchestrator_persists_battery_state(
     )
     assert persisted is not None
     assert persisted.state_of_charge_kwh == (5.0,)
+
+
+def test_configured_efficiency_orchestrator_persists_daily_calculation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEfficiencyImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime,
+            *,
+            now: datetime | None = None,
+        ) -> BatteryEfficiencyHistoryData:
+            del end_time
+            return BatteryEfficiencyHistoryData(
+                schema_version="1",
+                start_time=start_time,
+                interval_minutes=60,
+                battery_energy_in_kwh=(0, 5, 0, 5, 0, 5),
+                battery_energy_out_kwh=(0, 4, 0, 4, 0, 4),
+                inverter_charge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
+                inverter_charge_energy_out_kwh=(9, 9, 9, 9, 9, 9),
+                inverter_discharge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
+                inverter_discharge_energy_out_kwh=(8, 8, 8, 8, 8, 8),
+                state_of_charge_percent=(50, 100, 50, 100, 50, 100, 50),
+                unit="kWh",
+                source=SourceMetadata(
+                    provider="home-assistant", entity_id="battery_efficiency_history"
+                ),
+                retrieved_at=now or START,
+                latest_observation_at=now or START,
+            )
+
+        def is_fresh(
+            self,
+            _: BatteryEfficiencyHistoryData,
+            *,
+            now: datetime | None = None,
+        ) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
+        FakeEfficiencyImporter,
+    )
+    energy_entity = {
+        "entity_id": "sensor.energy",
+        "state_class": "total_increasing",
+        "unit": "kWh",
+        "operation": "add",
+    }
+    leg = {"energy_in": [energy_entity], "energy_out": [energy_entity]}
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "timeout_seconds": 5,
+                "battery": {
+                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                    "capacity": 10,
+                    "minimum_soc": 1,
+                    "maximum_soc": 10,
+                    "maximum_charge": 4,
+                    "maximum_discharge": 4,
+                    "efficiency_calculation": {
+                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                        "battery": leg,
+                        "inverter_charge": leg,
+                        "inverter_discharge": leg,
+                    },
+                },
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "battery_efficiency": DataSourceScheduleConfiguration(
+                    interval_seconds=86400
+                )
+            },
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+
+    assert orchestrator is not None
+    cycle = orchestrator.run_due(START + timedelta(hours=6))
+
+    assert cycle.provider_runs[0].status == "success"
+    result = store.load(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+    )
+    assert result is not None
+    assert result.battery_efficiency == pytest.approx(0.8)
+
+
+def test_configured_efficiency_orchestrator_fetches_only_missing_hours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fetch_calls: list[tuple[datetime, datetime]] = []
+
+    class FakeIncrementalEfficiencyImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime,
+            *,
+            now: datetime | None = None,
+        ) -> BatteryEfficiencyHistoryData:
+            fetch_calls.append((start_time, end_time))
+            hours = int((end_time - start_time).total_seconds() // 3600)
+            return BatteryEfficiencyHistoryData(
+                schema_version="1",
+                start_time=start_time,
+                interval_minutes=60,
+                battery_energy_in_kwh=(1.0,) * hours,
+                battery_energy_out_kwh=(0.0,) * hours,
+                inverter_charge_energy_in_kwh=(1.0,) * hours,
+                inverter_charge_energy_out_kwh=(1.0,) * hours,
+                inverter_discharge_energy_in_kwh=(1.0,) * hours,
+                inverter_discharge_energy_out_kwh=(1.0,) * hours,
+                state_of_charge_percent=(50.0,) * (hours + 1),
+                unit="kWh",
+                source=SourceMetadata(
+                    provider="home-assistant", entity_id="battery_efficiency_history"
+                ),
+                retrieved_at=now or start_time,
+                latest_observation_at=now or end_time,
+            )
+
+        def is_fresh(self, *_: object, **__: object) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
+        FakeIncrementalEfficiencyImporter,
+    )
+    energy_entity = {
+        "entity_id": "sensor.energy",
+        "state_class": "total_increasing",
+        "unit": "kWh",
+        "operation": "add",
+    }
+    leg = {"energy_in": [energy_entity], "energy_out": [energy_entity]}
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "timeout_seconds": 5,
+                "battery": {
+                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                    "capacity": 10,
+                    "minimum_soc": 1,
+                    "maximum_soc": 10,
+                    "maximum_charge": 4,
+                    "maximum_discharge": 4,
+                    "efficiency_calculation": {
+                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                        "history_start": START.isoformat(),
+                        "battery": leg,
+                        "inverter_charge": leg,
+                        "inverter_discharge": leg,
+                    },
+                },
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "battery_efficiency": DataSourceScheduleConfiguration(
+                    interval_seconds=3600
+                )
+            },
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+
+    orchestrator.run_due(START + timedelta(hours=1), force=True)
+    orchestrator.run_due(START + timedelta(hours=2), force=True)
+
+    assert fetch_calls == [
+        (START, START + timedelta(hours=1)),
+        (START + timedelta(hours=1), START + timedelta(hours=2)),
+    ]
+    history_key = ProviderDataKey(
+        "battery-efficiency-history",
+        "home-assistant",
+        "battery_efficiency_history",
+    )
+    persisted = store.load(history_key, TypeAdapter(BatteryEfficiencyHistoryData))
+    assert persisted is not None
+    assert persisted.start_time == START
+    assert len(persisted.battery_energy_in_kwh) == 2
+    assert len(persisted.state_of_charge_percent) == 3
 
 
 def test_configured_forecast_solar_orchestrator_rejects_fast_polling(

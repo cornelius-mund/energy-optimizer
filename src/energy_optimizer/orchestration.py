@@ -26,6 +26,11 @@ from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    HomeAssistantBatteryEfficiencyImporter,
+    calculate_battery_efficiency,
+    merge_battery_efficiency_history,
+)
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
@@ -33,6 +38,8 @@ from energy_optimizer.providers.home_assistant_grid_flow import (
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryData,
+    BatteryEfficiencyData,
+    BatteryEfficiencyHistoryData,
     ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
@@ -775,7 +782,17 @@ def _build_battery_registration(
         schedule: DataSourceScheduleConfiguration,
     ) -> BatteryData:
         del schedule
-        return importer.fetch(now=now)
+        efficiency_data = store.load(
+            ProviderDataKey(
+                data_type="battery-efficiency",
+                provider="home-assistant",
+                entity_id="battery_efficiency",
+            ),
+            TypeAdapter(BatteryEfficiencyData),
+        )
+        if efficiency_data is None:
+            return importer.fetch(now=now)
+        return importer.fetch(now=now, efficiency_data=efficiency_data)
 
     def load() -> BatteryData | None:
         return store.load(key, adapter)
@@ -791,12 +808,126 @@ def _build_battery_registration(
     )
 
 
+def _build_battery_efficiency_registration(
+    configuration: Configuration,
+    orchestration: OrchestrationConfiguration,
+    store: ProviderDataStore,
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    battery = home_assistant.battery if home_assistant is not None else None
+    calculation = battery.efficiency_calculation if battery is not None else None
+    if (
+        home_assistant is None
+        or calculation is None
+        or "battery_efficiency" not in orchestration.sources
+    ):
+        return None
+
+    importer = HomeAssistantBatteryEfficiencyImporter(home_assistant)
+    history_adapter = TypeAdapter(BatteryEfficiencyHistoryData)
+    result_adapter = TypeAdapter(BatteryEfficiencyData)
+    history_key = ProviderDataKey(
+        data_type="battery-efficiency-history",
+        provider="home-assistant",
+        entity_id="battery_efficiency_history",
+    )
+    result_key = ProviderDataKey(
+        data_type="battery-efficiency",
+        provider="home-assistant",
+        entity_id="battery_efficiency",
+    )
+
+    def fetch(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> BatteryEfficiencyData:
+        del schedule
+        end_time = now.replace(minute=0, second=0, microsecond=0)
+        persisted = store.load(history_key, history_adapter)
+        if persisted is not None:
+            start_time = persisted.start_time + timedelta(
+                hours=len(persisted.battery_energy_in_kwh)
+            )
+        elif calculation.history_start is not None:
+            start_time = calculation.history_start
+        else:
+            start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
+
+        if persisted is not None and start_time >= end_time:
+            history = persisted
+        else:
+            incoming = importer.fetch(start_time, end_time, now=now)
+            history = merge_battery_efficiency_history(persisted, incoming)
+            store.save(history_key, history_adapter, history)
+        capacity: float | None = None
+        battery_data = store.load(
+            ProviderDataKey("battery", "home-assistant", "battery"),
+            TypeAdapter(BatteryData),
+        )
+        if battery_data is not None:
+            capacity = battery_data.capacity_kwh
+        elif battery is not None and hasattr(battery.capacity, "value"):
+            capacity = float(battery.capacity.value)
+            if battery.capacity.unit == "Wh":
+                capacity /= 1000
+        result = calculate_battery_efficiency(
+            history,
+            calculation,
+            capacity_kwh=capacity,
+            now=now,
+        )
+        store.save(result_key, result_adapter, result)
+        return result
+
+    def load() -> BatteryEfficiencyData | None:
+        return store.load(result_key, result_adapter)
+
+    schedule_interval_seconds = orchestration.sources[
+        "battery_efficiency"
+    ].interval_seconds
+
+    return _make_provider_registration(
+        name="battery_efficiency",
+        data_type="battery-efficiency",
+        data_class=BatteryEfficiencyData,
+        adapter=result_adapter,
+        fetch=fetch,
+        is_fresh=lambda data, now=None: _efficiency_history_is_fresh(
+            store, history_key, history_adapter, schedule_interval_seconds, now
+        ),
+        load=load,
+    )
+
+
+def _efficiency_history_is_fresh(
+    store: ProviderDataStore,
+    key: ProviderDataKey,
+    adapter: TypeAdapter[BatteryEfficiencyHistoryData],
+    interval_seconds: float,
+    now: datetime | None,
+) -> bool:
+    """Check freshness against the calculated source's own recompute interval.
+
+    The shared Home Assistant ``max_data_age_seconds`` threshold is meant for
+    live entity polling and is typically much shorter than the daily
+    recompute interval used here, which would otherwise report this source
+    as stale for most of every day even when it is working correctly.
+    """
+    history = store.load(key, adapter)
+    if history is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    age_seconds = (current - history.latest_observation_at).total_seconds()
+    return age_seconds <= interval_seconds * 2
+
+
 _REGISTRATION_FACTORIES: tuple[ConfiguredRegistrationFactory, ...] = (
     _build_household_load_registration,
     _build_pv_generation_registration,
     _build_electricity_prices_registration,
     _build_grid_flow_registration,
     _build_battery_registration,
+    _build_battery_efficiency_registration,
 )
 
 
