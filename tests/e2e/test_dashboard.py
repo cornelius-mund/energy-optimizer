@@ -191,10 +191,29 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     page.locator("#efficiency-tab").click()
     _load_range(page, start, end)
 
-    expect(page.locator("#efficiency-chart")).to_be_visible()
-    expect(page.locator("#efficiency-points circle")).to_have_count(4)
-    expect(page.locator("#legend")).to_contain_text("Battery round-trip efficiency")
-    expect(page.locator("#legend")).to_contain_text("Inverter charge efficiency")
+    expect(page.locator("#efficiency-summary")).to_be_visible()
+    expect(page.locator("#efficiency-summary dt")).to_have_count(4)
+    expect(page.locator("#efficiency-summary .efficiency-value")).to_have_count(4)
+    values = page.locator("#efficiency-summary .efficiency-value").all_text_contents()
+    assert values == [
+        "0.9",
+        "0.8",
+        "0.85",
+        "0.612",
+    ]
+    expect(page.locator("#efficiency-summary")).to_contain_text("0.9 ratio")
+    expect(page.locator("svg#efficiency-chart")).to_have_count(0)
+    expect(page.locator("#status")).to_have_text("4 efficiency values loaded.")
+    expect(page.locator("#chart-note")).to_contain_text(
+        "retained battery and inverter history"
+    )
+    expect(page.locator("#efficiency-summary")).to_contain_text(
+        "Battery round-trip efficiency"
+    )
+    expect(page.locator("#efficiency-summary")).to_contain_text(
+        "Inverter charge efficiency"
+    )
+    expect(page.locator("#legend")).to_be_empty()
 
 
 def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) -> None:

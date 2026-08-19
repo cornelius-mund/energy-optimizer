@@ -73,19 +73,11 @@
                 <g id="price-points"></g>
                 <g id="price-labels"></g>
                </svg>
-               <svg id="efficiency-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="efficiency-chart-title efficiency-chart-description" hidden>
-                 <title id="efficiency-chart-title">Efficiency data (ratio)</title>
-                 <desc id="efficiency-chart-description">Measured efficiency ratios.</desc>
-                 <text class="axis-unit" id="efficiency-axis-unit" x="4" y="12">ratio</text>
-                 <g id="efficiency-grid-lines"></g>
-                 <g id="efficiency-series-paths"></g>
-                 <g id="efficiency-points"></g>
-                 <g id="efficiency-labels"></g>
-               </svg>
+               <dl id="efficiency-summary" class="efficiency-summary" aria-label="Calculated efficiency summaries" hidden></dl>
             </div>
             <div id="point-tooltip" class="point-tooltip" role="status" aria-live="polite" hidden></div>
           </div>
-          <p class="chart-note">Each point represents one completed hourly interval. Charts are separated by unit. Focus a point to inspect it.</p>
+          <p id="chart-note" class="chart-note">Each point represents one completed hourly interval. Charts are separated by unit. Focus a point to inspect it.</p>
         </article>
 
         <aside class="details-card card" aria-labelledby="details-heading">

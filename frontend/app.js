@@ -18,6 +18,8 @@
   const eyebrow = document.querySelector("#series-eyebrow");
   const legend = document.querySelector("#legend");
   const interpretation = document.querySelector("#interpretation-text");
+  const efficiencySummary = document.querySelector("#efficiency-summary");
+  const chartNote = document.querySelector("#chart-note");
   let scenario = "actual";
 
   const pad = (value) => String(value).padStart(2, "0");
@@ -115,21 +117,10 @@
       title: document.querySelector("#price-chart-title"),
       description: document.querySelector("#price-chart-description"),
     },
-    efficiency: {
-      element: document.querySelector("#efficiency-chart"),
-      grid: document.querySelector("#efficiency-grid-lines"),
-      labels: document.querySelector("#efficiency-labels"),
-      points: document.querySelector("#efficiency-points"),
-      seriesPaths: document.querySelector("#efficiency-series-paths"),
-      axisUnit: document.querySelector("#efficiency-axis-unit"),
-      title: document.querySelector("#efficiency-chart-title"),
-      description: document.querySelector("#efficiency-chart-description"),
-    },
   };
   const chartSeries = (series) => ({
     power: series.filter((item) => ["household_load_actual", "pv_generation_forecast"].includes(item.id)),
     price: series.filter((item) => ["import_price_forecast", "export_price_forecast"].includes(item.id)),
-    efficiency: series.filter((item) => item.data_type === "battery_efficiency"),
   });
   const coverageRange = (data) => {
     const ranges = selectedSeries(data)
@@ -264,6 +255,29 @@
     });
     hidePoint();
     const series = selectedSeries(data);
+    efficiencySummary.replaceChildren();
+    efficiencySummary.setAttribute("hidden", "");
+    if (scenario === "efficiency") {
+      series
+        .filter((item) => item.data_type === "battery_efficiency")
+        .forEach((item) => {
+          const value = item.values.find((candidate) => Number.isFinite(candidate));
+          if (value === undefined) return;
+          const label = document.createElement("dt");
+          label.textContent = seriesLabel(item);
+          const valueCell = document.createElement("dd");
+          const numericValue = document.createElement("data");
+          numericValue.className = "efficiency-value";
+          numericValue.value = String(value);
+          numericValue.textContent = String(value);
+          valueCell.append(numericValue, ` ${unitForSeries(item)}`);
+          efficiencySummary.append(label, valueCell);
+        });
+      if (efficiencySummary.childElementCount) efficiencySummary.removeAttribute("hidden");
+      chartNote.textContent = "Each value is a calculated ratio over the retained battery and inverter history, not an hourly observation.";
+      return;
+    }
+    chartNote.textContent = "Each point represents one completed hourly interval. Charts are separated by unit. Focus a point to inspect it.";
     Object.entries(chartSeries(series)).forEach(([kind, groupedSeries]) => {
       const usableSeries = groupedSeries.filter((item) => hasSeriesData([item], item.id));
       if (usableSeries.length) renderGraph(chartDefinitions[kind], usableSeries);
@@ -304,7 +318,7 @@
         ["export_price_forecast", "Export price", "legend-2"],
       ].filter(([id]) => hasSeriesData(series, id))
       : efficiency
-        ? series.filter((item) => hasSeriesData([item], item.id)).map((item, index) => [item.id, seriesLabel(item), `legend-${index}`])
+        ? []
       : series.some((item) => hasSeriesData([item], "household_load_actual"))
         ? [["household_load_actual", "Household load", "legend-0"]]
         : [];
@@ -357,6 +371,7 @@
       else if (data.status === "empty") setStatus("No data points are available in this range.", "warning");
       else if (data.status === "stale") setStatus("Data is available, but its freshness window has expired.", "warning");
       else if (data.status === "partial") setStatus("Partial coverage is available. Missing intervals are shown as gaps.", "warning");
+      else if (scenario === "efficiency") setStatus(`${count} efficiency value${count === 1 ? "" : "s"} loaded.`);
       else setStatus(`${count} data point${count === 1 ? "" : "s"} loaded.`);
     } catch (error) {
       diagnostic("error", "data_load_failed", { scenario, status: responseStatus, message: error instanceof Error ? error.message : String(error), requestId });
