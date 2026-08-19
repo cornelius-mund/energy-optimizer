@@ -188,6 +188,8 @@ class HomeAssistantBatteryEfficiencyImporter:
                 log_event="home_assistant_history_request",
                 component="home_assistant",
                 operation="history_request",
+                success_log_level=logging.DEBUG,
+                error_log_level=logging.DEBUG,
             )
             if not isinstance(payload, list):
                 raise HomeAssistantError(
@@ -255,25 +257,35 @@ class HomeAssistantBatteryEfficiencyImporter:
                 f"{mapping.entity_id}"
             )
         effective_start = align_to_next_hour(min(records))
-        values: list[float] = []
         hours = int((end_time - effective_start).total_seconds() // 3600)
         if hours <= 0:
             raise HomeAssistantError(
                 "Home Assistant returned no complete state-of-charge history for "
                 f"{mapping.entity_id}"
             )
+        # Home Assistant's history API only returns a row when an entity's
+        # state changes, so an hour with no row does not mean the value is
+        # missing; it means the value has not changed since the previous
+        # observation. Carry the most recent known value forward for each
+        # hour instead of requiring a fresh row in every bucket.
+        sorted_records = sorted(records.items())
+        values: list[float] = []
+        last_value: float | None = None
+        next_index = 0
         for index in range(hours):
-            hour = effective_start + timedelta(hours=index)
-            samples = [
-                value
-                for timestamp, value in sorted(records.items())
-                if hour <= timestamp < hour + timedelta(hours=1)
-            ]
-            if not samples:
+            boundary = effective_start + timedelta(hours=index + 1)
+            while (
+                next_index < len(sorted_records)
+                and sorted_records[next_index][0] < boundary
+            ):
+                last_value = sorted_records[next_index][1]
+                next_index += 1
+            if last_value is None:  # pragma: no cover - effective_start guarantees this
                 raise HomeAssistantError(
-                    f"state-of-charge history has no observation for {hour.isoformat()}"
+                    "Home Assistant returned no state-of-charge observation "
+                    f"before {boundary.isoformat()} for {mapping.entity_id}"
                 )
-            values.append(samples[-1])
+            values.append(last_value)
         latest = max(records)
         return effective_start, tuple(values), latest
 
