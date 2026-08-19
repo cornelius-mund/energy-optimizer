@@ -30,7 +30,11 @@ from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyHistoryData,
     SourceMetadata,
 )
-from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
+from energy_optimizer.providers.normalization import (
+    align_to_next_hour,
+    as_utc,
+    parse_aware_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,11 +189,15 @@ class HomeAssistantBatteryEfficiencyImporter:
                 component="home_assistant",
                 operation="history_request",
             )
-            if (
-                not isinstance(payload, list)
-                or len(payload) != 1
-                or not isinstance(payload[0], list)
-            ):
+            if not isinstance(payload, list):
+                raise HomeAssistantError(
+                    f"Home Assistant state-of-charge history for {mapping.entity_id} "
+                    "must contain one entity series"
+                )
+            if not payload or (len(payload) == 1 and payload[0] == []):
+                chunk_start = chunk_end
+                continue
+            if len(payload) != 1 or not isinstance(payload[0], list):
                 raise HomeAssistantError(
                     f"Home Assistant state-of-charge history for {mapping.entity_id} "
                     "must contain one entity series"
@@ -246,10 +254,16 @@ class HomeAssistantBatteryEfficiencyImporter:
                 "Home Assistant returned no usable state-of-charge history for "
                 f"{mapping.entity_id}"
             )
+        effective_start = align_to_next_hour(min(records))
         values: list[float] = []
-        hours = int((end_time - start_time).total_seconds() // 3600)
+        hours = int((end_time - effective_start).total_seconds() // 3600)
+        if hours <= 0:
+            raise HomeAssistantError(
+                "Home Assistant returned no complete state-of-charge history for "
+                f"{mapping.entity_id}"
+            )
         for index in range(hours):
-            hour = start_time + timedelta(hours=index)
+            hour = effective_start + timedelta(hours=index)
             samples = [
                 value
                 for timestamp, value in sorted(records.items())
@@ -261,7 +275,7 @@ class HomeAssistantBatteryEfficiencyImporter:
                 )
             values.append(samples[-1])
         latest = max(records)
-        return start_time, tuple(values), latest
+        return effective_start, tuple(values), latest
 
     def _align_history(
         self,

@@ -298,6 +298,80 @@ def test_importer_reports_home_assistant_history_failure() -> None:
     client.close()
 
 
+def test_importer_skips_empty_soc_history_chunks_until_history_is_available() -> None:
+    configuration = importer_configuration()
+    start = START
+    end = START + timedelta(days=8)
+    soc_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal soc_requests
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id != "sensor.soc":
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(entity_id),
+            )
+        soc_requests += 1
+        if soc_requests == 1:
+            # Home Assistant returns no series for the period before the
+            # entity's retained history begins.
+            return httpx.Response(200, json=[])
+        readings = [
+            (
+                (START + timedelta(days=7, hours=hour)).isoformat(),
+                str(50 + hour),
+            )
+            for hour in range(26)
+        ]
+        return httpx.Response(
+            200,
+            json=home_assistant_history_payload(
+                entity_id,
+                readings,
+                unit="%",
+                state_class="measurement",
+            ),
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        data = importer.fetch(start, end, now=end)
+    finally:
+        client.close()
+
+    assert soc_requests == 2
+    assert data.start_time == START + timedelta(days=7)
+    assert len(data.state_of_charge_percent) == 25
+    assert data.state_of_charge_percent[0] == 50.0
+    assert data.state_of_charge_percent[-1] == 74.0
+
+
+@pytest.mark.parametrize("empty_payload", [[], [[]]])
+def test_importer_rejects_soc_history_with_no_usable_records(
+    empty_payload: list[object],
+) -> None:
+    configuration = importer_configuration()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id == "sensor.soc":
+            return httpx.Response(200, json=empty_payload)
+        return httpx.Response(
+            200,
+            json=home_assistant_history_payload(entity_id),
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        with pytest.raises(HomeAssistantError, match="no usable state-of-charge"):
+            importer.fetch(START, START + timedelta(hours=1))
+    finally:
+        client.close()
+
+
 def test_importer_clamps_pv_surplus_instead_of_failing_the_refresh() -> None:
     """PV yield exceeding battery charging in one hour is ordinary export.
 
