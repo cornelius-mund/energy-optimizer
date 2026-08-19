@@ -176,6 +176,62 @@ def test_efficiency_dashboard_returns_component_series(
     assert series["battery_efficiency_actual"]["values"] == [0.85]
 
 
+def test_efficiency_dashboard_marks_default_component_values(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    persistence_configuration: Path,
+) -> None:
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration))
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path / "provider-data")
+    store.save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="insufficient_data",
+            inverter_charge_efficiency=0.95,
+            inverter_discharge_efficiency=0.8,
+            battery_efficiency=0.85,
+            round_trip_efficiency=0.95,
+            history_start=start,
+            history_end=start + timedelta(hours=2),
+            battery_throughput_kwh=5,
+            charge_throughput_kwh=0.05,
+            discharge_throughput_kwh=10,
+            complete_cycle_count=1,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=start,
+            latest_observation_at=start,
+            defaulted_components=(
+                "inverter_charge_efficiency",
+                "round_trip_efficiency",
+            ),
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "efficiency",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T03:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    series = {item["id"]: item for item in response.json()["series"]}
+    assert series["battery_efficiency_actual"]["is_default"] is False
+    assert series["inverter_discharge_efficiency_actual"]["is_default"] is False
+    assert series["inverter_charge_efficiency_actual"]["is_default"] is True
+    assert series["inverter_charge_efficiency_actual"]["values"] == [0.95]
+    assert series["round_trip_efficiency_actual"]["is_default"] is True
+
+
 def test_forecast_dashboard_returns_aligned_import_and_export_price_series(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -23,6 +23,7 @@ from energy_optimizer.providers.home_assistant_energy import (
 from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import (
     BATTERY_SOURCE_ID,
+    DEFAULT_EFFICIENCY_RATIO,
     BatteryData,
     BatteryEfficiencyData,
     SourceMetadata,
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["HomeAssistantBatteryImporter", "HomeAssistantError"]
 
-DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE = 0.95
+DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE = DEFAULT_EFFICIENCY_RATIO
 
 
 class HomeAssistantBatteryImporter:
@@ -344,9 +345,9 @@ class HomeAssistantBatteryImporter:
         """
         if value is not None:
             return self._convert_efficiency(name, value, records)
-        if calculated is not None and calculated.status == "ok":
+        if calculated is not None:
             resolved = getattr(calculated, name)
-            if resolved is not None:
+            if resolved is not None and name not in calculated.defaulted_components:
                 return float(resolved)
         if default is not None:
             if self.battery_configuration.efficiency_calculation is not None:

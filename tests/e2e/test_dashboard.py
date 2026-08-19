@@ -167,11 +167,11 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
         TypeAdapter(BatteryEfficiencyData),
         BatteryEfficiencyData(
             schema_version="1",
-            status="ok",
-            inverter_charge_efficiency=0.9,
+            status="insufficient_data",
+            inverter_charge_efficiency=0.95,
             inverter_discharge_efficiency=0.8,
             battery_efficiency=0.85,
-            round_trip_efficiency=0.612,
+            round_trip_efficiency=0.95,
             history_start=start,
             history_end=end - timedelta(hours=1),
             battery_throughput_kwh=5,
@@ -184,6 +184,10 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
             ),
             retrieved_at=retrieved_at,
             latest_observation_at=retrieved_at,
+            defaulted_components=(
+                "inverter_charge_efficiency",
+                "round_trip_efficiency",
+            ),
         ),
     )
 
@@ -196,12 +200,12 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(page.locator("#efficiency-summary .efficiency-value")).to_have_count(4)
     values = page.locator("#efficiency-summary .efficiency-value").all_text_contents()
     assert values == [
-        "0.9",
-        "0.8",
         "0.85",
-        "0.612",
+        "0.95",
+        "0.8",
+        "0.95",
     ]
-    expect(page.locator("#efficiency-summary")).to_contain_text("0.9 ratio")
+    expect(page.locator("#efficiency-summary")).to_contain_text("0.95 ratio")
     expect(page.locator("svg#efficiency-chart")).to_have_count(0)
     expect(page.locator("#status")).to_have_text("4 efficiency values loaded.")
     expect(page.locator("#chart-note")).to_contain_text(
@@ -213,6 +217,10 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(page.locator("#efficiency-summary")).to_contain_text(
         "Inverter charge efficiency"
     )
+    expect(
+        page.locator("#efficiency-summary .efficiency-default-marker")
+    ).to_have_count(2)
+    expect(page.locator("#efficiency-summary")).to_contain_text("0.95 ratio (default)")
     expect(page.locator("#legend")).to_be_empty()
 
 
