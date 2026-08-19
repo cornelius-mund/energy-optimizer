@@ -29,6 +29,7 @@ from energy_optimizer.providers.home_assistant_battery import (
 from energy_optimizer.providers.home_assistant_battery_efficiency import (
     HomeAssistantBatteryEfficiencyImporter,
     calculate_battery_efficiency,
+    merge_battery_efficiency_history,
 )
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
@@ -843,15 +844,21 @@ def _build_battery_efficiency_registration(
         del schedule
         end_time = now.replace(minute=0, second=0, microsecond=0)
         persisted = store.load(history_key, history_adapter)
-        start_time = calculation.history_start
-        if start_time is None:
-            start_time = (
-                persisted.start_time
-                if persisted is not None
-                else end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
+        if persisted is not None:
+            start_time = persisted.start_time + timedelta(
+                hours=len(persisted.battery_energy_in_kwh)
             )
-        history = importer.fetch(start_time, end_time, now=now)
-        store.save(history_key, history_adapter, history)
+        elif calculation.history_start is not None:
+            start_time = calculation.history_start
+        else:
+            start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
+
+        if persisted is not None and start_time >= end_time:
+            history = persisted
+        else:
+            incoming = importer.fetch(start_time, end_time, now=now)
+            history = merge_battery_efficiency_history(persisted, incoming)
+            store.save(history_key, history_adapter, history)
         capacity: float | None = None
         battery_data = store.load(
             ProviderDataKey("battery", "home-assistant", "battery"),
@@ -875,6 +882,10 @@ def _build_battery_efficiency_registration(
     def load() -> BatteryEfficiencyData | None:
         return store.load(result_key, result_adapter)
 
+    schedule_interval_seconds = orchestration.sources[
+        "battery_efficiency"
+    ].interval_seconds
+
     return _make_provider_registration(
         name="battery_efficiency",
         data_type="battery-efficiency",
@@ -882,22 +893,32 @@ def _build_battery_efficiency_registration(
         adapter=result_adapter,
         fetch=fetch,
         is_fresh=lambda data, now=None: _efficiency_history_is_fresh(
-            importer, store, history_key, history_adapter, now
+            store, history_key, history_adapter, schedule_interval_seconds, now
         ),
         load=load,
     )
 
 
 def _efficiency_history_is_fresh(
-    importer: HomeAssistantBatteryEfficiencyImporter,
     store: ProviderDataStore,
     key: ProviderDataKey,
     adapter: TypeAdapter[BatteryEfficiencyHistoryData],
+    interval_seconds: float,
     now: datetime | None,
 ) -> bool:
-    """Check freshness of the history backing a calculated result."""
+    """Check freshness against the calculated source's own recompute interval.
+
+    The shared Home Assistant ``max_data_age_seconds`` threshold is meant for
+    live entity polling and is typically much shorter than the daily
+    recompute interval used here, which would otherwise report this source
+    as stale for most of every day even when it is working correctly.
+    """
     history = store.load(key, adapter)
-    return history is not None and importer.is_fresh(history, now=now)
+    if history is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    age_seconds = (current - history.latest_observation_at).total_seconds()
+    return age_seconds <= interval_seconds * 2
 
 
 _REGISTRATION_FACTORIES: tuple[ConfiguredRegistrationFactory, ...] = (

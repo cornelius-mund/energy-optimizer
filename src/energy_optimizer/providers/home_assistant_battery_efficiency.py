@@ -25,6 +25,7 @@ from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import (
     BATTERY_EFFICIENCY_HISTORY_SOURCE_ID,
     BATTERY_EFFICIENCY_SOURCE_ID,
+    HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
     SourceMetadata,
@@ -32,8 +33,6 @@ from energy_optimizer.providers.interfaces import (
 from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
 
 logger = logging.getLogger(__name__)
-
-MAX_HISTORY_HOURS = 87_672
 
 
 class HomeAssistantBatteryEfficiencyImporter:
@@ -340,6 +339,85 @@ class HomeAssistantBatteryEfficiencyImporter:
         )
 
 
+def merge_battery_efficiency_history(
+    existing: BatteryEfficiencyHistoryData | None,
+    incoming: BatteryEfficiencyHistoryData,
+) -> BatteryEfficiencyHistoryData:
+    """Extend persisted battery-efficiency history with newly fetched hours.
+
+    ``incoming`` must start exactly where ``existing`` ends, so ingestion only
+    ever needs to request the missing hours from Home Assistant instead of
+    re-fetching the complete retained history on every scheduled run.
+    """
+    if existing is None:
+        return bound_battery_efficiency_history(incoming)
+    expected_start = existing.start_time + timedelta(
+        hours=len(existing.battery_energy_in_kwh)
+    )
+    if incoming.start_time != expected_start:
+        raise HomeAssistantError(
+            "battery efficiency history is not contiguous with the persisted history"
+        )
+    merged = replace(
+        incoming,
+        start_time=existing.start_time,
+        battery_energy_in_kwh=(
+            existing.battery_energy_in_kwh + incoming.battery_energy_in_kwh
+        ),
+        battery_energy_out_kwh=(
+            existing.battery_energy_out_kwh + incoming.battery_energy_out_kwh
+        ),
+        inverter_charge_energy_in_kwh=(
+            existing.inverter_charge_energy_in_kwh
+            + incoming.inverter_charge_energy_in_kwh
+        ),
+        inverter_charge_energy_out_kwh=(
+            existing.inverter_charge_energy_out_kwh
+            + incoming.inverter_charge_energy_out_kwh
+        ),
+        inverter_discharge_energy_in_kwh=(
+            existing.inverter_discharge_energy_in_kwh
+            + incoming.inverter_discharge_energy_in_kwh
+        ),
+        inverter_discharge_energy_out_kwh=(
+            existing.inverter_discharge_energy_out_kwh
+            + incoming.inverter_discharge_energy_out_kwh
+        ),
+        # The incoming SoC series repeats the boundary sample already recorded
+        # as the existing series' last value; keep it only once.
+        state_of_charge_percent=(
+            existing.state_of_charge_percent[:-1] + incoming.state_of_charge_percent
+        ),
+    )
+    return bound_battery_efficiency_history(merged)
+
+
+def bound_battery_efficiency_history(
+    data: BatteryEfficiencyHistoryData,
+    max_hours: int = HOUSEHOLD_LOAD_MAX_VALUES,
+) -> BatteryEfficiencyHistoryData:
+    """Trim retained battery-efficiency history to the bounded retention window."""
+    count = len(data.battery_energy_in_kwh)
+    if count <= max_hours:
+        return data
+    offset = count - max_hours
+    return replace(
+        data,
+        start_time=data.start_time + timedelta(hours=offset),
+        battery_energy_in_kwh=data.battery_energy_in_kwh[offset:],
+        battery_energy_out_kwh=data.battery_energy_out_kwh[offset:],
+        inverter_charge_energy_in_kwh=data.inverter_charge_energy_in_kwh[offset:],
+        inverter_charge_energy_out_kwh=data.inverter_charge_energy_out_kwh[offset:],
+        inverter_discharge_energy_in_kwh=(
+            data.inverter_discharge_energy_in_kwh[offset:]
+        ),
+        inverter_discharge_energy_out_kwh=(
+            data.inverter_discharge_energy_out_kwh[offset:]
+        ),
+        state_of_charge_percent=data.state_of_charge_percent[offset:],
+    )
+
+
 def calculate_battery_efficiency(
     history: BatteryEfficiencyHistoryData,
     configuration: HomeAssistantBatteryEfficiencyConfiguration,
@@ -393,6 +471,8 @@ def calculate_battery_efficiency(
             warnings=("state-of-charge history contains invalid values",),
         )
 
+    _check_state_of_charge_balance(history, configuration, capacity_kwh, warnings)
+
     full_indices: list[int] = []
     was_below_full = True
     for index, value in enumerate(history.state_of_charge_percent):
@@ -416,31 +496,6 @@ def calculate_battery_efficiency(
     charge_out = sum(history.inverter_charge_energy_out_kwh)
     discharge_in = sum(history.inverter_discharge_energy_in_kwh)
     discharge_out = sum(history.inverter_discharge_energy_out_kwh)
-    for left, right in cycles:
-        if capacity_kwh is not None:
-            soc_delta = (
-                (
-                    history.state_of_charge_percent[right]
-                    - history.state_of_charge_percent[left]
-                )
-                / 100
-                * capacity_kwh
-            )
-            balance = abs(
-                soc_delta
-                - sum(history.battery_energy_in_kwh[left:right])
-                + sum(history.battery_energy_out_kwh[left:right])
-            )
-            if balance > configuration.soc_balance_tolerance_kwh:
-                warnings.append(
-                    f"state-of-charge balance deviates by {balance:.3f} kWh "
-                    f"between {left} and {right}"
-                )
-        else:
-            warnings.append(
-                "state-of-charge balance was not checked because battery capacity "
-                "is unavailable"
-            )
     if not cycles:
         return _result(
             history,
@@ -514,6 +569,62 @@ def calculate_battery_efficiency(
         complete_cycle_count=len(cycles),
         warnings=tuple(dict.fromkeys(warnings)),
     )
+
+
+def _check_state_of_charge_balance(
+    history: BatteryEfficiencyHistoryData,
+    configuration: HomeAssistantBatteryEfficiencyConfiguration,
+    capacity_kwh: float | None,
+    warnings: list[str],
+) -> None:
+    """Flag hours where the measured energy makes the SoC change impossible.
+
+    This checks physical plausibility rather than round-trip loss: during an
+    hour with only charging (or only discharging) energy measured, the change
+    in stored energy can never exceed what was delivered (while charging) or
+    be exceeded by what was delivered (while discharging), beyond the
+    configured tolerance. Expected conversion and battery losses always keep
+    the measured change within these bounds, so a violation indicates a data
+    problem such as a misconfigured or drifting entity, not ordinary loss.
+    """
+    if capacity_kwh is None:
+        warnings.append(
+            "state-of-charge balance was not checked because battery capacity "
+            "is unavailable"
+        )
+        return
+
+    tolerance = configuration.soc_balance_tolerance_kwh
+    violations = 0
+    max_deviation = 0.0
+    count = len(history.battery_energy_in_kwh)
+    for index in range(count):
+        energy_in = history.battery_energy_in_kwh[index]
+        energy_out = history.battery_energy_out_kwh[index]
+        soc_delta = (
+            (
+                history.state_of_charge_percent[index + 1]
+                - history.state_of_charge_percent[index]
+            )
+            / 100
+            * capacity_kwh
+        )
+        deviation: float | None = None
+        if energy_in > 0 and energy_out == 0:
+            # Stored energy can never exceed what was delivered while charging.
+            deviation = soc_delta - energy_in
+        elif energy_out > 0 and energy_in == 0:
+            # Delivered energy can never exceed what was removed from storage.
+            deviation = energy_out - (-soc_delta)
+        if deviation is not None and deviation > tolerance:
+            violations += 1
+            max_deviation = max(max_deviation, deviation)
+    if violations:
+        warnings.append(
+            "state-of-charge change is physically inconsistent with measured "
+            f"battery energy for {violations} of {count} interval(s); maximum "
+            f"deviation {max_deviation:.3f} kWh exceeds the configured tolerance"
+        )
 
 
 def _ratio(numerator: float, denominator: float, label: str) -> float:
@@ -609,5 +720,7 @@ def _result(
 
 __all__ = [
     "HomeAssistantBatteryEfficiencyImporter",
+    "bound_battery_efficiency_history",
     "calculate_battery_efficiency",
+    "merge_battery_efficiency_history",
 ]

@@ -192,8 +192,12 @@ read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
 JSON model. Grid-flow persistence replaces the latest validated record; measured
-battery-efficiency history is persisted as one aligned multi-series record so
-its daily calculation does not depend on live Home Assistant requests.
+battery-efficiency history is persisted as one aligned multi-series record.
+Each scheduled recompute requests only the hours after the previously
+persisted history from Home Assistant, merges them into the retained record,
+and bounds retention to the same ten-year limit as household-load history, so
+the daily calculation only pays the cost of a complete history fetch once,
+not on every run.
 Household-load history uses one self-contained hourly observation
 per line in an NDJSON file. API submissions may append overlapping corrections,
 and reads select the latest record for each timestamp before discarding values

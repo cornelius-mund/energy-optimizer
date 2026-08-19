@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
+from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
+from energy_optimizer.providers.interfaces import BatteryEfficiencyData, SourceMetadata
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_importer_factory,
@@ -412,3 +414,116 @@ def test_fetch_requires_timezone_aware_retrieval_time() -> None:
             provider.fetch(now=datetime(2026, 1, 1, 5, 30))
     finally:
         client.close()
+
+
+def _calculated_mode_configuration() -> HomeAssistantConfiguration:
+    def leg(name: str) -> dict[str, object]:
+        entity = {
+            "entity_id": f"sensor.{name}",
+            "state_class": "total_increasing",
+            "unit": "kWh",
+            "operation": "add",
+        }
+        return {"energy_in": [entity], "energy_out": [entity]}
+
+    mapping: dict[str, object] = {
+        name: value
+        for name, value in BATTERY_MAPPINGS.items()
+        if name != "battery_efficiency"
+    }
+    mapping["efficiency_calculation"] = {
+        "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
+        "battery": leg("battery"),
+        "inverter_charge": leg("charge"),
+        "inverter_discharge": leg("discharge"),
+    }
+    factory = home_assistant_configuration_factory(battery=mapping)
+    return factory()
+
+
+def test_fetch_defaults_to_95_percent_before_the_first_complete_cycle() -> None:
+    responses = standard_payloads()
+    del responses["sensor.battery_efficiency"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = HomeAssistantBatteryImporter(
+            _calculated_mode_configuration(), client
+        )
+        data = provider.fetch(now=START, efficiency_data=None)
+
+    assert data.battery_efficiency == 0.95
+
+
+def test_fetch_uses_insufficient_calculated_result_as_95_percent_default() -> None:
+    responses = standard_payloads()
+    del responses["sensor.battery_efficiency"]
+    insufficient = BatteryEfficiencyData(
+        schema_version="1",
+        status="insufficient_data",
+        inverter_charge_efficiency=None,
+        inverter_discharge_efficiency=None,
+        battery_efficiency=None,
+        round_trip_efficiency=None,
+        history_start=START,
+        history_end=START,
+        battery_throughput_kwh=0,
+        charge_throughput_kwh=0,
+        discharge_throughput_kwh=0,
+        complete_cycle_count=0,
+        unit="ratio",
+        source=SourceMetadata(
+            provider="home-assistant", entity_id="battery_efficiency"
+        ),
+        retrieved_at=START,
+        latest_observation_at=START,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = HomeAssistantBatteryImporter(
+            _calculated_mode_configuration(), client
+        )
+        data = provider.fetch(now=START, efficiency_data=insufficient)
+
+    assert data.battery_efficiency == 0.95
+
+
+def test_fetch_uses_completed_calculated_battery_efficiency_once_ok() -> None:
+    responses = standard_payloads()
+    del responses["sensor.battery_efficiency"]
+    completed = BatteryEfficiencyData(
+        schema_version="1",
+        status="ok",
+        inverter_charge_efficiency=0.9,
+        inverter_discharge_efficiency=0.85,
+        battery_efficiency=0.8,
+        round_trip_efficiency=0.612,
+        history_start=START,
+        history_end=START,
+        battery_throughput_kwh=10,
+        charge_throughput_kwh=10,
+        discharge_throughput_kwh=10,
+        complete_cycle_count=1,
+        unit="ratio",
+        source=SourceMetadata(
+            provider="home-assistant", entity_id="battery_efficiency"
+        ),
+        retrieved_at=START,
+        latest_observation_at=START,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = HomeAssistantBatteryImporter(
+            _calculated_mode_configuration(), client
+        )
+        data = provider.fetch(now=START, efficiency_data=completed)
+
+    assert data.battery_efficiency == 0.8

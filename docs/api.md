@@ -149,11 +149,24 @@ from consecutive full-SoC boundaries. Inverter charge and discharge efficiencies
 are independent inverter measurements. The complete ratio is their product with
 the battery ratio. A configured `battery_efficiency` takes precedence over the
 calculated battery value and emits a warning. The dashboard exposes these values
-through `scenario_kind=efficiency`.
+through `scenario_kind=efficiency`. Before the first complete full-SoC cycle is
+available (or while the calculated result is otherwise not `"ok"`), the live
+battery snapshot uses a documented 95% default for `battery_efficiency` instead
+of failing; this only applies to calculated mode without a fixed
+`battery_efficiency` override.
 
-The selected ranges are persisted as aligned hourly history. The calculator uses
-all retained history, or all history since `history_start`, and never uses a
-rolling window.
+Ingestion persists the aligned hourly history under its own record and requests
+only the hours after the previously persisted history on every scheduled run,
+so the daily recompute does not re-fetch the complete history from Home
+Assistant each time. The calculator itself uses all retained history, or all
+history since `history_start`, and never uses a rolling window.
+
+The state-of-charge validation checks physical plausibility, not round-trip
+loss: during an hour with only charging (or only discharging) energy measured,
+the stored energy change can never exceed what was delivered, nor exceed what
+was removed from storage, beyond `soc_balance_tolerance_kwh`. A violation
+means the measured data is inconsistent (e.g. a misconfigured or drifting
+entity), not that the battery has ordinary conversion losses.
 
 Live state, cumulative counters, and historical measurements remain provider
 backed; constants are intended for static installation parameters only.

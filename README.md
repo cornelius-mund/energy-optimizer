@@ -121,7 +121,9 @@ Configuration is expected to contain parameters such as:
   and discharge efficiencies are independent measured conversion values. Configure
   signed energy entity lists under `battery.efficiency_calculation` to account for
   DC-coupled MPPT/PV paths. Fixed `battery_efficiency` takes precedence with a
-  warning. The dashboard's Efficiency tab displays the calculated components.
+  warning. Before the first complete cycle is available, live battery snapshots
+  use a documented 95% default instead of failing. The dashboard's Efficiency
+  tab displays the calculated components.
 - Electric vehicle parameters
 - Heat-pump parameters
 - Solver settings

@@ -15,6 +15,7 @@ from energy_optimizer.config import (
 from energy_optimizer.providers.home_assistant_battery_efficiency import (
     HomeAssistantBatteryEfficiencyImporter,
     calculate_battery_efficiency,
+    merge_battery_efficiency_history,
 )
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.interfaces import (
@@ -137,18 +138,79 @@ def test_calculation_rejects_zero_denominator() -> None:
     assert "denominator" in result.warnings[0]
 
 
-def test_calculation_surfaces_state_of_charge_balance_warning() -> None:
+def test_calculation_reports_no_balance_warning_when_capacity_available() -> None:
     result = calculate_battery_efficiency(
-        history(),
-        calculation_configuration().model_copy(
-            update={"soc_balance_tolerance_kwh": 0.5}
-        ),
-        capacity_kwh=20,
-        now=START,
+        history(), calculation_configuration(), capacity_kwh=10, now=START
     )
 
     assert result.status == "ok"
-    assert any("balance deviates" in warning for warning in result.warnings)
+    assert not any("inconsistent" in warning for warning in result.warnings)
+
+
+def test_calculation_skips_balance_check_without_capacity() -> None:
+    result = calculate_battery_efficiency(
+        history(), calculation_configuration(), now=START
+    )
+
+    assert result.status == "ok"
+    assert any("not checked" in warning for warning in result.warnings)
+
+
+def test_calculation_flags_physically_impossible_soc_change() -> None:
+    data = BatteryEfficiencyHistoryData(
+        schema_version="1",
+        start_time=START,
+        interval_minutes=60,
+        # Hour 0 is physically impossible: only 1 kWh was measured flowing
+        # into the battery, but the state of charge implies 5 kWh was stored.
+        battery_energy_in_kwh=(1, 0, 6, 0),
+        battery_energy_out_kwh=(0, 4, 0, 4),
+        inverter_charge_energy_in_kwh=(10, 10, 10, 10),
+        inverter_charge_energy_out_kwh=(9, 9, 9, 9),
+        inverter_discharge_energy_in_kwh=(10, 10, 10, 10),
+        inverter_discharge_energy_out_kwh=(8, 8, 8, 8),
+        state_of_charge_percent=(50, 100, 50, 100, 50),
+        unit="kWh",
+        source=SourceMetadata(provider="home-assistant", entity_id="history"),
+        retrieved_at=START,
+        latest_observation_at=START,
+    )
+
+    result = calculate_battery_efficiency(
+        data, calculation_configuration(), capacity_kwh=10, now=START
+    )
+
+    assert result.status == "ok"
+    assert any("physically inconsistent" in warning for warning in result.warnings)
+    assert any("1 of 4" in warning for warning in result.warnings)
+
+
+def test_calculation_does_not_flag_ordinary_conversion_losses() -> None:
+    data = BatteryEfficiencyHistoryData(
+        schema_version="1",
+        start_time=START,
+        interval_minutes=60,
+        # Every interval stores or delivers less than measured, i.e. ordinary
+        # losses, never more than physically possible.
+        battery_energy_in_kwh=(5, 0, 6, 0),
+        battery_energy_out_kwh=(0, 4, 0, 4),
+        inverter_charge_energy_in_kwh=(10, 10, 10, 10),
+        inverter_charge_energy_out_kwh=(9, 9, 9, 9),
+        inverter_discharge_energy_in_kwh=(10, 10, 10, 10),
+        inverter_discharge_energy_out_kwh=(8, 8, 8, 8),
+        state_of_charge_percent=(50, 100, 50, 100, 50),
+        unit="kWh",
+        source=SourceMetadata(provider="home-assistant", entity_id="history"),
+        retrieved_at=START,
+        latest_observation_at=START,
+    )
+
+    result = calculate_battery_efficiency(
+        data, calculation_configuration(), capacity_kwh=10, now=START
+    )
+
+    assert result.status == "ok"
+    assert not any("inconsistent" in warning for warning in result.warnings)
 
 
 def test_calculation_uses_all_history_since_configured_start() -> None:
@@ -234,3 +296,45 @@ def test_importer_reports_home_assistant_history_failure() -> None:
     with pytest.raises(HomeAssistantError, match="HTTP 503"):
         importer.fetch(START, START + timedelta(hours=4))
     client.close()
+
+
+def test_merge_extends_persisted_history_with_new_hours() -> None:
+    existing = history()
+    incoming = history(
+        battery_in=(5,),
+        battery_out=(4,),
+        soc=(50, 100),
+    )
+    incoming = incoming.__class__(
+        **{
+            **incoming.__dict__,
+            "start_time": existing.start_time
+            + timedelta(hours=len(existing.battery_energy_in_kwh)),
+        }
+    )
+
+    merged = merge_battery_efficiency_history(existing, incoming)
+
+    assert merged.start_time == existing.start_time
+    assert len(merged.battery_energy_in_kwh) == len(
+        existing.battery_energy_in_kwh
+    ) + len(incoming.battery_energy_in_kwh)
+    assert len(merged.state_of_charge_percent) == len(merged.battery_energy_in_kwh) + 1
+    assert merged.battery_energy_in_kwh[-1] == 5
+    assert merged.state_of_charge_percent[-1] == 100
+
+
+def test_merge_rejects_a_non_contiguous_incoming_history() -> None:
+    existing = history()
+    incoming = history()  # starts at the same time instead of right after
+
+    with pytest.raises(HomeAssistantError, match="not contiguous"):
+        merge_battery_efficiency_history(existing, incoming)
+
+
+def test_merge_returns_the_incoming_history_when_nothing_is_persisted() -> None:
+    incoming = history()
+
+    merged = merge_battery_efficiency_history(None, incoming)
+
+    assert merged == incoming

@@ -33,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["HomeAssistantBatteryImporter", "HomeAssistantError"]
 
+DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE = 0.95
+
 
 class HomeAssistantBatteryImporter:
     """Retrieve and normalize a current battery snapshot."""
@@ -105,7 +107,7 @@ class HomeAssistantBatteryImporter:
             values["battery_efficiency"],
             records,
             efficiency_data,
-            default=1.0,
+            default=DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE,
         )
         self._validate_values(
             capacity=capacity,
@@ -333,19 +335,28 @@ class HomeAssistantBatteryImporter:
         *,
         default: float | None = None,
     ) -> float:
-        """Resolve fixed values before the optional calculated result."""
+        """Resolve fixed values, then a completed calculation, then a default.
+
+        A live battery snapshot must remain available even before the first
+        complete measured efficiency cycle exists, so calculated mode falls
+        back to ``default`` (documented as 95%) instead of failing the whole
+        snapshot while measurement history is still accumulating.
+        """
         if value is not None:
             return self._convert_efficiency(name, value, records)
         if calculated is not None and calculated.status == "ok":
             resolved = getattr(calculated, name)
             if resolved is not None:
                 return float(resolved)
-        if self.battery_configuration.efficiency_calculation is not None:
-            raise HomeAssistantError(
-                f"calculated battery {name} is not available; "
-                "collect a complete valid efficiency history"
-            )
         if default is not None:
+            if self.battery_configuration.efficiency_calculation is not None:
+                logger.info(
+                    "event=battery_efficiency_default_used "
+                    "component=home_assistant operation=fetch field=%s "
+                    "reason=calculation_not_ready default=%s",
+                    name,
+                    default,
+                )
             return default
         raise HomeAssistantError(f"Home Assistant battery {name} is not configured")
 
