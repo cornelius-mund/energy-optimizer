@@ -123,7 +123,8 @@ Configuration is expected to contain parameters such as:
   DC-coupled MPPT/PV paths. Fixed `battery_efficiency` takes precedence with a
   warning. Before the first complete cycle is available, live battery snapshots
   use a documented 95% default instead of failing. The dashboard's Efficiency
-  tab displays the calculated components.
+  tab displays the calculated components as raw ratio summaries over retained
+  history.
 - Electric vehicle parameters
 - Heat-pump parameters
 - Solver settings

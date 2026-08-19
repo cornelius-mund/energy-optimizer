@@ -87,6 +87,12 @@ svg { width: 100%; height: auto; overflow: visible; }
 .point-tooltip { position: absolute; z-index: 2; max-width: 220px; padding: 8px 10px; border: 1px solid #bddbd1; border-radius: 8px; color: var(--ink); background: var(--card); box-shadow: var(--shadow); font-size: .75rem; font-weight: 700; pointer-events: none; }
 .chart-wrap { position: relative; }
 .chart-note { margin: 10px 0 0; color: var(--muted); font-size: .76rem; }
+.efficiency-summary { display: grid; grid-template-columns: 1fr auto; gap: 0 18px; margin: 26px 0 0; }
+.efficiency-summary[hidden] { display: none; }
+.efficiency-summary dt, .efficiency-summary dd { margin: 0; padding: 16px 18px; border-top: 1px solid var(--line); background: rgb(232 244 238 / 45%); }
+.efficiency-summary dt { color: var(--muted); font-size: .92rem; }
+.efficiency-summary dd { color: var(--ink); font-size: 1.15rem; font-weight: 800; text-align: right; }
+.efficiency-summary dt:first-of-type, .efficiency-summary dd:first-of-type { border-top: 0; }
 .details-card { align-self: start; }
 .details { display: grid; grid-template-columns: 1fr auto; gap: 16px 12px; margin: 28px 0; }
 .details dt { color: var(--muted); font-size: .78rem; }

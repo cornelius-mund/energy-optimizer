@@ -155,6 +155,12 @@ battery snapshot uses a documented 95% default for `battery_efficiency` instead
 of failing; this only applies to calculated mode without a fixed
 `battery_efficiency` override.
 
+The dashboard Efficiency tab renders each available component as one accessible
+numeric summary row with its raw `ratio` value. These values summarize the
+retained battery and inverter history; they are not hourly chart observations.
+The source, coverage, freshness, retrieval, and calculation diagnostics remain
+available beside the summary.
+
 Ingestion persists the aligned hourly history under its own record and requests
 only the hours after the previously persisted history on every scheduled run,
 so the daily recompute does not re-fetch the complete history from Home
