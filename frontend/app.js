@@ -269,7 +269,7 @@
           const numericValue = document.createElement("data");
           numericValue.className = "efficiency-value";
           numericValue.value = String(value);
-          numericValue.textContent = String(value);
+          numericValue.textContent = value.toFixed(4);
           valueCell.append(numericValue, ` ${unitForSeries(item)}`);
           if (item.is_default) {
             const marker = document.createElement("span");

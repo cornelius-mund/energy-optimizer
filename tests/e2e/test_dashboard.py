@@ -171,7 +171,7 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
             inverter_charge_efficiency=0.95,
             inverter_discharge_efficiency=0.8,
             battery_efficiency=0.85,
-            round_trip_efficiency=0.95,
+            round_trip_efficiency=0.646,
             history_start=start,
             history_end=end - timedelta(hours=1),
             battery_throughput_kwh=5,
@@ -184,10 +184,7 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
             ),
             retrieved_at=retrieved_at,
             latest_observation_at=retrieved_at,
-            defaulted_components=(
-                "inverter_charge_efficiency",
-                "round_trip_efficiency",
-            ),
+            defaulted_components=("inverter_charge_efficiency",),
         ),
     )
 
@@ -200,12 +197,12 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(page.locator("#efficiency-summary .efficiency-value")).to_have_count(4)
     values = page.locator("#efficiency-summary .efficiency-value").all_text_contents()
     assert values == [
-        "0.85",
-        "0.95",
-        "0.8",
-        "0.95",
+        "0.8500",
+        "0.9500",
+        "0.8000",
+        "0.6460",
     ]
-    expect(page.locator("#efficiency-summary")).to_contain_text("0.95 ratio")
+    expect(page.locator("#efficiency-summary")).to_contain_text("0.9500 ratio")
     expect(page.locator("svg#efficiency-chart")).to_have_count(0)
     expect(page.locator("#status")).to_have_text("4 efficiency values loaded.")
     expect(page.locator("#chart-note")).to_contain_text(
@@ -219,8 +216,10 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     )
     expect(
         page.locator("#efficiency-summary .efficiency-default-marker")
-    ).to_have_count(2)
-    expect(page.locator("#efficiency-summary")).to_contain_text("0.95 ratio (default)")
+    ).to_have_count(1)
+    expect(page.locator("#efficiency-summary")).to_contain_text(
+        "0.9500 ratio (default)"
+    )
     expect(page.locator("#legend")).to_be_empty()
 
 
