@@ -29,6 +29,7 @@ from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
+    EfficiencyComponentStatus,
     IntervalQuality,
     SourceMetadata,
 )
@@ -502,6 +503,7 @@ def calculate_battery_efficiency(
     }
     count = len(history.battery_energy_in_kwh)
     warnings: list[str] = []
+    component_statuses: dict[str, EfficiencyComponentStatus] = {}
     if (
         any(len(values) != count for values in arrays.values())
         or len(history.state_of_charge_percent) != count + 1
@@ -511,6 +513,7 @@ def calculate_battery_efficiency(
             retrieved_at,
             "invalid",
             warnings=("efficiency histories are not aligned",),
+            component_statuses=_all_component_statuses("invalid"),
         )
     for name, values in arrays.items():
         if any(not math.isfinite(value) or value < 0 for value in values):
@@ -519,6 +522,7 @@ def calculate_battery_efficiency(
                 retrieved_at,
                 "invalid",
                 warnings=(f"{name} contains negative or non-finite values",),
+                component_statuses=_all_component_statuses("invalid"),
             )
     if any(
         not math.isfinite(value) or value < 0
@@ -529,6 +533,7 @@ def calculate_battery_efficiency(
             retrieved_at,
             "invalid",
             warnings=("state-of-charge history contains invalid values",),
+            component_statuses=_all_component_statuses("invalid"),
         )
 
     full_indices: list[int] = []
@@ -559,45 +564,80 @@ def calculate_battery_efficiency(
     charge_efficiency: float | None = None
     discharge_efficiency: float | None = None
     if not cycles:
-        warnings.append("no complete full-SoC battery cycle is available")
+        component_statuses["battery_efficiency"] = "unavailable"
+        warnings.append(
+            "battery efficiency is unavailable: no complete full-SoC battery cycle "
+            f"is available; using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
+        )
     elif battery_in <= 0:
         invalid = True
-        warnings.append("battery efficiency has a zero throughput denominator")
+        component_statuses["battery_efficiency"] = "invalid"
+        warnings.append(
+            "battery efficiency is invalid: zero throughput denominator; using "
+            f"default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
+        )
     elif battery_in < configuration.minimum_battery_throughput_kwh:
-        warnings.append("battery throughput is below the configured minimum")
+        component_statuses["battery_efficiency"] = "defaulted"
+        warnings.append(
+            "battery efficiency uses default efficiency ratio "
+            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {battery_in:.3f} kWh is below "
+            "the configured minimum"
+        )
     else:
         try:
             battery_efficiency = _ratio(battery_out, battery_in, "battery")
+            component_statuses["battery_efficiency"] = "calculated"
         except ValueError as error:
             invalid = True
+            component_statuses["battery_efficiency"] = "invalid"
             warnings.append(str(error))
 
     if charge_in <= 0:
         invalid = True
-        warnings.append("inverter charge efficiency has a zero throughput denominator")
+        component_statuses["inverter_charge_efficiency"] = "invalid"
+        warnings.append(
+            "inverter charge efficiency is invalid: zero throughput denominator; "
+            f"using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
+        )
     elif charge_in < configuration.minimum_inverter_charge_throughput_kwh:
-        warnings.append("inverter charge throughput is below the configured minimum")
+        component_statuses["inverter_charge_efficiency"] = "defaulted"
+        warnings.append(
+            "inverter charge efficiency uses default efficiency ratio "
+            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {charge_in:.3f} kWh is below "
+            "the configured minimum"
+        )
     else:
         try:
             charge_efficiency = _ratio(charge_out, charge_in, "inverter charge")
+            component_statuses["inverter_charge_efficiency"] = "calculated"
         except ValueError as error:
             invalid = True
+            component_statuses["inverter_charge_efficiency"] = "invalid"
             warnings.append(str(error))
 
     if discharge_in <= 0:
         invalid = True
+        component_statuses["inverter_discharge_efficiency"] = "invalid"
         warnings.append(
-            "inverter discharge efficiency has a zero throughput denominator"
+            "inverter discharge efficiency is invalid: zero throughput denominator; "
+            f"using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
         )
     elif discharge_in < configuration.minimum_inverter_discharge_throughput_kwh:
-        warnings.append("inverter discharge throughput is below the configured minimum")
+        component_statuses["inverter_discharge_efficiency"] = "defaulted"
+        warnings.append(
+            "inverter discharge efficiency uses default efficiency ratio "
+            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {discharge_in:.3f} kWh is below "
+            "the configured minimum"
+        )
     else:
         try:
             discharge_efficiency = _ratio(
                 discharge_out, discharge_in, "inverter discharge"
             )
+            component_statuses["inverter_discharge_efficiency"] = "calculated"
         except ValueError as error:
             invalid = True
+            component_statuses["inverter_discharge_efficiency"] = "invalid"
             warnings.append(str(error))
 
     round_trip_efficiency = (
@@ -617,6 +657,17 @@ def calculate_battery_efficiency(
             else DEFAULT_EFFICIENCY_RATIO
         )
     )
+    component_statuses["round_trip_efficiency"] = "invalid" if invalid else "calculated"
+    if not invalid and any(
+        status in {"defaulted", "unavailable"}
+        for name, status in component_statuses.items()
+        if name != "round_trip_efficiency"
+    ):
+        component_statuses["round_trip_efficiency"] = "calculated_with_defaults"
+        warnings.append(
+            "complete round-trip efficiency is calculated using one or more "
+            "default component ratios"
+        )
     status = (
         "invalid"
         if invalid
@@ -647,6 +698,7 @@ def calculate_battery_efficiency(
         discharge_throughput_kwh=discharge_in,
         complete_cycle_count=len(cycles),
         warnings=tuple(dict.fromkeys(warnings)),
+        component_statuses=component_statuses,
     )
 
 
@@ -773,6 +825,7 @@ def _result(
     discharge_throughput_kwh: float = 0.0,
     complete_cycle_count: int = 0,
     warnings: tuple[str, ...] = (),
+    component_statuses: dict[str, EfficiencyComponentStatus] | None = None,
 ) -> BatteryEfficiencyData:
     """Build a consistently shaped result for valid and unusable histories."""
     components = {
@@ -781,12 +834,14 @@ def _result(
         "battery_efficiency": battery_efficiency,
         "round_trip_efficiency": round_trip_efficiency,
     }
+    resolved_statuses = component_statuses or {
+        name: "calculated" if value is not None else "defaulted"
+        for name, value in components.items()
+    }
     defaulted_components = tuple(
-        name for name, value in components.items() if value is None
-    )
-    default_warnings = tuple(
-        f"{name} uses default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
-        for name in defaulted_components
+        name
+        for name, status in resolved_statuses.items()
+        if status in {"defaulted", "unavailable", "invalid"}
     )
     return BatteryEfficiencyData(
         schema_version="1",
@@ -824,10 +879,23 @@ def _result(
         ),
         retrieved_at=retrieved_at,
         latest_observation_at=history.latest_observation_at,
-        warnings=tuple(dict.fromkeys((*warnings, *default_warnings))),
+        warnings=tuple(dict.fromkeys(warnings)),
         quality=history.quality,
         defaulted_components=defaulted_components,
+        component_statuses=resolved_statuses,
     )
+
+
+def _all_component_statuses(
+    status: EfficiencyComponentStatus,
+) -> dict[str, EfficiencyComponentStatus]:
+    """Apply one validation status when no component can be calculated."""
+    return {
+        "battery_efficiency": status,
+        "inverter_charge_efficiency": status,
+        "inverter_discharge_efficiency": status,
+        "round_trip_efficiency": status,
+    }
 
 
 __all__ = [

@@ -30,7 +30,7 @@
       <section id="dashboard-panel" class="panel" role="tabpanel" aria-labelledby="actuals-tab">
         <section class="controls" aria-labelledby="range-heading">
           <div class="section-heading">
-            <p class="eyebrow">Time window</p>
+            <p id="range-eyebrow" class="eyebrow">Time window</p>
             <h2 id="range-heading">Choose a UTC time window</h2>
           </div>
           <form id="range-form" class="range-form">
@@ -38,7 +38,7 @@
             <label><span>End (UTC, exclusive)</span><input id="end-date" name="end" type="datetime-local" step="3600" required /></label>
             <button type="submit">Load data</button>
           </form>
-          <p class="range-help">Use UTC date and time boundaries. The end time is exclusive and must be later than the start.</p>
+          <p id="range-help" class="range-help">Use UTC date and time boundaries. The end time is exclusive and must be later than the start.</p>
         </section>
       </section>
 
@@ -74,6 +74,7 @@
                 <g id="price-labels"></g>
                </svg>
                <dl id="efficiency-summary" class="efficiency-summary" aria-label="Calculated efficiency summaries" hidden></dl>
+               <dl id="efficiency-metrics" class="efficiency-metrics" aria-label="Efficiency measurements" hidden></dl>
             </div>
             <div id="point-tooltip" class="point-tooltip" role="status" aria-live="polite" hidden></div>
           </div>

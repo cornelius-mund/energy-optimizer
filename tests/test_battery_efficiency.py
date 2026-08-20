@@ -130,6 +130,12 @@ def test_calculation_defaults_only_unavailable_components() -> None:
     assert result.inverter_discharge_efficiency == pytest.approx(0.8)
     assert result.round_trip_efficiency == pytest.approx(0.608)
     assert result.defaulted_components == ("inverter_charge_efficiency",)
+    assert result.component_statuses == {
+        "battery_efficiency": "calculated",
+        "inverter_charge_efficiency": "defaulted",
+        "inverter_discharge_efficiency": "calculated",
+        "round_trip_efficiency": "calculated_with_defaults",
+    }
 
 
 def test_calculation_requires_a_complete_cycle() -> None:
@@ -144,6 +150,11 @@ def test_calculation_requires_a_complete_cycle() -> None:
     assert result.battery_efficiency == pytest.approx(0.95)
     assert result.round_trip_efficiency == pytest.approx(0.684)
     assert result.defaulted_components == ("battery_efficiency",)
+    assert result.component_statuses is not None
+    assert result.component_statuses["battery_efficiency"] == "unavailable"
+    assert (
+        result.component_statuses["round_trip_efficiency"] == "calculated_with_defaults"
+    )
 
 
 def test_calculation_rejects_zero_denominator() -> None:

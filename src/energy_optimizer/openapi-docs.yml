@@ -500,6 +500,11 @@ components:
             $ref: '#/components/schemas/DashboardSeries'
           type: array
           title: Series
+        metrics:
+          items:
+            $ref: '#/components/schemas/DashboardMetric'
+          type: array
+          title: Metrics
         diagnostics:
           items:
             type: string
@@ -521,6 +526,32 @@ components:
       title: DashboardDataResponse
       description: Versioned read contract for actual, forecast, and plan dashboard
         data.
+    DashboardMetric:
+      properties:
+        id:
+          type: string
+          minLength: 1
+          title: Id
+        label:
+          type: string
+          minLength: 1
+          title: Label
+        value:
+          type: number
+          title: Value
+        unit:
+          type: string
+          minLength: 1
+          title: Unit
+      additionalProperties: false
+      type: object
+      required:
+      - id
+      - label
+      - value
+      - unit
+      title: DashboardMetric
+      description: One scalar dashboard measurement displayed separately from diagnostics.
     DashboardPlanSummary:
       properties:
         status:
@@ -647,6 +678,17 @@ components:
           type: boolean
           title: Is Default
           default: false
+        calculation_status:
+          anyOf:
+          - type: string
+            enum:
+            - calculated
+            - calculated_with_defaults
+            - defaulted
+            - unavailable
+            - invalid
+          - type: 'null'
+          title: Calculation Status
       additionalProperties: false
       type: object
       required:

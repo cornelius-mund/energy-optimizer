@@ -380,6 +380,16 @@ class DashboardSeries(BaseModel):
     validation_status: Literal["valid", "suspect", "invalid"]
     missing_intervals: list[datetime] = Field(default_factory=list)
     is_default: bool = False
+    calculation_status: (
+        Literal[
+            "calculated",
+            "calculated_with_defaults",
+            "defaulted",
+            "unavailable",
+            "invalid",
+        ]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def validate_series_alignment(self) -> "DashboardSeries":
@@ -408,6 +418,17 @@ class DashboardPlanSummary(BaseModel):
     diagnostics: list[str] = Field(default_factory=list)
 
 
+class DashboardMetric(BaseModel):
+    """One scalar dashboard measurement displayed separately from diagnostics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    value: float
+    unit: str = Field(min_length=1)
+
+
 class DashboardDataResponse(BaseModel):
     """Versioned read contract for actual, forecast, and plan dashboard data."""
 
@@ -427,6 +448,7 @@ class DashboardDataResponse(BaseModel):
     requested_end_time: datetime
     interval_minutes: Literal[60]
     series: list[DashboardSeries]
+    metrics: list[DashboardMetric] = Field(default_factory=list)
     diagnostics: list[str] = Field(default_factory=list)
     plan_summary: DashboardPlanSummary | None = None
 

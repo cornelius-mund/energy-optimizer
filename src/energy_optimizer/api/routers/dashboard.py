@@ -13,6 +13,7 @@ from energy_optimizer.api.routers.context import (
 from energy_optimizer.api.schemas import (
     MAX_HORIZON_HOURS,
     DashboardDataResponse,
+    DashboardMetric,
     DashboardPlanSummary,
     DashboardSeries,
     HistoricHouseholdLoadResponse,
@@ -89,6 +90,8 @@ def _dashboard_response(
     diagnostics: list[str],
     *,
     plan_summary: DashboardPlanSummary | None = None,
+    check_coverage: bool = True,
+    metrics: list[DashboardMetric] | None = None,
 ) -> DashboardDataResponse:
     """Build the common envelope from explicit series states."""
     if not series:
@@ -109,11 +112,18 @@ def _dashboard_response(
         status = "stale"
     elif any(not item.timestamps for item in series):
         status = "empty"
-    elif any(
-        (item.available_start_time is not None and item.available_start_time > start)
-        or (item.available_end_time is not None and item.available_end_time < end)
-        for item in series
-    ) or any(item.missing_intervals for item in series):
+    elif (
+        check_coverage
+        and any(
+            (
+                item.available_start_time is not None
+                and item.available_start_time > start
+            )
+            or (item.available_end_time is not None and item.available_end_time < end)
+            for item in series
+        )
+        or any(item.missing_intervals for item in series)
+    ):
         status = "partial"
     else:
         status = "validated"
@@ -124,6 +134,7 @@ def _dashboard_response(
         requested_end_time=end,
         interval_minutes=60,
         series=series,
+        metrics=metrics or [],
         diagnostics=diagnostics,
         plan_summary=plan_summary,
     )
@@ -246,7 +257,22 @@ def _battery_efficiency_dashboard_series(
         if data.history_end is not None
         else data.latest_observation_at
     )
-    in_range = value is not None and start <= timestamp < end
+    in_range = value is not None
+    if data.component_statuses is not None:
+        component_status = data.component_statuses.get(name, "calculated")
+    elif name in data.defaulted_components:
+        component_status = "defaulted"
+    elif name == "round_trip_efficiency" and data.defaulted_components:
+        component_status = "calculated_with_defaults"
+    else:
+        component_status = "calculated"
+    validation_status: Literal["valid", "suspect", "invalid"] = (
+        "valid"
+        if component_status in {"calculated", "calculated_with_defaults"}
+        else "invalid"
+        if component_status == "invalid"
+        else "suspect"
+    )
     return DashboardSeries(
         id=f"{name}_actual",
         data_type="battery_efficiency",
@@ -261,13 +287,10 @@ def _battery_efficiency_dashboard_series(
         available_end_time=data.history_end,
         retrieved_at=data.retrieved_at,
         freshness="unknown",
-        validation_status=(
-            "valid"
-            if data.status == "ok" and name not in data.defaulted_components
-            else "suspect"
-        ),
+        validation_status=validation_status,
         missing_intervals=[] if in_range else [timestamp],
         is_default=name in data.defaulted_components,
+        calculation_status=component_status,
     )
 
 
@@ -309,20 +332,11 @@ def _efficiency_dashboard_data(
         ("round_trip_efficiency", "Complete round-trip efficiency"),
     )
     diagnostics = list(data.warnings)
-    diagnostics.extend(
-        (
-            f"history: {data.history_start} to {data.history_end}",
-            f"battery throughput: {data.battery_throughput_kwh:.3f} kWh",
-            f"inverter charge throughput: {data.charge_throughput_kwh:.3f} kWh",
-            f"inverter discharge throughput: {data.discharge_throughput_kwh:.3f} kWh",
-            f"complete cycles: {data.complete_cycle_count}",
-        )
-    )
-    if data.status != "ok":
-        diagnostics.insert(0, f"battery efficiency result status: {data.status}")
-    if data.defaulted_components:
-        diagnostics.append(
-            "defaulted efficiency components: " + ", ".join(data.defaulted_components)
+    if data.status == "invalid":
+        diagnostics.insert(0, "efficiency calculation status: invalid")
+    elif data.status == "insufficient_data":
+        diagnostics.insert(
+            0, "efficiency calculation uses default or unavailable components"
         )
     return _dashboard_response(
         start,
@@ -333,6 +347,33 @@ def _efficiency_dashboard_data(
             if getattr(data, name) is not None
         ],
         diagnostics,
+        check_coverage=False,
+        metrics=[
+            DashboardMetric(
+                id="battery_throughput",
+                label="Battery throughput",
+                value=data.battery_throughput_kwh,
+                unit="kWh",
+            ),
+            DashboardMetric(
+                id="inverter_charge_throughput",
+                label="Inverter charge throughput",
+                value=data.charge_throughput_kwh,
+                unit="kWh",
+            ),
+            DashboardMetric(
+                id="inverter_discharge_throughput",
+                label="Inverter discharge throughput",
+                value=data.discharge_throughput_kwh,
+                unit="kWh",
+            ),
+            DashboardMetric(
+                id="completed_battery_cycles",
+                label="Completed battery cycles",
+                value=data.complete_cycle_count,
+                unit="cycles",
+            ),
+        ],
     )
 
 
