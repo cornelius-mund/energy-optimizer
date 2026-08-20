@@ -226,6 +226,14 @@ def test_efficiency_dashboard_marks_default_component_values(
     assert series["inverter_discharge_efficiency_actual"]["is_default"] is False
     assert series["inverter_charge_efficiency_actual"]["is_default"] is True
     assert series["inverter_charge_efficiency_actual"]["values"] == [0.95]
+    assert series["battery_efficiency_actual"]["calculation_status"] == "calculated"
+    assert (
+        series["inverter_charge_efficiency_actual"]["calculation_status"] == "defaulted"
+    )
+    assert (
+        series["round_trip_efficiency_actual"]["calculation_status"]
+        == "calculated_with_defaults"
+    )
     assert series["round_trip_efficiency_actual"]["values"] == [0.646]
     assert series["round_trip_efficiency_actual"]["is_default"] is False
 

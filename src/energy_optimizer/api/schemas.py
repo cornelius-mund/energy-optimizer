@@ -380,6 +380,16 @@ class DashboardSeries(BaseModel):
     validation_status: Literal["valid", "suspect", "invalid"]
     missing_intervals: list[datetime] = Field(default_factory=list)
     is_default: bool = False
+    calculation_status: (
+        Literal[
+            "calculated",
+            "calculated_with_defaults",
+            "defaulted",
+            "unavailable",
+            "invalid",
+        ]
+        | None
+    ) = None
 
     @model_validator(mode="after")
     def validate_series_alignment(self) -> "DashboardSeries":

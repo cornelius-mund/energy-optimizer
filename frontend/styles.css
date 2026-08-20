@@ -95,6 +95,8 @@ svg { width: 100%; height: auto; overflow: visible; }
 .efficiency-summary dd { color: var(--ink); font-size: 1.15rem; font-weight: 800; text-align: right; }
 .efficiency-summary dt:first-of-type, .efficiency-summary dd:first-of-type { border-top: 0; }
 .efficiency-default-marker { color: var(--accent-dark); font-size: .75rem; font-weight: 700; }
+.efficiency-status { display: block; color: var(--muted); font-size: .72rem; font-weight: 700; }
+.efficiency-status-defaulted, .efficiency-status-unavailable, .efficiency-status-invalid { color: var(--accent-dark); }
 .details-card { align-self: start; }
 .details { display: grid; grid-template-columns: 1fr auto; gap: 16px 12px; margin: 28px 0; }
 .details dt { color: var(--muted); font-size: .78rem; }

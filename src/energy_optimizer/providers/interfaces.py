@@ -13,6 +13,9 @@ BATTERY_EFFICIENCY_SOURCE_ID = "battery_efficiency"
 BATTERY_EFFICIENCY_HISTORY_SOURCE_ID = "battery_efficiency_history"
 ELECTRICITY_PRICE_SOURCE_ID = "de"
 DEFAULT_EFFICIENCY_RATIO = 0.95
+EfficiencyComponentStatus = Literal[
+    "calculated", "calculated_with_defaults", "defaulted", "unavailable", "invalid"
+]
 
 
 @dataclass(frozen=True)
@@ -145,6 +148,7 @@ class BatteryEfficiencyData:
     warnings: tuple[str, ...] = ()
     quality: tuple[IntervalQuality, ...] = ()
     defaulted_components: tuple[str, ...] = ()
+    component_statuses: dict[str, EfficiencyComponentStatus] | None = None
 
 
 @dataclass(frozen=True)

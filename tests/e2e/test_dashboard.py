@@ -221,6 +221,15 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(
         page.locator("#efficiency-summary .efficiency-default-marker")
     ).to_have_count(1)
+    expect(
+        page.locator("#efficiency-summary .efficiency-status-calculated")
+    ).to_have_count(2)
+    expect(
+        page.locator("#efficiency-summary .efficiency-status-defaulted")
+    ).to_have_count(1)
+    expect(
+        page.locator("#efficiency-summary .efficiency-status-calculated_with_defaults")
+    ).to_have_count(1)
     expect(page.locator("#efficiency-summary")).to_contain_text(
         "0.9500 ratio (default)"
     )

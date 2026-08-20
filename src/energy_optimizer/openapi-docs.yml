@@ -647,6 +647,17 @@ components:
           type: boolean
           title: Is Default
           default: false
+        calculation_status:
+          anyOf:
+          - type: string
+            enum:
+            - calculated
+            - calculated_with_defaults
+            - defaulted
+            - unavailable
+            - invalid
+          - type: 'null'
+          title: Calculation Status
       additionalProperties: false
       type: object
       required:

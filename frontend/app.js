@@ -99,6 +99,13 @@
     battery_efficiency_actual: "Battery round-trip efficiency",
     round_trip_efficiency_actual: "Complete round-trip efficiency",
   }[item.id] || item.id);
+  const efficiencyStatusLabel = (status) => ({
+    calculated: "calculated",
+    calculated_with_defaults: "calculated with defaults",
+    defaulted: "default",
+    unavailable: "unavailable",
+    invalid: "invalid",
+  }[status] || "status unknown");
   const chartDefinitions = {
     power: {
       element: document.querySelector("#power-chart"),
@@ -273,8 +280,14 @@
           numericValue.className = "efficiency-value";
           numericValue.value = String(value);
           numericValue.textContent = value.toFixed(4);
-          valueCell.append(numericValue, ` ${unitForSeries(item)}`);
-          if (item.is_default) {
+           valueCell.append(numericValue, ` ${unitForSeries(item)}`);
+           if (item.calculation_status) {
+             const status = document.createElement("span");
+             status.className = `efficiency-status efficiency-status-${item.calculation_status}`;
+             status.textContent = ` (${efficiencyStatusLabel(item.calculation_status)})`;
+             valueCell.append(status);
+           }
+           if (item.is_default) {
             const marker = document.createElement("span");
             marker.className = "efficiency-default-marker";
             marker.textContent = " (default)";

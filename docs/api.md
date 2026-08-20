@@ -160,12 +160,12 @@ numeric summary row with its raw `ratio` value. These values summarize the
 complete retained battery and inverter history; they are not hourly chart
 observations and the tab does not offer a selectable calculation time window.
 If a component cannot be calculated, it uses the `0.95` ratio fallback and is
-marked as a default in the response and UI. The source, coverage, freshness,
-retrieval, and calculation diagnostics remain available beside the summary.
-Complete round-trip efficiency is always calculated as the product of the three
-effective component ratios, including any `0.95` fallback ratios, and is not
-itself marked as a default. The UI formats every displayed ratio to four digits
-after the decimal point while retaining the raw API value in the data element.
+marked as `defaulted`, `unavailable`, or `invalid` in the response and UI. A
+measured component is `calculated`; complete round-trip efficiency is
+`calculated_with_defaults` when any input uses a fallback. The source, coverage,
+freshness, retrieval, and calculation diagnostics remain available beside the
+summary. The UI formats every displayed ratio to four digits after the decimal
+point while retaining the raw API value in the data element.
 
 Ingestion persists the aligned hourly history under its own record and requests
 only the hours after the previously persisted history on every scheduled run,
