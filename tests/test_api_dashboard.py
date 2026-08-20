@@ -236,6 +236,17 @@ def test_efficiency_dashboard_marks_default_component_values(
     )
     assert series["round_trip_efficiency_actual"]["values"] == [0.646]
     assert series["round_trip_efficiency_actual"]["is_default"] is False
+    metrics = {item["id"]: item for item in response.json()["metrics"]}
+    assert metrics["battery_throughput"] == {
+        "id": "battery_throughput",
+        "label": "Battery throughput",
+        "value": 5.0,
+        "unit": "kWh",
+    }
+    assert metrics["completed_battery_cycles"]["label"] == "Completed battery cycles"
+    assert not any(
+        "throughput" in diagnostic for diagnostic in response.json()["diagnostics"]
+    )
 
 
 def test_efficiency_dashboard_returns_history_values_for_any_requested_range(

@@ -90,10 +90,16 @@ svg { width: 100%; height: auto; overflow: visible; }
 .chart-note { margin: 10px 0 0; color: var(--muted); font-size: .76rem; }
 .efficiency-summary { display: grid; grid-template-columns: 1fr auto; gap: 0 18px; margin: 26px 0 0; }
 .efficiency-summary[hidden] { display: none; }
+.efficiency-metrics { display: grid; grid-template-columns: 1fr auto; gap: 0 18px; margin: 18px 0 0; }
+.efficiency-metrics[hidden] { display: none; }
 .efficiency-summary dt, .efficiency-summary dd { margin: 0; padding: 16px 18px; border-top: 1px solid var(--line); background: rgb(232 244 238 / 45%); }
+.efficiency-metrics dt, .efficiency-metrics dd { margin: 0; padding: 12px 18px; border-top: 1px solid var(--line); background: rgb(245 243 237 / 70%); }
 .efficiency-summary dt { color: var(--muted); font-size: .92rem; }
 .efficiency-summary dd { color: var(--ink); font-size: 1.15rem; font-weight: 800; text-align: right; }
+.efficiency-metrics dt { color: var(--muted); font-size: .84rem; }
+.efficiency-metrics dd { color: var(--ink); font-size: .95rem; font-weight: 800; text-align: right; }
 .efficiency-summary dt:first-of-type, .efficiency-summary dd:first-of-type { border-top: 0; }
+.efficiency-metrics dt:first-of-type, .efficiency-metrics dd:first-of-type { border-top: 0; }
 .efficiency-default-marker { color: var(--accent-dark); font-size: .75rem; font-weight: 700; }
 .efficiency-status { display: block; color: var(--muted); font-size: .72rem; font-weight: 700; }
 .efficiency-status-defaulted, .efficiency-status-unavailable, .efficiency-status-invalid { color: var(--accent-dark); }

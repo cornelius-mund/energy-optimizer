@@ -192,6 +192,12 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     page.locator("#efficiency-tab").click()
 
     expect(page.locator("#efficiency-summary")).to_be_visible()
+    expect(page.locator("#efficiency-metrics")).to_be_visible()
+    expect(page.locator("#efficiency-metrics dt")).to_have_count(4)
+    expect(page.locator("#efficiency-metrics")).to_contain_text(
+        "Completed battery cycles"
+    )
+    expect(page.locator("#efficiency-metrics")).to_contain_text("5 kWh")
     expect(page.locator("#range-form")).to_be_hidden()
     expect(page.locator("#range-heading")).to_have_text("Complete retained history")
     expect(page.locator("#efficiency-summary dt")).to_have_count(4)

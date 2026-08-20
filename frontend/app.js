@@ -22,6 +22,7 @@
   const legend = document.querySelector("#legend");
   const interpretation = document.querySelector("#interpretation-text");
   const efficiencySummary = document.querySelector("#efficiency-summary");
+  const efficiencyMetrics = document.querySelector("#efficiency-metrics");
   const chartNote = document.querySelector("#chart-note");
   let scenario = "actual";
 
@@ -267,6 +268,8 @@
     const series = selectedSeries(data);
     efficiencySummary.replaceChildren();
     efficiencySummary.setAttribute("hidden", "");
+    efficiencyMetrics.replaceChildren();
+    efficiencyMetrics.setAttribute("hidden", "");
     if (scenario === "efficiency") {
       series
         .filter((item) => item.data_type === "battery_efficiency")
@@ -295,8 +298,16 @@
             valueCell.append(marker);
           }
           efficiencySummary.append(label, valueCell);
-        });
+      });
       if (efficiencySummary.childElementCount) efficiencySummary.removeAttribute("hidden");
+      (data.metrics || []).forEach((metric) => {
+        const label = document.createElement("dt");
+        label.textContent = metric.label;
+        const value = document.createElement("dd");
+        value.textContent = `${metric.value} ${metric.unit}`;
+        efficiencyMetrics.append(label, value);
+      });
+      if (efficiencyMetrics.childElementCount) efficiencyMetrics.removeAttribute("hidden");
       chartNote.textContent = "Each value is a calculated ratio over the retained battery and inverter history, not an hourly observation.";
       return;
     }

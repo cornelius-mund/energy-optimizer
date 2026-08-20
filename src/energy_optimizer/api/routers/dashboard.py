@@ -13,6 +13,7 @@ from energy_optimizer.api.routers.context import (
 from energy_optimizer.api.schemas import (
     MAX_HORIZON_HOURS,
     DashboardDataResponse,
+    DashboardMetric,
     DashboardPlanSummary,
     DashboardSeries,
     HistoricHouseholdLoadResponse,
@@ -90,6 +91,7 @@ def _dashboard_response(
     *,
     plan_summary: DashboardPlanSummary | None = None,
     check_coverage: bool = True,
+    metrics: list[DashboardMetric] | None = None,
 ) -> DashboardDataResponse:
     """Build the common envelope from explicit series states."""
     if not series:
@@ -132,6 +134,7 @@ def _dashboard_response(
         requested_end_time=end,
         interval_minutes=60,
         series=series,
+        metrics=metrics or [],
         diagnostics=diagnostics,
         plan_summary=plan_summary,
     )
@@ -329,15 +332,6 @@ def _efficiency_dashboard_data(
         ("round_trip_efficiency", "Complete round-trip efficiency"),
     )
     diagnostics = list(data.warnings)
-    diagnostics.extend(
-        (
-            f"history: {data.history_start} to {data.history_end}",
-            f"battery throughput: {data.battery_throughput_kwh:.3f} kWh",
-            f"inverter charge throughput: {data.charge_throughput_kwh:.3f} kWh",
-            f"inverter discharge throughput: {data.discharge_throughput_kwh:.3f} kWh",
-            f"complete cycles: {data.complete_cycle_count}",
-        )
-    )
     if data.status == "invalid":
         diagnostics.insert(0, "efficiency calculation status: invalid")
     elif data.status == "insufficient_data":
@@ -354,6 +348,32 @@ def _efficiency_dashboard_data(
         ],
         diagnostics,
         check_coverage=False,
+        metrics=[
+            DashboardMetric(
+                id="battery_throughput",
+                label="Battery throughput",
+                value=data.battery_throughput_kwh,
+                unit="kWh",
+            ),
+            DashboardMetric(
+                id="inverter_charge_throughput",
+                label="Inverter charge throughput",
+                value=data.charge_throughput_kwh,
+                unit="kWh",
+            ),
+            DashboardMetric(
+                id="inverter_discharge_throughput",
+                label="Inverter discharge throughput",
+                value=data.discharge_throughput_kwh,
+                unit="kWh",
+            ),
+            DashboardMetric(
+                id="completed_battery_cycles",
+                label="Completed battery cycles",
+                value=data.complete_cycle_count,
+                unit="cycles",
+            ),
+        ],
     )
 
 

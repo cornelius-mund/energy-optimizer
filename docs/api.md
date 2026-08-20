@@ -164,8 +164,11 @@ marked as `defaulted`, `unavailable`, or `invalid` in the response and UI. A
 measured component is `calculated`; complete round-trip efficiency is
 `calculated_with_defaults` when any input uses a fallback. The source, coverage,
 freshness, retrieval, and calculation diagnostics remain available beside the
-summary. The UI formats every displayed ratio to four digits after the decimal
-point while retaining the raw API value in the data element.
+summary. The response also exposes battery throughput, inverter charge and
+discharge throughput, and `Completed battery cycles` as structured scalar
+metrics rather than diagnostics. The UI formats every displayed ratio to four
+digits after the decimal point while retaining the raw API value in the data
+element.
 
 Ingestion persists the aligned hourly history under its own record and requests
 only the hours after the previously persisted history on every scheduled run,
