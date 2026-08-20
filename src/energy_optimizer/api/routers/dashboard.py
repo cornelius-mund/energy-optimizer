@@ -89,6 +89,7 @@ def _dashboard_response(
     diagnostics: list[str],
     *,
     plan_summary: DashboardPlanSummary | None = None,
+    check_coverage: bool = True,
 ) -> DashboardDataResponse:
     """Build the common envelope from explicit series states."""
     if not series:
@@ -109,11 +110,18 @@ def _dashboard_response(
         status = "stale"
     elif any(not item.timestamps for item in series):
         status = "empty"
-    elif any(
-        (item.available_start_time is not None and item.available_start_time > start)
-        or (item.available_end_time is not None and item.available_end_time < end)
-        for item in series
-    ) or any(item.missing_intervals for item in series):
+    elif (
+        check_coverage
+        and any(
+            (
+                item.available_start_time is not None
+                and item.available_start_time > start
+            )
+            or (item.available_end_time is not None and item.available_end_time < end)
+            for item in series
+        )
+        or any(item.missing_intervals for item in series)
+    ):
         status = "partial"
     else:
         status = "validated"
@@ -246,7 +254,7 @@ def _battery_efficiency_dashboard_series(
         if data.history_end is not None
         else data.latest_observation_at
     )
-    in_range = value is not None and start <= timestamp < end
+    in_range = value is not None
     return DashboardSeries(
         id=f"{name}_actual",
         data_type="battery_efficiency",
@@ -333,6 +341,7 @@ def _efficiency_dashboard_data(
             if getattr(data, name) is not None
         ],
         diagnostics,
+        check_coverage=False,
     )
 
 

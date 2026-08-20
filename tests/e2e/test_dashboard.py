@@ -190,9 +190,10 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
 
     page.goto(f"{e2e_server.base_url}/dashboard/")
     page.locator("#efficiency-tab").click()
-    _load_range(page, start, end)
 
     expect(page.locator("#efficiency-summary")).to_be_visible()
+    expect(page.locator("#range-form")).to_be_hidden()
+    expect(page.locator("#range-heading")).to_have_text("Complete retained history")
     expect(page.locator("#efficiency-summary dt")).to_have_count(4)
     expect(page.locator("#efficiency-summary .efficiency-value")).to_have_count(4)
     values = page.locator("#efficiency-summary .efficiency-value").all_text_contents()
@@ -208,6 +209,9 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(page.locator("#chart-note")).to_contain_text(
         "retained battery and inverter history"
     )
+    expect(page.locator("#details")).not_to_contain_text("Freshness")
+    expect(page.locator("#details")).to_contain_text("Coverage")
+    expect(page.locator("#details")).to_contain_text("Retrieved")
     expect(page.locator("#efficiency-summary")).to_contain_text(
         "Battery round-trip efficiency"
     )

@@ -9,6 +9,9 @@
   const form = document.querySelector("#range-form");
   const startInput = document.querySelector("#start-date");
   const endInput = document.querySelector("#end-date");
+  const rangeEyebrow = document.querySelector("#range-eyebrow");
+  const rangeHeading = document.querySelector("#range-heading");
+  const rangeHelp = document.querySelector("#range-help");
   const status = document.querySelector("#status");
   const content = document.querySelector("#content");
   const details = document.querySelector("#details");
@@ -181,7 +184,7 @@
     const units = [...new Set(series.filter((item) => hasSeriesData([item], item.id)).map(unitForSeries))];
     addDetail(units.length === 1 ? "Unit" : "Units", units.join(", "));
     addDetail("Coverage", first.available_start_time ? `${formatTimestamp(first.available_start_time)} to ${formatTimestamp(first.available_end_time)}` : "No points in range");
-    addDetail("Freshness", first.freshness);
+    if (scenario !== "efficiency") addDetail("Freshness", first.freshness);
     addDetail("Retrieved", first.retrieved_at ? formatTimestamp(first.retrieved_at) : "Not available");
     (data.diagnostics || []).forEach((diagnostic) => addDetail("Diagnostic", diagnostic));
     if (first.generated_at) addDetail("Generated", formatTimestamp(first.generated_at));
@@ -298,8 +301,17 @@
     const hasPv = hasSeriesData(series, "pv_generation_forecast");
     const hasImportPrice = hasSeriesData(series, "import_price_forecast");
     const hasExportPrice = hasSeriesData(series, "export_price_forecast");
+    const efficiencyHistory = efficiency && series.find(
+      (item) => item.available_start_time && item.available_end_time,
+    );
     badge.innerHTML = `<span></span> ${forecast ? "Forecast inputs" : efficiency ? "Measured diagnostics" : "Historic actuals"}`;
     eyebrow.textContent = forecast ? "Planning inputs" : efficiency ? "Efficiency components" : "Imported series";
+    rangeEyebrow.textContent = efficiency ? "Calculation period" : "Time window";
+    rangeHeading.textContent = efficiency ? "Complete retained history" : "Choose a UTC time window";
+    rangeHelp.textContent = efficiency
+      ? "Ratios use the complete retained battery and inverter history. Coverage and retrieval time are shown beside the results."
+      : "Use UTC date and time boundaries. The end time is exclusive and must be later than the start.";
+    form.hidden = efficiency;
     if (forecast) {
       const forecastTypes = [];
       if (hasPv) forecastTypes.push("PV");
@@ -315,7 +327,7 @@
     interpretation.textContent = forecast
       ? "Forecasts are predictions, not measured actuals. Missing intervals remain gaps and are never treated as zero."
       : efficiency
-        ? "These ratios are calculated from measured battery and inverter energy. Battery efficiency is one full-cycle value; inverter charge and discharge are separate conversion values."
+        ? `These ratios are calculated from measured battery and inverter energy over the complete retained history${efficiencyHistory ? ` (${formatTimestamp(efficiencyHistory.available_start_time)} to ${formatTimestamp(efficiencyHistory.available_end_time)})` : ""}. Battery efficiency is one full-cycle value; inverter charge and discharge are separate conversion values.`
         : "These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.";
     legend.replaceChildren();
     const labels = forecast
@@ -393,6 +405,7 @@
       const active = item === tab;
       item.classList.toggle("is-active", active); item.setAttribute("aria-selected", String(active));
     });
+    renderHeader();
     if (!isValidRange(startInput.value, endInput.value)) {
       setStatus("End time must be later than the start time.", "error");
       return;

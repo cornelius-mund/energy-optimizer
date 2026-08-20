@@ -46,6 +46,7 @@ h2 { margin-bottom: 0; font-size: 1.24rem; letter-spacing: -.025em; }
 .controls, .card { border: 1px solid rgb(220 228 221 / 90%); border-radius: 22px; background: rgb(255 253 248 / 88%); box-shadow: var(--shadow); }
 .controls { display: grid; grid-template-columns: minmax(210px, 1fr) 2fr; gap: 20px 48px; align-items: end; padding: 26px 30px 23px; margin-bottom: 18px; }
 .range-form { display: flex; align-items: end; justify-content: end; gap: 12px; }
+.range-form[hidden] { display: none; }
 label { display: grid; gap: 7px; color: var(--muted); font-size: .75rem; font-weight: 800; }
 input { width: 210px; padding: 11px 12px; border: 1px solid #c9d6cd; border-radius: 9px; color: var(--ink); background: #fff; font: inherit; }
 input:focus, button:focus-visible, a:focus-visible { outline: 3px solid rgb(216 102 59 / 35%); outline-offset: 3px; }

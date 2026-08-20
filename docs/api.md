@@ -157,7 +157,8 @@ of failing; this only applies to calculated mode without a fixed
 
 The dashboard Efficiency tab renders each available component as one accessible
 numeric summary row with its raw `ratio` value. These values summarize the
-retained battery and inverter history; they are not hourly chart observations.
+complete retained battery and inverter history; they are not hourly chart
+observations and the tab does not offer a selectable calculation time window.
 If a component cannot be calculated, it uses the `0.95` ratio fallback and is
 marked as a default in the response and UI. The source, coverage, freshness,
 retrieval, and calculation diagnostics remain available beside the summary.

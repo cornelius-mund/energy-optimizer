@@ -230,6 +230,60 @@ def test_efficiency_dashboard_marks_default_component_values(
     assert series["round_trip_efficiency_actual"]["is_default"] is False
 
 
+def test_efficiency_dashboard_returns_history_values_for_any_requested_range(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    persistence_configuration: Path,
+) -> None:
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration))
+    history_start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path / "provider-data")
+    store.save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="ok",
+            inverter_charge_efficiency=0.9,
+            inverter_discharge_efficiency=0.8,
+            battery_efficiency=0.85,
+            round_trip_efficiency=0.612,
+            history_start=history_start,
+            history_end=history_start + timedelta(hours=2),
+            battery_throughput_kwh=5,
+            charge_throughput_kwh=10,
+            discharge_throughput_kwh=10,
+            complete_cycle_count=1,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=history_start,
+            latest_observation_at=history_start,
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "efficiency",
+                "start_time": "2026-08-20T00:00:00+00:00",
+                "end_time": "2026-08-20T01:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "validated"
+    series = {item["id"]: item for item in body["series"]}
+    assert series["inverter_charge_efficiency_actual"]["values"] == [0.9]
+    assert (
+        series["inverter_charge_efficiency_actual"]["available_start_time"]
+        == "2026-01-01T00:00:00Z"
+    )
+
+
 def test_forecast_dashboard_returns_aligned_import_and_export_price_series(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
