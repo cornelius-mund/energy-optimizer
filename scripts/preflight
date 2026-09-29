@@ -1,7 +1,29 @@
 #!/bin/sh
+# Check that the tools and environment needed for development work.
+#
+# Usage: scripts/preflight [--strict]
+#
+# Required tools (uv, gh, curl, python) fail the check when missing. Environment
+# checks (GitHub credentials, virtual environment, browser) only warn by
+# default so read-only work is not blocked; --strict turns warnings into
+# failures. Set GH_TOKEN_FILE to a file containing a GitHub token to override a
+# stale GH_TOKEN from the ambient environment.
+#
+# Every check that talks to a service performs a real request. A tool that
+# merely reports being configured is not evidence that its credentials work.
 set -u
 
-repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+strict=0
+case "${1:-}" in
+    "") ;;
+    --strict) strict=1 ;;
+    *)
+        printf 'Usage: %s [--strict]\n' "$0" >&2
+        exit 2
+        ;;
+esac
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root" || exit 1
 
 failed=0
@@ -18,6 +40,29 @@ check_executable() {
     fi
 }
 
+# Report an environment problem: a warning normally, a failure under --strict.
+environment_problem() {
+    label=$1
+    message=$2
+    if [ "$strict" -eq 1 ]; then
+        printf 'FAIL %-12s %s\n' "$label" "$message"
+        failed=1
+    else
+        printf 'WARN %-12s %s\n' "$label" "$message"
+    fi
+}
+
+# Run a command with a time limit when timeout is available.
+bounded() {
+    seconds=$1
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 check_executable "uv" "uv"
 check_executable "gh" "gh"
 check_executable "curl" "curl"
@@ -28,20 +73,58 @@ else
     printf 'FAIL %-12s not found on PATH (tried python and python3)\n' "python"
     failed=1
 fi
-gh_path=$(command -v gh 2>/dev/null || true)
 
-if [ -n "${gh_path:-}" ] && "$gh_path" auth status >/dev/null 2>&1; then
-    printf 'PASS %-12s authenticated\n' "gh auth"
-elif [ -n "${gh_path:-}" ] && [ -x "$gh_path" ]; then
-    printf 'WARN %-12s unavailable or unauthenticated\n' "gh auth"
+gh_path=$(command -v gh 2>/dev/null || true)
+if [ -n "${GH_TOKEN_FILE:-}" ]; then
+    if [ -r "$GH_TOKEN_FILE" ]; then
+        GH_TOKEN=$(tr -d '\r\n' <"$GH_TOKEN_FILE")
+        export GH_TOKEN
+        token_source="GH_TOKEN_FILE"
+    else
+        environment_problem "gh token" "GH_TOKEN_FILE is set but not readable"
+        token_source="ambient credentials"
+    fi
 else
-    printf 'SKIP %-12s gh is unavailable\n' "gh auth"
+    token_source="ambient credentials"
+fi
+
+if [ -n "${gh_path:-}" ] && [ -x "$gh_path" ]; then
+    if bounded 20 "$gh_path" api user >/dev/null 2>&1; then
+        printf 'PASS %-12s API request succeeded (%s)\n' "gh api" "$token_source"
+    else
+        environment_problem "gh api" \
+            "API request failed with $token_source; credentials are missing or rejected (set GH_TOKEN_FILE)"
+    fi
+else
+    printf 'SKIP %-12s gh is unavailable\n' "gh api"
+fi
+
+venv_python=".venv/bin/python"
+if [ ! -e "$venv_python" ]; then
+    environment_problem "venv" "no .venv found; run scripts/bootstrap"
+elif ! "$venv_python" -c 'import sys' >/dev/null 2>&1; then
+    environment_problem "venv" ".venv interpreter does not run; run scripts/bootstrap"
+elif ! "$venv_python" -c 'import pytest, mypy, playwright' >/dev/null 2>&1; then
+    environment_problem "venv" "development dependencies are missing; run scripts/bootstrap"
+else
+    printf 'PASS %-12s development dependencies import\n' "venv"
+    if bounded 60 "$venv_python" -c '
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as playwright:
+    playwright.chromium.launch().close()
+' >/dev/null 2>&1; then
+        printf 'PASS %-12s launches\n' "chromium"
+    else
+        environment_problem "chromium" \
+            "cannot launch (browser or system libraries missing); run scripts/bootstrap"
+    fi
 fi
 
 if [ "$failed" -eq 0 ]; then
     printf 'Preflight passed.\n'
 else
-    printf 'Preflight failed. Fix the missing required tools before continuing.\n'
+    printf 'Preflight failed. Fix the reported problems before continuing.\n'
 fi
 
 exit "$failed"

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Prepare a fresh checkout or a drifted machine for development and testing.
+#
+# Installs the locked project and development dependencies, downloads the
+# Playwright Chromium build, installs the system libraries Chromium needs, and
+# then runs scripts/preflight --strict so the result is verified rather than
+# assumed. Safe to run repeatedly.
+set -eu
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+
+if ! command -v uv >/dev/null 2>&1; then
+    printf 'uv is required but was not found on PATH.\n' >&2
+    exit 1
+fi
+
+printf '==> Installing locked dependencies\n'
+uv sync --locked --extra dev
+
+printf '==> Installing Chromium\n'
+uv run playwright install chromium
+
+printf '==> Installing Chromium system libraries\n'
+if [ "$(id -u)" -eq 0 ]; then
+    uv run playwright install-deps chromium
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo env "PATH=$PATH" "$repo_root/.venv/bin/playwright" install-deps chromium
+else
+    printf 'Root access is unavailable. Install the system libraries manually with:\n' >&2
+    printf '  sudo .venv/bin/playwright install-deps chromium\n' >&2
+fi
+
+printf '==> Verifying the environment\n'
+exec scripts/preflight --strict
