@@ -32,6 +32,26 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _battery_efficiency_legs() -> str:
+    """Return the measured energy legs of the battery efficiency calculation."""
+    lines: list[str] = []
+    for leg, entity in (
+        ("battery", "battery"),
+        ("inverter_charge", "charge"),
+        ("inverter_discharge", "discharge"),
+    ):
+        lines.append(f"      {leg}:")
+        for direction in ("in", "out"):
+            lines += [
+                f"        energy_{direction}:",
+                f"          - entity_id: sensor.{entity}_{direction}",
+                "            state_class: total_increasing",
+                "            unit: kWh",
+                "            operation: add",
+            ]
+    return "\n".join(lines)
+
+
 def _configuration(path: Path, data_directory: Path) -> None:
     """Write a deterministic configuration with all dashboard data sources."""
     path.write_text(
@@ -61,6 +81,26 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
+  grid_import_entities:
+    - entity_id: sensor.grid_import
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+  grid_export_entities:
+    - entity_id: sensor.grid_export
+      state_class: total_increasing
+      unit: kWh
+      operation: add
+  battery:
+    state_of_charge: {{entity_id: sensor.battery_soc, unit: '%'}}
+    capacity: 10
+    minimum_soc: 5
+    maximum_soc: 100
+    maximum_charge: 4
+    maximum_discharge: 4
+    efficiency_calculation:
+      state_of_charge: {{entity_id: sensor.battery_soc, unit: '%'}}
+{_battery_efficiency_legs()}
   timeout_seconds: 10
   max_data_age_seconds: 3600
 orchestration:

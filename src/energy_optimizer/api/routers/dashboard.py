@@ -1,10 +1,11 @@
 """Dashboard HTTP API routes and response mapping helpers."""
 
 from datetime import datetime, timedelta, timezone
-from typing import Literal, cast
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from energy_optimizer.api import historic
 from energy_optimizer.api.routers.context import (
     ELECTRICITY_PRICE_ADAPTER,
     PV_GENERATION_ADAPTER,
@@ -12,11 +13,11 @@ from energy_optimizer.api.routers.context import (
 )
 from energy_optimizer.api.schemas import (
     MAX_HORIZON_HOURS,
+    DashboardAssetAvailability,
     DashboardDataResponse,
     DashboardMetric,
     DashboardPlanSummary,
     DashboardSeries,
-    HistoricHouseholdLoadResponse,
     SourceMetadata,
 )
 from energy_optimizer.api.series import align_hourly_values
@@ -30,8 +31,6 @@ from energy_optimizer.providers.interfaces import (
     SourceMetadata as ProviderSourceMetadata,
 )
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStoreError
-
-from .provider import historic_household_load
 
 router = APIRouter()
 
@@ -140,32 +139,76 @@ def _dashboard_response(
     )
 
 
-def _household_dashboard_series(
-    data: HistoricHouseholdLoadResponse,
-) -> DashboardSeries:
-    """Map the historic household-load response to the unified series shape."""
-    return DashboardSeries(
-        id="household_load_actual",
-        data_type="household_load",
-        scenario_kind="actual",
-        timestamps=data.timestamps,
-        values=cast(list[float | None], data.load_kw),
-        unit=data.unit,
-        source=data.source,
-        requested_start_time=data.start_time,
-        requested_end_time=data.end_time,
-        available_start_time=data.available_start_time,
-        available_end_time=data.available_end_time,
-        retrieved_at=data.retrieved_at,
-        freshness=data.freshness,
-        validation_status=data.validation_status,
-        missing_intervals=[
-            data.start_time + timedelta(hours=index)
-            for index in range(
-                int((data.end_time - data.start_time).total_seconds() // 3600)
+def _actual_status(
+    start: datetime,
+    end: datetime,
+    series: list[DashboardSeries],
+    results: list[historic.HistoricAssetResult],
+) -> Literal["validated", "partial", "stale", "empty", "unavailable", "invalid"]:
+    """Summarize the returned actual series; absent assets never degrade them."""
+    if not series:
+        return (
+            "invalid"
+            if any(result.status == "invalid" for result in results)
+            else "unavailable"
+        )
+    if any(item.freshness == "stale" for item in series):
+        return "stale"
+    if all(value is None for item in series for value in item.values):
+        return "empty"
+    if any(item.missing_intervals for item in series) or any(
+        (item.available_start_time is not None and item.available_start_time > start)
+        or (item.available_end_time is not None and item.available_end_time < end)
+        for item in series
+    ):
+        return "partial"
+    return "validated"
+
+
+def _actual_dashboard_data(
+    request: Request,
+    start: datetime,
+    end: datetime,
+) -> DashboardDataResponse:
+    """Return every available historic actual series with per-asset availability."""
+    context = historic.HistoricReadContext(
+        request=request, start=start, end=end, now=datetime.now(timezone.utc)
+    )
+    results = historic.read_historic_assets(context)
+    series = [item for result in results for item in result.series]
+    diagnostics = [
+        f"{result.asset.replace('_', ' ')}: {result.reason}"
+        for result in results
+        if result.reason is not None and result.status != "not_configured"
+    ]
+    if not series and not diagnostics:
+        diagnostics.append("no historic energy asset is configured")
+    for result in results:
+        if result.status in {"unavailable", "invalid"}:
+            logger.warning(
+                "event=dashboard_actual_asset_unavailable component=dashboard "
+                "operation=read asset=%s status=%s request_id=%s",
+                result.asset,
+                result.status,
+                context.request_id,
             )
-            if data.start_time + timedelta(hours=index) not in data.timestamps
+    return DashboardDataResponse(
+        schema_version="1",
+        status=_actual_status(start, end, series, results),
+        requested_start_time=start,
+        requested_end_time=end,
+        interval_minutes=60,
+        series=series,
+        assets=[
+            DashboardAssetAvailability(
+                asset=result.asset,
+                status=result.status,
+                series_ids=[item.id for item in result.series],
+                reason=result.reason,
+            )
+            for result in results
         ],
+        diagnostics=diagnostics,
     )
 
 
@@ -482,7 +525,13 @@ def dashboard_data(
         "actual"
     ),
 ) -> DashboardDataResponse:
-    """Return the versioned dashboard contract without mixing scenarios."""
+    """Return the versioned dashboard contract without mixing scenarios.
+
+    The actual scenario returns the hourly historic series of every available
+    asset, aligned to the requested half-open UTC range with null gaps, and
+    lists in `assets` why any asset contributed no series. Absent, stale, or
+    corrupt assets never invalidate the series of other assets.
+    """
     start, end = _dashboard_range(start_time, end_time)
     if scenario_kind == "forecast":
         return _forecast_dashboard_data(request, start, end)
@@ -496,29 +545,7 @@ def dashboard_data(
         )
     if scenario_kind == "efficiency":
         return _efficiency_dashboard_data(request, start, end)
-    if request.app.state.provider_data_store is None:
-        return _dashboard_response(
-            start,
-            end,
-            [],
-            ["household-load data persistence is not configured"],
-        )
-    try:
-        actuals = historic_household_load(request, start, end)
-    except HTTPException as error:
-        if error.status_code in {404, 503}:
-            return _dashboard_response(start, end, [], [str(error.detail)])
-        raise
-    return _dashboard_response(
-        start,
-        end,
-        [_household_dashboard_series(actuals)],
-        (
-            ["no household-load points are available in the requested range"]
-            if actuals.status == "empty"
-            else []
-        ),
-    )
+    return _actual_dashboard_data(request, start, end)
 
 
 @router.get(

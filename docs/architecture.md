@@ -15,6 +15,7 @@ src/energy_optimizer/
 │   ├── app.py                # FastAPI application and route handlers
 │   ├── lifecycle.py          # Startup and shutdown orchestration
 │   ├── middleware.py         # Request IDs and outcome logging
+│   ├── historic.py           # Historic multi-asset actual loaders and availability
 │   ├── persistence.py        # Shared provider persistence mapping
 │   ├── schemas.py            # HTTP request and response models
 │   ├── series.py             # Dashboard series alignment
@@ -34,6 +35,7 @@ src/energy_optimizer/
 │   ├── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
 │   └── home_assistant_battery.py # Current battery state composition
 ├── storage.py                # Generic durable normalized provider-data storage
+├── history_merge.py          # Merge and retention rules for grid-flow and price history
 ├── household_load_store.py   # Append-friendly household-load NDJSON storage
 ├── storage_errors.py          # Storage error contract
 └── optimization/
@@ -221,8 +223,11 @@ data type, provider, and entity identifier. Atomic replacement, validation on
 read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
-JSON model. Grid-flow persistence replaces the latest validated record; measured
-battery-efficiency history is persisted as one aligned multi-series record.
+JSON model. Grid-flow saves are merged by hourly timestamp into one contiguous
+retained history (incoming values win, at most 87,672 hours, a gap is rejected
+without changing the stored history) by the pure rules in `history_merge.py`;
+measured battery-efficiency history is persisted as one aligned multi-series
+record.
 Each scheduled recompute requests only the hours after the previously
 persisted history from Home Assistant, merges them into the retained record,
 and bounds retention to the same ten-year limit as household-load history, so
@@ -261,8 +266,25 @@ available coverage, source metadata, retrieval metadata, validation status, and
 polling freshness. Historical validity and polling freshness are separate: a
 stale observation remains usable historical actual data and is reported as
 stale, while corrupt or unrecoverable persistence is returned as a service
-error. The dashboard consumes this contract and labels its values as actuals;
-it does not infer provider semantics or combine forecasts and plans.
+error.
+
+Historic multi-asset actuals are read through the actual scenario of the
+dashboard contract. `api/historic.py` holds one loader per asset (household
+load, PV generation, grid flow, electricity prices, battery, electric vehicle,
+and heat pump). A loader reads only its own persisted normalized record and
+returns explicit series plus an availability status, so an absent, stale, or
+corrupt asset can never invalidate the series of another asset. Corrupt or
+unrecoverable records are withheld rather than mapped, and their technical cause
+is logged instead of returned. Assets without an importer (PV actuals, electric
+vehicle, heat pump) report `not_configured`; adding an importer means
+registering one loader. Electricity-price history is a separate
+`electricity-price-history` record written by the price orchestration
+registration, because the forecast record is replaced by every run and the two
+must not be confused; a failure to write it never blocks the forecast refresh.
+Battery state of charge reuses the retained hourly history that the measured
+efficiency calculation already persists. The dashboard consumes this contract and
+labels its values as actuals; it does not infer provider semantics or combine
+forecasts and plans.
 
 The versioned dashboard read contract is exposed at
 `GET /api/v1/dashboard/data`. It uses one response envelope for actual,

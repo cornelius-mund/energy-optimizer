@@ -92,6 +92,11 @@
       : item.unit;
   const seriesLabel = (item) => ({
     household_load_actual: "Household load",
+    grid_import_actual: "Grid import",
+    grid_export_actual: "Grid export",
+    import_price_actual: "Import price",
+    export_price_actual: "Export price",
+    battery_state_of_charge_actual: "Battery state of charge",
     pv_generation_forecast: "PV generation",
     import_price_forecast: "Import price",
     export_price_forecast: "Export price",
@@ -100,6 +105,23 @@
     battery_efficiency_actual: "Battery round-trip efficiency",
     round_trip_efficiency_actual: "Complete round-trip efficiency",
   }[item.id] || item.id);
+  const assetLabel = (asset) => ({
+    household_load: "Household load",
+    pv_generation: "PV generation",
+    grid_flow: "Grid import and export",
+    electricity_prices: "Electricity prices",
+    battery: "Battery state",
+    electric_vehicle: "Electric vehicle",
+    heat_pump: "Heat pump",
+  }[asset] || asset);
+  const availabilityLabel = (status) => ({
+    available: "Available",
+    empty: "No data in range",
+    stale: "Stale",
+    not_configured: "Not configured",
+    unavailable: "Unavailable",
+    invalid: "Invalid data withheld",
+  }[status] || status);
   const efficiencyStatusLabel = (status) => ({
     calculated: "calculated",
     calculated_with_defaults: "calculated with defaults",
@@ -136,10 +158,25 @@
       title: document.querySelector("#price-chart-title"),
       description: document.querySelector("#price-chart-description"),
     },
+    battery: {
+      element: document.querySelector("#battery-chart"),
+      grid: document.querySelector("#battery-grid-lines"),
+      labels: document.querySelector("#battery-labels"),
+      points: document.querySelector("#battery-points"),
+      seriesPaths: document.querySelector("#battery-series-paths"),
+      axisUnit: document.querySelector("#battery-axis-unit"),
+      title: document.querySelector("#battery-chart-title"),
+      description: document.querySelector("#battery-chart-description"),
+    },
   };
   const chartSeries = (series) => ({
-    power: series.filter((item) => ["household_load_actual", "pv_generation_forecast"].includes(item.id)),
-    price: series.filter((item) => ["import_price_forecast", "export_price_forecast"].includes(item.id)),
+    power: series.filter((item) => [
+      "household_load_actual", "grid_import_actual", "grid_export_actual", "pv_generation_forecast",
+    ].includes(item.id)),
+    price: series.filter((item) => [
+      "import_price_forecast", "export_price_forecast", "import_price_actual", "export_price_actual",
+    ].includes(item.id)),
+    battery: series.filter((item) => item.id === "battery_state_of_charge_actual"),
   });
   const coverageRange = (data) => {
     const ranges = selectedSeries(data)
@@ -182,9 +219,14 @@
   );
   const seriesClass = (item, index) => ({
     household_load_actual: "series-0",
+    grid_import_actual: "series-1",
+    grid_export_actual: "series-2",
+    battery_state_of_charge_actual: "series-0",
     pv_generation_forecast: "series-0",
     import_price_forecast: "series-1",
     export_price_forecast: "series-2",
+    import_price_actual: "series-1",
+    export_price_actual: "series-2",
   }[item.id] || `series-${index}`);
 
   const renderDetails = (data) => {
@@ -192,6 +234,33 @@
     const series = selectedSeries(data);
     const first = series[0];
     addDetail("Status", data.status[0].toUpperCase() + data.status.slice(1));
+    if (scenario === "actual") {
+      // Every asset has its own source, coverage, and freshness, so each series
+      // is described separately instead of by the first one.
+      series.forEach((item) => {
+        const coverage = item.available_start_time
+          ? `${formatTimestamp(item.available_start_time)} to ${formatTimestamp(item.available_end_time)}`
+          : "no points";
+        const parts = [
+          `${item.source?.provider || "Unavailable"} / ${item.source?.entity_id || "default"}`,
+          unitForSeries(item),
+          `freshness ${item.freshness}`,
+          `coverage ${coverage}`,
+          `retrieved ${item.retrieved_at ? formatTimestamp(item.retrieved_at) : "not available"}`,
+        ];
+        if (item.validation_status !== "valid") parts.push(`validation ${item.validation_status}`);
+        addDetail(seriesLabel(item), parts.join(" · "));
+      });
+      (data.assets || [])
+        .filter((asset) => asset.status !== "available")
+        .forEach((asset) => addDetail(
+          assetLabel(asset.asset),
+          asset.reason ? `${availabilityLabel(asset.status)}: ${asset.reason}` : availabilityLabel(asset.status),
+        ));
+      (data.diagnostics || []).forEach((diagnostic) => addDetail("Diagnostic", diagnostic));
+      if (!first) addDetail("Coverage", "No points in range");
+      return;
+    }
     if (!first) {
       addDetail("Coverage", "No points in range");
       return;
@@ -318,7 +387,7 @@
       chartNote.textContent = "Each value is a calculated ratio over the retained battery and inverter history, not an hourly observation.";
       return;
     }
-    chartNote.textContent = "Each point represents one completed hourly interval. Charts are separated by unit. Focus a point to inspect it.";
+    chartNote.textContent = "Each point represents one hourly interval. Charts are separated by unit. Focus a point to inspect it.";
     Object.entries(chartSeries(series)).forEach(([kind, groupedSeries]) => {
       const usableSeries = groupedSeries.filter((item) => hasSeriesData([item], item.id));
       if (usableSeries.length) renderGraph(chartDefinitions[kind], usableSeries);
@@ -353,13 +422,13 @@
     } else if (efficiency) {
       heading.textContent = "Battery and inverter efficiency";
     } else {
-      heading.textContent = "Household load";
+      heading.textContent = "Historic energy data";
     }
     interpretation.textContent = forecast
       ? "Forecasts are predictions, not measured actuals. Missing intervals remain gaps and are never treated as zero."
       : efficiency
         ? `These ratios are calculated from measured battery and inverter energy over the complete retained history${efficiencyHistory ? ` (${formatTimestamp(efficiencyHistory.available_start_time)} to ${formatTimestamp(efficiencyHistory.available_end_time)})` : ""}. Battery efficiency is one full-cycle value; inverter charge and discharge are separate conversion values.`
-        : "These are imported actuals from the configured provider. They are not forecasts and do not describe an optimization plan.";
+        : "These are imported actuals from the configured providers. Prices are those that applied in completed hours. They are not forecasts and do not describe an optimization plan; battery state of charge is the sample at the start of each hour.";
     legend.replaceChildren();
     const labels = forecast
       ? [
@@ -369,9 +438,14 @@
       ].filter(([id]) => hasSeriesData(series, id))
       : efficiency
         ? []
-      : series.some((item) => hasSeriesData([item], "household_load_actual"))
-        ? [["household_load_actual", "Household load", "legend-0"]]
-        : [];
+      : [
+        ["household_load_actual", "Household load", "legend-0"],
+        ["grid_import_actual", "Grid import", "legend-1"],
+        ["grid_export_actual", "Grid export", "legend-2"],
+        ["import_price_actual", "Import price", "legend-1"],
+        ["export_price_actual", "Export price", "legend-2"],
+        ["battery_state_of_charge_actual", "Battery state of charge", "legend-0"],
+      ].filter(([id]) => hasSeriesData(series, id));
     labels.forEach(([id, label, legendClass]) => {
       const item = document.createElement("span");
       item.className = `legend-item ${legendClass}`;
@@ -417,8 +491,12 @@
       if (data.status === "unavailable") {
         diagnostic("warn", "data_unavailable", { scenario, diagnostics: data.diagnostics, requestId });
       }
+      const withheldAssets = (data.assets || [])
+        .filter((asset) => asset.status === "invalid")
+        .map((asset) => assetLabel(asset.asset));
       if (data.status === "unavailable") setStatus(data.diagnostics.join(" ") || "The selected data is unavailable.", "error");
       else if (data.status === "empty") setStatus("No data points are available in this range.", "warning");
+      else if (withheldAssets.length) setStatus(`${count} data point${count === 1 ? "" : "s"} loaded. Invalid data withheld: ${withheldAssets.join(", ")}.`, "warning");
       else if (data.status === "stale") setStatus("Data is available, but its freshness window has expired.", "warning");
       else if (data.status === "partial") setStatus("Partial coverage is available. Missing intervals are shown as gaps.", "warning");
       else if (scenario === "efficiency") setStatus(`${count} efficiency value${count === 1 ? "" : "s"} loaded.`);

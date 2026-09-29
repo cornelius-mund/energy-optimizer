@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
+from energy_optimizer.history_merge import merge_grid_flow_history
 from energy_optimizer.household_load_store import (
     HouseholdLoadHistory,
     HouseholdLoadStore,
@@ -23,6 +24,7 @@ from energy_optimizer.household_load_store import (
 )
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
+    GridFlowData,
     HouseholdLoadData,
 )
 from energy_optimizer.storage_errors import ProviderDataStoreError
@@ -49,6 +51,16 @@ class ProviderDataKey:
 
 ModelT = TypeVar("ModelT")
 
+
+def _record_count(model: object) -> int | str:
+    """Return the hourly record count of a stored history for diagnostics."""
+    if isinstance(model, HouseholdLoadData):
+        return len(model.load_kw)
+    if isinstance(model, GridFlowData):
+        return len(model.import_kw)
+    return "unknown"
+
+
 # Keep the old private test hooks available while the implementation lives in the
 # focused household-load module.
 _household_load_records = household_load_records
@@ -58,8 +70,9 @@ _encode_household_records = encode_household_records
 class ProviderDataStore:
     """Store normalized provider models as individually replaceable files.
 
-    Non-household-load models contain the normalized model directly as JSON.
-    Household-load history is delegated to its append-friendly NDJSON store.
+    Other models contain the normalized model directly as JSON. Household-load
+    history is delegated to its append-friendly NDJSON store, and grid-flow
+    saves are merged into the retained hourly history before replacement.
     """
 
     def __init__(self, directory: Path) -> None:
@@ -98,6 +111,24 @@ class ProviderDataStore:
                 ModelT,
                 self._save_household_load(key, bounded_household_load(model)),
             )
+
+        if isinstance(model, GridFlowData) and key.data_type == "grid-flow":
+            try:
+                model = cast(
+                    ModelT,
+                    merge_grid_flow_history(
+                        cast(GridFlowData | None, self.load(key, adapter)), model
+                    ),
+                )
+            except ProviderDataStoreError:
+                logger.error(
+                    "event=persistence_save_failed component=storage operation=save "
+                    "data_type=%s provider=%s entity_id=%s error_type=HistoryError",
+                    key.data_type,
+                    key.provider,
+                    key.entity_id,
+                )
+                raise
 
         payload = adapter.dump_json(model, indent=2) + b"\n"
         primary_path, backup_path = self._paths(key)
@@ -162,7 +193,7 @@ class ProviderDataStore:
             key.data_type,
             key.provider,
             key.entity_id,
-            len(model.load_kw) if isinstance(model, HouseholdLoadData) else "unknown",
+            _record_count(model),
         )
         return model
 

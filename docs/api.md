@@ -268,29 +268,159 @@ Source-less submissions and other providers are validated and returned but are
 not persisted. Matching household-load submissions merge by hourly timestamp,
 with incoming values overwriting duplicates and the oldest values removed
 beyond 87,672 hours. `GET /api/v1/household-load` retrieves the latest persisted
-normalized provider data. Battery and electric-vehicle persistence will use the
-same store when their normalized provider contracts are available;
-optimizer-owned state transitions remain outside this persistence boundary.
+normalized provider data. Optimizer-owned state transitions remain outside this
+persistence boundary.
 
-## Historic household-load dashboard
+## Historic multi-asset dashboard
 
-Open `/dashboard/` to inspect imported household-load actuals. The dashboard
-accepts UTC date-and-time boundaries, including sub-day ranges, and uses the
-read-only endpoint
-`GET /api/v1/historic/household-load?start_time=<inclusive>&end_time=<exclusive>`.
-The endpoint returns explicit hourly timestamps, `kW` values, source identity,
-requested and available coverage, retrieval metadata, validation status, and
-polling freshness. A response with `status: "stale"` still contains valid
-historical actuals; it means only that the newest observation is older than the
-configured polling threshold. `status: "empty"` means the persisted history
-exists but has no observations in the requested range. Corrupt or unrecoverable
-persistence returns HTTP 503 rather than data that could be mistaken for valid
-actuals.
+Open `/dashboard/` to inspect imported actuals. The Historic actuals tab and every
+other consumer read one endpoint using the unified dashboard contract:
 
-The view labels the series as historic actuals and deliberately does not mix it
-with predicted inputs or optimization plans. The current slice displays
-household load; additional asset series can use the same dashboard contract as
-their provider imports become available.
+```text
+GET /api/v1/dashboard/data?scenario_kind=actual&start_time=<inclusive>&end_time=<exclusive>
+```
+
+`scenario_kind=actual` is the default. The range follows the same rules for every
+scenario: both boundaries are timezone-aware and normalized to UTC, must be
+aligned to the hour, `end_time` must be later than `start_time`, and the range must
+not exceed 87,672 hours; violations return HTTP 422. The range is half-open
+(inclusive start, exclusive end).
+
+### Series
+
+Every available asset contributes series of `scenario_kind: "actual"` in this
+order. Each series carries one value for every requested hour, with `null` for an
+hour without an observation, and lists those hours in `missing_intervals`.
+Missing hours are never interpolated or replaced by zero.
+
+| Series id | Data type | Unit | Source |
+| --- | --- | --- | --- |
+| `household_load_actual` | `household_load` | `kW` | Home Assistant household-load history |
+| `grid_import_actual`, `grid_export_actual` | `grid_import`, `grid_export` | `kW` | Home Assistant grid-flow history |
+| `import_price_actual`, `export_price_actual` | `import_price`, `export_price` | `EUR/kWh` | Retained aWATTar market-price history |
+| `battery_state_of_charge_actual` | `battery_state_of_charge` | `%` | Retained battery state-of-charge history |
+
+Every series identifies its `source`, requested and `available_*` coverage,
+`retrieved_at`, `freshness`, and `validation_status`:
+
+- `freshness` is `fresh` or `stale` when a polling threshold is configured
+  (`home_assistant.max_data_age_seconds` for load and grid flow,
+  `awattar.max_data_age_seconds` for prices, and twice the
+  `battery_efficiency` source interval for battery state) and `unknown`
+  otherwise. Stale data is still valid historical data: only the newest
+  observation is older than the polling threshold.
+- `validation_status` is `suspect` when an hour inside the requested range was
+  flagged by a contributing entity, for example after a counter reset, and
+  `valid` otherwise.
+- Prices are those that applied during completed hours. Hours that have not yet
+  elapsed are forecasts and are only available through `scenario_kind=forecast`.
+  The price history is a separate record from the replace-latest forecast run, so
+  the Forecast tab is unaffected. Hours without a published price stay explicit
+  gaps.
+- Battery state of charge is the sample at the start of each hour, in percent. It
+  comes from the retained history used for the calculated battery efficiency, so
+  it is available only when `home_assistant.battery.efficiency_calculation` is
+  configured.
+
+Historic actuals never contain forecasts or optimizer plan snapshots.
+
+### Response status and asset availability
+
+The top-level `status` summarizes the returned series: `validated` when every
+requested hour is covered, `partial` when some hours are missing or coverage is
+shorter than the range, `stale` when any series is stale, `empty` when history
+exists but holds no observation in the range, `unavailable` when no series can be
+returned, and `invalid` when no series can be returned and at least one asset's
+persisted data was withheld as corrupt. An asset that is absent or unusable never
+invalidates the series of other assets.
+
+`assets` lists one entry for each of `household_load`, `pv_generation`,
+`grid_flow`, `electricity_prices`, `battery`, `electric_vehicle`, and `heat_pump`
+so a client can tell what is missing and why:
+
+| Asset status | Meaning |
+| --- | --- |
+| `available` | Series were returned. |
+| `empty` | History exists but has no observation in the requested range. |
+| `stale` | Series were returned; the newest observation exceeds the polling threshold. |
+| `not_configured` | The installation has no source for this asset. This is not a warning. |
+| `unavailable` | The asset is configured but persistence is missing or no data has been persisted yet. |
+| `invalid` | Persisted data is corrupt or could not be recovered from its backup and is withheld. |
+
+Every status other than `available` carries an actionable `reason`. Assets in
+the `empty`, `stale`, `unavailable`, and `invalid` states are also summarized in
+`diagnostics`; `not_configured` assets are not, unless nothing at all is
+configured. Corrupt or unrecoverable persisted data is never returned as valid
+actuals; the technical cause is written to the service log with the request ID
+rather than returned to clients. The dashboard endpoint reports these states in
+the response body (HTTP 200); `GET /api/v1/historic/household-load` keeps
+returning HTTP 503 for corrupt household-load persistence.
+
+PV-generation actuals, electric-vehicle, and heat-pump history are reported as
+`not_configured` until an importer for them persists normalized history. PV
+forecasts are available through `scenario_kind=forecast`. A new importer only
+needs to register a loader in `energy_optimizer.api.historic`; the envelope does
+not change.
+
+Example (abridged) for a two-hour range with household load and grid flow:
+
+```json
+{
+  "schema_version": "1",
+  "status": "validated",
+  "requested_start_time": "2026-01-01T00:00:00Z",
+  "requested_end_time": "2026-01-01T02:00:00Z",
+  "interval_minutes": 60,
+  "series": [
+    {
+      "id": "household_load_actual",
+      "data_type": "household_load",
+      "scenario_kind": "actual",
+      "timestamps": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"],
+      "values": [1.2, 1.0],
+      "unit": "kW",
+      "source": {"provider": "home-assistant", "entity_id": "household_load"},
+      "available_start_time": "2026-01-01T00:00:00Z",
+      "available_end_time": "2026-01-01T02:00:00Z",
+      "retrieved_at": "2026-01-01T02:00:00Z",
+      "freshness": "fresh",
+      "validation_status": "valid",
+      "missing_intervals": []
+    }
+  ],
+  "assets": [
+    {"asset": "household_load", "status": "available",
+     "series_ids": ["household_load_actual"], "reason": null},
+    {"asset": "pv_generation", "status": "not_configured", "series_ids": [],
+     "reason": "no historic PV-generation importer is available; PV forecasts are served by scenario_kind=forecast"},
+    {"asset": "grid_flow", "status": "unavailable", "series_ids": [],
+     "reason": "no persisted grid-flow data is available yet"}
+  ],
+  "diagnostics": ["grid flow: no persisted grid-flow data is available yet"]
+}
+```
+
+### Retention and data availability
+
+Household load and grid flow are retained as one contiguous hourly history of at
+most 87,672 values (about ten years), bootstrapped from all history Home
+Assistant retains and extended by scheduled runs with only the completed hours
+after the retained history. Price history is retained for the same number of
+hours and may skip hours. Retention, backup recovery, and provider import
+behavior are otherwise unchanged. A failed provider run keeps the last valid
+history, and the assets above report `unavailable` until the first successful run
+persists data.
+
+### Dashboard view
+
+The Historic actuals tab draws the returned series in separate charts by unit:
+power (`kW`) with household load, grid import, and grid export; prices
+(`EUR/kWh`); and battery state of charge (`%`). Its details panel describes the
+source, unit, freshness, coverage, retrieval time, and validation status of each
+series, and names every asset that is not available with its reason. When some
+asset data is withheld as invalid, the status line says so and the remaining
+series are still drawn. The view labels the series as historic actuals and
+deliberately does not mix them with predicted inputs or optimization plans.
 
 The range controls use an end-exclusive boundary: the end time must be later
 than the start time. If a requested actual or forecast range falls outside the
@@ -392,10 +522,14 @@ The response echoes the normalized import and export series with
 `status: "validated"`. Missing fields, unknown fields, unsupported versions
 or units, naive timestamps, mismatched series lengths, invalid values, and
 series longer than ten years (87,672 hourly values) return HTTP 422 with
-field-level validation details. `GET /api/v1/grid-flow` returns the latest
-persisted configured Home Assistant record, or HTTP 404 when none is available.
-The endpoint stores only the latest record; historic range retention is deferred
-to the unified historic multi-asset API.
+field-level validation details. When the source matches the configured Home
+Assistant grid-flow provider, `POST /api/v1/grid-flow` merges the submission into
+the retained history like household load does: incoming values replace
+overlapping hours, at most 87,672 hourly values are kept, and a submission that
+would leave a gap in the contiguous history is rejected with HTTP 503 without
+changing the retained data. `GET /api/v1/grid-flow` returns the complete retained
+history for the configured provider, or HTTP 404 when none is available. Range
+queries over this history use the historic multi-asset API described below.
 
 The health endpoint returns the service status and version, for example:
 

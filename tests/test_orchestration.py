@@ -10,6 +10,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from energy_optimizer.config import (
+    AwattarConfiguration,
     Configuration,
     DataSourceScheduleConfiguration,
     ForecastSolarConfiguration,
@@ -32,6 +33,7 @@ from energy_optimizer.providers.interfaces import (
     BatteryData,
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
+    ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
     IntervalQuality,
@@ -618,33 +620,8 @@ def test_configured_forecast_solar_orchestrator_persists_forecast(
     assert persisted.generation_kw == (1.0,)
 
 
-def test_configured_grid_flow_orchestrator_persists_grid_flow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class FakeGridFlowImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def fetch(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
-        ) -> GridFlowData:
-            del start_time, end_time, history_lookback_seconds
-            return grid_flow_data(now or START)
-
-        def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantGridFlowImporter",
-        FakeGridFlowImporter,
-    )
-    runtime_configuration = Configuration(
+def grid_flow_runtime_configuration(tmp_path: Path) -> Configuration:
+    return Configuration(
         time_resolution_minutes=60,
         grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
         solver=SolverConfiguration(name="highs", time_limit_seconds=60),
@@ -679,6 +656,35 @@ def test_configured_grid_flow_orchestrator_persists_grid_flow(
             },
         ),
     )
+
+
+def test_configured_grid_flow_orchestrator_persists_grid_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeGridFlowImporter:
+        def __init__(self, _: HomeAssistantConfiguration) -> None:
+            pass
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime | None = None,
+            history_lookback_seconds: float = 0,
+            *,
+            now: datetime | None = None,
+        ) -> GridFlowData:
+            del start_time, end_time, history_lookback_seconds
+            return grid_flow_data(now or START)
+
+        def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
+            del now
+            return True
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantGridFlowImporter",
+        FakeGridFlowImporter,
+    )
+    runtime_configuration = grid_flow_runtime_configuration(tmp_path)
     store = ProviderDataStore(tmp_path)
 
     orchestrator = build_configured_orchestrator(runtime_configuration, store)
@@ -693,6 +699,297 @@ def test_configured_grid_flow_orchestrator_persists_grid_flow(
     )
     assert persisted is not None
     assert persisted.import_kw == (1.0,)
+
+
+GRID_KEY = ProviderDataKey("grid-flow", "home-assistant", "grid_flow")
+
+
+class RecordingGridFlowImporter:
+    """Return one hour of grid flow per requested hour and record each request."""
+
+    requests: list[tuple[datetime, datetime | None]] = []
+
+    def __init__(self, _: HomeAssistantConfiguration) -> None:
+        pass
+
+    def fetch(
+        self,
+        start_time: datetime,
+        end_time: datetime | None = None,
+        history_lookback_seconds: float = 0,
+        *,
+        now: datetime | None = None,
+    ) -> GridFlowData:
+        del history_lookback_seconds
+        assert end_time is not None and now is not None
+        self.requests.append((start_time, end_time))
+        # Keep bootstrap requests cheap: only the newest two hours are retained,
+        # as when Home Assistant history begins later than requested.
+        first = (
+            start_time
+            if end_time - start_time <= timedelta(hours=24)
+            else end_time - timedelta(hours=2)
+        )
+        count = int((end_time - first).total_seconds() // 3600)
+        return GridFlowData(
+            schema_version="1",
+            start_time=first,
+            interval_minutes=60,
+            import_kw=tuple(float(index + 1) for index in range(count)),
+            export_kw=(0.5,) * count,
+            unit="kW",
+            source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
+            retrieved_at=now,
+            latest_observation_at=now,
+        )
+
+    def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
+        del now
+        return True
+
+
+@pytest.fixture
+def grid_flow_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[datetime, datetime | None]]:
+    RecordingGridFlowImporter.requests = []
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantGridFlowImporter",
+        RecordingGridFlowImporter,
+    )
+    return RecordingGridFlowImporter.requests
+
+
+def test_grid_flow_bootstrap_requests_the_complete_retention_window(
+    tmp_path: Path,
+    grid_flow_requests: list[tuple[datetime, datetime | None]],
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(
+        grid_flow_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+    now = START + timedelta(hours=5, minutes=20)
+
+    cycle = orchestrator.run_due(now)
+
+    end = START + timedelta(hours=5)
+    assert cycle.provider_runs[0].status == "success"
+    assert grid_flow_requests == [(end - timedelta(hours=87_672), end)]
+
+
+def test_grid_flow_refresh_requests_only_missing_hours_and_keeps_history(
+    tmp_path: Path,
+    grid_flow_requests: list[tuple[datetime, datetime | None]],
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(
+        grid_flow_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+
+    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    second = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
+
+    assert second.provider_runs[0].status == "success"
+    assert grid_flow_requests[-1] == (
+        START + timedelta(hours=5),
+        START + timedelta(hours=8),
+    )
+    history = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
+    assert history is not None
+    assert history.start_time == START + timedelta(hours=3)
+    assert history.import_kw == (1.0, 2.0, 1.0, 2.0, 3.0)
+
+
+def test_grid_flow_refresh_is_skipped_when_all_completed_hours_are_persisted(
+    tmp_path: Path,
+    grid_flow_requests: list[tuple[datetime, datetime | None]],
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(
+        grid_flow_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    request_count = len(grid_flow_requests)
+
+    cycle = orchestrator.run_due(START + timedelta(hours=5, minutes=30), force=True)
+
+    assert cycle.provider_runs[0].status == "skipped"
+    assert cycle.provider_runs[0].error == "no missing completed hours"
+    assert len(grid_flow_requests) == request_count
+
+
+def test_grid_flow_failure_preserves_the_retained_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    grid_flow_requests: list[tuple[datetime, datetime | None]],
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(
+        grid_flow_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    retained = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
+
+    def fail(*_: object, **__: object) -> GridFlowData:
+        raise RuntimeError("Home Assistant is unavailable")
+
+    monkeypatch.setattr(RecordingGridFlowImporter, "fetch", fail)
+    cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
+
+    assert cycle.provider_runs[0].status == "failed"
+    assert cycle.provider_runs[0].error == "Home Assistant is unavailable"
+    assert store.load(GRID_KEY, GRID_FLOW_ADAPTER) == retained
+
+
+def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    grid_flow_requests: list[tuple[datetime, datetime | None]],
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(
+        grid_flow_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    retained = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
+    original_fetch = RecordingGridFlowImporter.fetch
+
+    def skip_first_requested_hour(
+        self: RecordingGridFlowImporter,
+        start_time: datetime,
+        end_time: datetime | None = None,
+        history_lookback_seconds: float = 0,
+        *,
+        now: datetime | None = None,
+    ) -> GridFlowData:
+        return original_fetch(
+            self,
+            start_time + timedelta(hours=1),
+            end_time,
+            history_lookback_seconds,
+            now=now,
+        )
+
+    monkeypatch.setattr(RecordingGridFlowImporter, "fetch", skip_first_requested_hour)
+    cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
+
+    assert cycle.provider_runs[0].status == "failed"
+    assert "contiguous" in (cycle.provider_runs[0].error or "")
+    assert store.load(GRID_KEY, GRID_FLOW_ADAPTER) == retained
+
+
+PRICE_KEY = ProviderDataKey("electricity-prices", "awattar.de", "de")
+PRICE_HISTORY_KEY = ProviderDataKey("electricity-price-history", "awattar.de", "de")
+PRICE_ADAPTER = TypeAdapter(ElectricityPriceData)
+
+
+class FakeAwattarImporter:
+    """Return a 3-hour forecast starting at the requested hour."""
+
+    def __init__(self, _: AwattarConfiguration) -> None:
+        pass
+
+    def fetch(
+        self,
+        start_time: datetime,
+        end_time: datetime | None = None,
+        *,
+        now: datetime | None = None,
+    ) -> ElectricityPriceData:
+        del end_time
+        assert now is not None
+        hours = tuple(start_time + timedelta(hours=index) for index in range(3))
+        base = start_time.hour / 100
+        return ElectricityPriceData(
+            schema_version="1",
+            timestamps=hours,
+            interval_minutes=60,
+            import_price_eur_per_kwh=tuple(base + 0.30 for _ in hours),
+            export_price_eur_per_kwh=tuple(base + 0.10 for _ in hours),
+            unit="EUR/kWh",
+            source=SourceMetadata(provider="awattar.de", entity_id="de"),
+            retrieved_at=now,
+            expires_at=start_time + timedelta(hours=3),
+        )
+
+    def is_fresh(self, _: ElectricityPriceData, now: datetime) -> bool:
+        del now
+        return True
+
+
+def price_runtime_configuration(tmp_path: Path) -> Configuration:
+    return Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        awattar=AwattarConfiguration(),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "electricity_prices": DataSourceScheduleConfiguration(
+                    interval_seconds=3600
+                )
+            },
+        ),
+    )
+
+
+def test_price_refresh_retains_elapsed_hours_that_the_forecast_replaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.AwattarImporter", FakeAwattarImporter
+    )
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(
+        price_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+
+    orchestrator.run_due(START + timedelta(hours=1, minutes=5))
+    cycle = orchestrator.run_due(START + timedelta(hours=4, minutes=5), force=True)
+
+    assert cycle.provider_runs[0].status == "success"
+    forecast = store.load(PRICE_KEY, PRICE_ADAPTER)
+    history = store.load(PRICE_HISTORY_KEY, PRICE_ADAPTER)
+    assert forecast is not None and history is not None
+    assert forecast.timestamps == tuple(START + timedelta(hours=h) for h in (4, 5, 6))
+    assert history.timestamps == tuple(
+        START + timedelta(hours=h) for h in (1, 2, 3, 4, 5, 6)
+    )
+    assert history.import_price_eur_per_kwh == pytest.approx(
+        (0.31, 0.31, 0.31, 0.34, 0.34, 0.34)
+    )
+
+
+def test_price_history_failure_never_blocks_the_forecast_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.AwattarImporter", FakeAwattarImporter
+    )
+    store = ProviderDataStore(tmp_path)
+    for suffix in (".json", ".json.bak"):
+        (
+            tmp_path / f"electricity-price-history-{PRICE_HISTORY_KEY.digest()}{suffix}"
+        ).write_text("{corrupt", encoding="utf-8")
+    orchestrator = build_configured_orchestrator(
+        price_runtime_configuration(tmp_path), store
+    )
+    assert orchestrator is not None
+
+    cycle = orchestrator.run_due(START + timedelta(hours=1, minutes=5))
+
+    assert cycle.provider_runs[0].status == "success"
+    forecast = store.load(PRICE_KEY, PRICE_ADAPTER)
+    assert forecast is not None
+    assert forecast.timestamps[0] == START + timedelta(hours=1)
 
 
 def test_configured_battery_orchestrator_persists_battery_state(

@@ -14,7 +14,7 @@
           <p class="eyebrow">Energy Optimizer / Field notes</p>
           <h1>Energy dashboard</h1>
           <p class="lede">
-            Move between measured household load and the forecast inputs used for
+            Move between measured energy data and the forecast inputs used for
             planning. Every point keeps its UTC timestamp and unit.
           </p>
         </div>
@@ -72,6 +72,15 @@
                 <g id="price-series-paths"></g>
                 <g id="price-points"></g>
                 <g id="price-labels"></g>
+               </svg>
+               <svg id="battery-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="battery-chart-title battery-chart-description" hidden>
+                <title id="battery-chart-title">Battery state of charge (%)</title>
+                <desc id="battery-chart-description">Hourly battery state of charge in percent.</desc>
+                <text class="axis-unit" id="battery-axis-unit" x="4" y="12">%</text>
+                <g id="battery-grid-lines"></g>
+                <g id="battery-series-paths"></g>
+                <g id="battery-points"></g>
+                <g id="battery-labels"></g>
                </svg>
                <dl id="efficiency-summary" class="efficiency-summary" aria-label="Calculated efficiency summaries" hidden></dl>
                <dl id="efficiency-metrics" class="efficiency-metrics" aria-label="Efficiency measurements" hidden></dl>
