@@ -106,9 +106,16 @@ class HomeAssistantEnergyAggregator:
         energy flow against another (for example battery charging energy minus
         directly consumed PV yield) and a negative net simply means none of
         that flow occurred, with the remainder belonging to a different leg or
-        to export. Non-finite values are always rejected. Strict rejection of
-        any negative combined value remains the default, which household load
-        and grid flow rely on to catch misconfigured add/subtract operations.
+        to export.
+
+        Without ``allow_negative``, which household load and grid flow use to
+        catch misconfigured add/subtract operations, a negative combined hourly
+        value raises an error that names the hour by its UTC timestamp. The one
+        exception is an hour that at least one contributing entity has already
+        flagged suspect: a rejected or reset counter explains the negative
+        value, so it is clamped to zero, the hour keeps its suspect quality,
+        and one structured warning lists every clamped hour. Non-finite values
+        are always rejected, whatever the quality flags.
         """
         started_at = perf_counter()
         entity_count = len(entities or [])
@@ -192,6 +199,7 @@ class HomeAssistantEnergyAggregator:
         value_count = int((end - aggregate_start).total_seconds() // 3600)
         values = [0.0] * value_count
         quality: list[IntervalQuality] = [IntervalQuality()] * value_count
+        suspect_contributions: dict[int, list[IntervalQuality]] = {}
         for series, operation in contributions:
             offset = int((aggregate_start - series.start_time).total_seconds() // 3600)
             aligned = series.values_kw[offset : offset + value_count]
@@ -210,20 +218,29 @@ class HomeAssistantEnergyAggregator:
             for index, item in enumerate(aligned_quality):
                 if item.status == "suspect":
                     quality[index] = item
+                    suspect_contributions.setdefault(index, []).append(item)
 
+        clamped_hours: list[tuple[datetime, list[IntervalQuality]]] = []
         for index, value in enumerate(values):
+            hour_start = aggregate_start + timedelta(hours=index)
             if not math.isfinite(value):
                 raise HomeAssistantError(
                     f"combined Home Assistant {label} data contains a "
-                    f"non-finite value at hour {index}; check add and subtract "
-                    "operations"
+                    f"non-finite value at {hour_start.isoformat()}; check add "
+                    "and subtract operations"
                 )
             if value < -1e-9 and not allow_negative:
-                raise HomeAssistantError(
-                    f"combined Home Assistant {label} data contains a negative "
-                    f"value at hour {index}; check add and subtract operations"
-                )
+                flagged = suspect_contributions.get(index)
+                if not flagged:
+                    raise HomeAssistantError(
+                        f"combined Home Assistant {label} data contains a "
+                        f"negative value at {hour_start.isoformat()}; check "
+                        "add and subtract operations"
+                    )
+                clamped_hours.append((hour_start, flagged))
             values[index] = max(0.0, value)
+        if clamped_hours:
+            self._log_clamped_hours(label, clamped_hours)
 
         return HomeAssistantEnergySeries(
             start_time=aggregate_start,
@@ -236,6 +253,26 @@ class HomeAssistantEnergyAggregator:
                 if any(item.status == "suspect" for item in quality)
                 else ()
             ),
+        )
+
+    @staticmethod
+    def _log_clamped_hours(
+        label: str,
+        clamped_hours: list[tuple[datetime, list[IntervalQuality]]],
+    ) -> None:
+        """Emit one warning listing every negative hour clamped to zero."""
+        described = ",".join(
+            f"{hour_start.isoformat()}["
+            + ";".join(f"{item.reason}:{item.entity_id}" for item in flagged)
+            + "]"
+            for hour_start, flagged in clamped_hours
+        )
+        logger.warning(
+            "event=home_assistant_negative_hour_clamped component=home_assistant "
+            "operation=aggregate label=%s clamped_hour_count=%s clamped_hours=%s",
+            label,
+            len(clamped_hours),
+            described,
         )
 
     def _fetch_entity(

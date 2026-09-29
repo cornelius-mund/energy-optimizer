@@ -5,6 +5,7 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Any
 
+import httpx
 import pytest
 from pydantic import TypeAdapter
 
@@ -26,6 +27,7 @@ from energy_optimizer.orchestration import (
     ProviderRegistration,
     build_configured_orchestrator,
 )
+from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.interfaces import (
     BatteryData,
     BatteryEfficiencyData,
@@ -37,6 +39,10 @@ from energy_optimizer.providers.interfaces import (
     SourceMetadata,
 )
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
+from home_assistant_fixtures import (
+    home_assistant_history_payload,
+    home_assistant_suspect_negative_hour_readings,
+)
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 ADAPTER = TypeAdapter(HouseholdLoadData)
@@ -1527,3 +1533,107 @@ def test_configured_home_assistant_skips_when_all_completed_hours_are_persisted(
     assert second_cycle.provider_runs[0].status == "skipped"
     assert second_cycle.provider_runs[0].error == "no missing completed hours"
     assert {path: path.read_bytes() for path in history_files} == before
+
+
+def test_household_load_refresh_survives_a_negative_hour_flagged_suspect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A suspect negative hour is persisted as suspect, not a failed refresh.
+
+    Regression test for issue #172: previously the negative combined hour made
+    the whole fetch fail, so the bootstrap persisted nothing and every later
+    incremental refresh failed again until the hour left Home Assistant's
+    retained history.
+    """
+    add_entity = "sensor.grid_import_energy"
+    subtract_entity = "sensor.inverter_energy"
+    add_readings, subtract_readings = home_assistant_suspect_negative_hour_readings()
+    # Two further ordinary hours (3 and 4) net to 0.5 and 1.0 kWh.
+    add_readings += [
+        ("2026-01-01T04:00:00+00:00", "154.5"),
+        ("2026-01-01T05:00:00+00:00", "156.5"),
+    ]
+    subtract_readings += [
+        ("2026-01-01T04:00:00+00:00", "59"),
+        ("2026-01-01T05:00:00+00:00", "60"),
+    ]
+    responses = {
+        add_entity: home_assistant_history_payload(add_entity, add_readings),
+        subtract_entity: home_assistant_history_payload(
+            subtract_entity, subtract_readings
+        ),
+    }
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json=responses[request.url.params["filter_entity_id"]]
+            )
+        )
+    )
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
+        lambda home_assistant: HomeAssistantLoadImporter(home_assistant, client),
+    )
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "household_load_entities": [
+                    {
+                        "entity_id": add_entity,
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    },
+                    {
+                        "entity_id": subtract_entity,
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "subtract",
+                    },
+                ],
+                "timeout_seconds": 5,
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=configuration(),
+    )
+    store = ProviderDataStore(tmp_path)
+    key = ProviderDataKey("household-load", "home-assistant", "household_load")
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+
+    try:
+        bootstrap_cycle = orchestrator.run_due(
+            datetime(2026, 1, 1, 3, 30, tzinfo=timezone.utc)
+        )
+        bootstrapped = store.load(key, ADAPTER)
+        incremental_cycle = orchestrator.run_due(
+            datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
+        )
+        refreshed = store.load(key, ADAPTER)
+    finally:
+        client.close()
+
+    assert bootstrap_cycle.provider_runs[0].status == "suspect"
+    assert bootstrapped is not None
+    assert bootstrapped.start_time == START
+    assert bootstrapped.load_kw == pytest.approx((0.0, 0.5, 1.0))
+    assert [item.status for item in bootstrapped.quality] == [
+        "suspect",
+        "valid",
+        "valid",
+    ]
+
+    # The checkpoint advanced past the clamped hour: the refresh fetched hours
+    # 3 and 4 after the persisted history and did not fail again.
+    assert incremental_cycle.provider_runs[0].status != "failed"
+    assert refreshed is not None
+    assert refreshed.start_time == START
+    assert refreshed.load_kw == pytest.approx((0.0, 0.5, 1.0, 0.5, 1.0))
+    assert refreshed.quality[0].status == "suspect"
+    assert all(item.status == "valid" for item in refreshed.quality[1:])

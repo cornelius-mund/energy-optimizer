@@ -15,6 +15,7 @@ from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_importer_factory,
+    home_assistant_suspect_negative_hour_readings,
 )
 
 ENTITY_ID = "sensor.household_energy"
@@ -961,6 +962,45 @@ def test_fetch_rejects_negative_combined_load() -> None:
             provider.fetch(START, END, now=NOW)
     finally:
         client.close()
+
+
+def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect() -> None:
+    add_readings, subtract_readings = home_assistant_suspect_negative_hour_readings()
+    responses = {
+        ENTITY_ID: history_payload(ENTITY_ID, add_readings),
+        SECOND_ENTITY_ID: history_payload(SECOND_ENTITY_ID, subtract_readings),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "add",
+            },
+            {
+                "entity_id": SECOND_ENTITY_ID,
+                "state_class": "total_increasing",
+                "unit": "kWh",
+                "operation": "subtract",
+            },
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=3), now=NOW)
+    finally:
+        client.close()
+
+    assert data.start_time == START
+    assert data.load_kw == pytest.approx((0.0, 0.5, 1.0))
+    assert [item.status for item in data.quality] == ["suspect", "valid", "valid"]
 
 
 def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:

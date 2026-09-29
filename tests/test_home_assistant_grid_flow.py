@@ -1,6 +1,6 @@
 """Tests for the Home Assistant grid-flow importer."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -15,6 +15,7 @@ from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_importer_factory,
+    home_assistant_suspect_negative_hour_readings,
 )
 
 ENTITY_ID = "sensor.grid_import"
@@ -245,6 +246,65 @@ def test_fetch_rejects_negative_combined_import() -> None:
             provider.fetch(START, END, now=NOW)
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("flagged_channel", ["import", "export"])
+def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect(
+    flagged_channel: str,
+) -> None:
+    add_readings, subtract_readings = home_assistant_suspect_negative_hour_readings()
+    submeter_id = "sensor.grid_submeter"
+    flagged_id = ENTITY_ID if flagged_channel == "import" else EXPORT_ENTITY_ID
+    ordinary_id = EXPORT_ENTITY_ID if flagged_channel == "import" else ENTITY_ID
+    ordinary_readings = [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T01:00:00+00:00", "1"),
+        ("2026-01-01T02:00:00+00:00", "2"),
+        ("2026-01-01T03:00:00+00:00", "4"),
+    ]
+    responses = {
+        flagged_id: history_payload(flagged_id, add_readings),
+        submeter_id: history_payload(submeter_id, subtract_readings),
+        ordinary_id: history_payload(ordinary_id, ordinary_readings),
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        **{
+            f"grid_{flagged_channel}_entities": [
+                {
+                    "entity_id": flagged_id,
+                    "state_class": "total_increasing",
+                    "unit": "kWh",
+                    "operation": "add",
+                },
+                {
+                    "entity_id": submeter_id,
+                    "state_class": "total_increasing",
+                    "unit": "kWh",
+                    "operation": "subtract",
+                },
+            ]
+        },
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=3), now=NOW)
+    finally:
+        client.close()
+
+    flagged, ordinary = (
+        (data.import_kw, data.export_kw)
+        if flagged_channel == "import"
+        else (data.export_kw, data.import_kw)
+    )
+    assert flagged == pytest.approx((0.0, 0.5, 1.0))
+    assert ordinary == pytest.approx((1.0, 1.0, 2.0))
+    assert [item.status for item in data.quality] == ["suspect", "valid", "valid"]
 
 
 def test_fetch_aligns_channels_to_the_latest_available_start() -> None:

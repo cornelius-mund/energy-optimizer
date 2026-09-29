@@ -162,12 +162,27 @@ Each cumulative-energy mapping may additionally define a physical upper bound
 for one hourly delta in kWh. The bound is applied after unit conversion and
 before signed aggregation; an exceeded bound produces zero energy and suspect
 quality with reason `physical_limit_exceeded`. By default, a negative combined
-hourly value fails the aggregate outright, since `household_load` and
-`grid_flow` totals must never be negative. Callers whose signed expression
-represents a net directional flow instead of an absolute total, such as the
-measured battery-efficiency legs, opt into `allow_negative`, which clamps a
-negative hourly net to zero for that hour rather than failing; a non-finite
-value is always rejected regardless of this option.
+hourly value fails the aggregate, since `household_load` and `grid_flow` totals
+must never be negative, and the error names the offending hour by its UTC
+timestamp. The one exception is an hour that at least one contributing entity
+has already flagged suspect (for example `counter_reset` or
+`physical_limit_exceeded`): the flagged counter explains the negative value, so
+it is clamped to zero, the hour keeps its suspect quality, and the surrounding
+hours are ingested. Each aggregation that clamps hours emits one structured
+`home_assistant_negative_hour_clamped` warning listing every clamped hour's UTC
+timestamp and the suspect reasons and entities of its contributors. The run is
+then marked `suspect` by orchestration and stays blocked from automatic
+optimization triggers, like any other suspect data. Because a suspect hour is
+persisted instead of failing the fetch, a bootstrap stores the retained history
+and a later incremental refresh continues past the hour instead of failing on
+it every cycle. The reset transition itself contributes zero energy, but later
+growth in the same hour from the new baseline is counted; the suspect flag, not
+a zeroed value, marks such an hour as unreliable. Callers whose signed
+expression represents a net directional flow instead of an absolute total, such
+as the measured battery-efficiency legs, opt into `allow_negative`, which clamps
+any negative hourly net to zero for that hour regardless of quality flags and
+without a warning; a non-finite value is always rejected regardless of quality
+flags or this option.
 The measured battery-efficiency importer aligns the six energy legs and
 state-of-charge history, then carries any suspect quality on those hours
 through to the persisted history and the calculated result instead of

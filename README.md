@@ -344,6 +344,17 @@ delta, and configured limit. Equality is accepted. The limit is per source
 entity and is not applied to other mappings; override it with the meter or
 inverter's credible maximum hourly energy.
 
+After signed aggregation, a negative combined household-load or grid-flow hour
+normally fails the fetch with an error that names the hour by its UTC timestamp,
+because it indicates a misconfigured `add` or `subtract` operation. When at
+least one contributing entity has already flagged that hour `suspect` (for
+example `counter_reset` or `physical_limit_exceeded`), the negative value is
+explained by the flagged counter instead: the hour is clamped to zero, stays
+`suspect`, and the surrounding hours are ingested. One
+`home_assistant_negative_hour_clamped` warning per aggregation lists each
+clamped hour's UTC timestamp together with the suspect reason and entity of
+every flagged contributor. A non-finite combined value always fails the fetch.
+
 For example, a household meter can be added while an EV meter is subtracted:
 
 ```yaml
