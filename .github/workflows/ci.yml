@@ -32,23 +32,22 @@ jobs:
         run: uv sync --locked --extra dev
 
       - name: Run Ruff linting
-        run: uv run ruff check .
+        run: scripts/verify lint
 
       - name: Check Ruff formatting
-        run: uv run ruff format --check .
+        run: scripts/verify format
 
       - name: Run mypy
-        run: uv run mypy .
+        run: scripts/verify types
 
       - name: Verify static OpenAPI document
-        run: uv run pytest tests/test_openapi.py
+        run: scripts/verify openapi
 
       - name: Run tests with coverage
-        run: uv run pytest -m "not e2e" --cov --cov-report=term-missing
+        run: scripts/verify unit
 
   e2e:
     runs-on: ubuntu-latest
-    needs: test
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -66,11 +65,24 @@ jobs:
       - name: Install project and development dependencies
         run: uv sync --locked --extra dev
 
+      - name: Resolve Playwright version
+        id: playwright-version
+        run: >-
+          echo "version=$(uv run python -c
+          'import importlib.metadata as m; print(m.version("playwright"))')"
+          >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+
       - name: Install Chromium
         run: uv run playwright install --with-deps chromium
 
       - name: Run browser end-to-end tests
-        run: uv run pytest -m e2e
+        run: scripts/verify e2e
 
   docker:
     runs-on: ubuntu-latest
