@@ -20,6 +20,8 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert 'id="chart"' in document
     assert 'id="power-chart"' in document
     assert 'id="price-chart"' in document
+    assert 'id="battery-chart"' in document
+    assert "Battery state of charge (%)" in document
     assert 'id="efficiency-summary"' in document
     assert 'id="efficiency-metrics"' in document
     assert 'id="range-help"' in document

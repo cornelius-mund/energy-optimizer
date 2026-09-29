@@ -17,6 +17,7 @@ from energy_optimizer.config import (
     DataSourceScheduleConfiguration,
     OrchestrationConfiguration,
 )
+from energy_optimizer.history_merge import HISTORY_RETENTION_HOURS, merge_price_history
 from energy_optimizer.providers.awattar import AwattarImporter
 from energy_optimizer.providers.forecast_solar import (
     FORECAST_SOLAR_MIN_INTERVAL_SECONDS,
@@ -46,7 +47,11 @@ from energy_optimizer.providers.interfaces import (
     PvGenerationData,
     SourceMetadata,
 )
-from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
+from energy_optimizer.storage import (
+    ProviderDataKey,
+    ProviderDataStore,
+    ProviderDataStoreError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -684,6 +689,11 @@ def _build_electricity_prices_registration(
         provider="awattar.de",
         entity_id=awattar.electricity_price_source_id,
     )
+    history_key = ProviderDataKey(
+        data_type="electricity-price-history",
+        provider="awattar.de",
+        entity_id=awattar.electricity_price_source_id,
+    )
 
     def fetch(
         now: datetime,
@@ -691,7 +701,25 @@ def _build_electricity_prices_registration(
     ) -> ElectricityPriceData:
         del schedule
         start_time = now.replace(minute=0, second=0, microsecond=0)
-        return importer.fetch(start_time, now=now)
+        data = importer.fetch(start_time, now=now)
+        # The forecast record is replaced by every run, so hours that have since
+        # elapsed would be lost. Retain them separately as historic prices. A
+        # failing history must never block the planning inputs, so it is only
+        # reported.
+        try:
+            store.save(
+                history_key,
+                adapter,
+                merge_price_history(store.load(history_key, adapter), data),
+            )
+        except ProviderDataStoreError as error:
+            logger.error(
+                "event=price_history_persistence_failed component=orchestration "
+                "operation=refresh source=electricity_prices error_type=%s error=%s",
+                error.__class__.__name__,
+                error,
+            )
+        return data
 
     def load() -> ElectricityPriceData | None:
         return store.load(key, adapter)
@@ -732,9 +760,17 @@ def _build_grid_flow_registration(
     def fetch(
         now: datetime,
         schedule: DataSourceScheduleConfiguration,
-    ) -> GridFlowData:
+    ) -> GridFlowData | None:
         end_time = now.replace(minute=0, second=0, microsecond=0)
-        start_time = end_time - timedelta(hours=1)
+        persisted = store.load(key, adapter)
+        if persisted is None:
+            start_time = end_time - timedelta(hours=HISTORY_RETENTION_HOURS)
+        else:
+            start_time = persisted.start_time + timedelta(
+                hours=len(persisted.import_kw)
+            )
+        if start_time >= end_time:
+            return None
         return importer.fetch(
             start_time,
             end_time,

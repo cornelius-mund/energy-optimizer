@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
+    BatteryEfficiencyHistoryData,
     ElectricityPriceData,
     PvGenerationData,
     SourceMetadata,
@@ -150,6 +151,80 @@ def _seed_forecasts(
     )
 
 
+def _past_window() -> tuple[datetime, datetime]:
+    """Return a completed two-hour UTC window, since actuals only cover the past."""
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(
+        hours=6
+    )
+    return start, start + timedelta(hours=2)
+
+
+def _seed_grid_flow(client: httpx.Client, start: datetime) -> None:
+    """Seed grid import and export through the public HTTP provider endpoint."""
+    observation = datetime.now(UTC)
+    response = client.post(
+        "/api/v1/grid-flow",
+        json={
+            "schema_version": "1",
+            "start_time": start.isoformat(),
+            "interval_minutes": 60,
+            "import_kw": [0.8, 1.6],
+            "export_kw": [0.0, 0.4],
+            "unit": "kW",
+            "source": {"provider": "home-assistant", "entity_id": "grid_flow"},
+            "retrieved_at": observation.isoformat(),
+            "latest_observation_at": observation.isoformat(),
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+def _seed_price_and_battery_history(server: LiveServer, start: datetime) -> None:
+    """Seed retained price and battery-state history as orchestration persists it."""
+    observation = datetime.now(UTC)
+    store = ProviderDataStore(server.data_directory)
+    store.save(
+        ProviderDataKey("electricity-price-history", "awattar.de", "de"),
+        TypeAdapter(ElectricityPriceData),
+        ElectricityPriceData(
+            schema_version="1",
+            timestamps=(start, start + timedelta(hours=1)),
+            interval_minutes=60,
+            import_price_eur_per_kwh=(0.31, 0.27),
+            export_price_eur_per_kwh=(0.09, 0.07),
+            unit="EUR/kWh",
+            source=SourceMetadata(provider="awattar.de", entity_id="de"),
+            retrieved_at=observation,
+            expires_at=observation + timedelta(hours=24),
+        ),
+    )
+    intervals = (0.5, 0.5)
+    store.save(
+        ProviderDataKey(
+            "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
+        ),
+        TypeAdapter(BatteryEfficiencyHistoryData),
+        BatteryEfficiencyHistoryData(
+            schema_version="1",
+            start_time=start,
+            interval_minutes=60,
+            battery_energy_in_kwh=intervals,
+            battery_energy_out_kwh=intervals,
+            inverter_charge_energy_in_kwh=intervals,
+            inverter_charge_energy_out_kwh=intervals,
+            inverter_discharge_energy_in_kwh=intervals,
+            inverter_discharge_energy_out_kwh=intervals,
+            state_of_charge_percent=(35.0, 45.0, 55.0),
+            unit="kWh",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency_history"
+            ),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+        ),
+    )
+
+
 def test_actuals_render_from_api_to_browser(
     e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
 ) -> None:
@@ -167,6 +242,66 @@ def test_actuals_render_from_api_to_browser(
     expect(page.locator("#power-points circle")).to_have_count(2)
     expect(page.locator("#details")).to_contain_text("home-assistant")
     expect(page.locator("#details")).to_contain_text("kW")
+
+
+def test_historic_tab_renders_every_available_asset_with_its_availability(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify all persisted asset actuals reach the browser, by unit and source."""
+    start, end = _past_window()
+    _seed_household(e2e_api, start, [1.2, 1.0])
+    _seed_grid_flow(e2e_api, start)
+    _seed_price_and_battery_history(e2e_server, start)
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _load_range(page, start, end)
+
+    expect(page.locator("#status")).to_have_text("12 data points loaded.")
+    expect(page.locator("#chart-heading")).to_have_text("Historic energy data")
+    expect(page.locator("#power-series-paths path")).to_have_count(3)
+    expect(page.locator("#power-points circle")).to_have_count(6)
+    expect(page.locator("#power-axis-unit")).to_have_text("kW")
+    expect(page.locator("#price-series-paths path")).to_have_count(2)
+    expect(page.locator("#price-points circle")).to_have_count(4)
+    expect(page.locator("#price-axis-unit")).to_have_text("EUR/kWh")
+    expect(page.locator("#battery-chart")).to_be_visible()
+    expect(page.locator("#battery-axis-unit")).to_have_text("%")
+    expect(page.locator("#battery-points circle")).to_have_count(2)
+    expect(page.locator("#legend .legend-item")).to_have_count(6)
+    expect(page.locator("#legend")).to_contain_text("Grid import (kW)")
+    expect(page.locator("#legend")).to_contain_text("Battery state of charge (%)")
+    expect(page.locator("#details")).to_contain_text("home-assistant / grid_flow")
+    expect(page.locator("#details")).to_contain_text("awattar.de / de")
+    battery_point = page.locator("#battery-points circle").first
+    assert "35" in (battery_point.get_attribute("aria-label") or "")
+    # Assets without any importer are named with the reason instead of hidden.
+    expect(page.locator("#details")).to_contain_text("PV generation")
+    expect(page.locator("#details")).to_contain_text("Not configured")
+    expect(page.locator("#details")).to_contain_text("Electric vehicle")
+    expect(page.locator("#details")).to_contain_text("Heat pump")
+
+
+def test_historic_tab_withholds_invalid_asset_data_but_keeps_valid_series(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify corrupt persisted data is reported and never drawn as actuals."""
+    start, end = _past_window()
+    _seed_household(e2e_api, start, [1.2, 1.0])
+    _seed_grid_flow(e2e_api, start)
+    for path in e2e_server.data_directory.glob("grid-flow-*"):
+        path.write_text("{corrupt\n", encoding="utf-8")
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _load_range(page, start, end)
+
+    expect(page.locator("#status")).to_have_text(
+        "2 data points loaded. Invalid data withheld: Grid import and export."
+    )
+    expect(page.locator("#status")).to_have_class("status warning")
+    expect(page.locator("#power-series-paths path")).to_have_count(1)
+    expect(page.locator("#power-points circle")).to_have_count(2)
+    expect(page.locator("#details")).to_contain_text("Invalid data withheld")
+    expect(page.locator("#legend")).not_to_contain_text("Grid import")
 
 
 def test_efficiency_tab_renders_battery_and_inverter_components(

@@ -429,6 +429,35 @@ class DashboardMetric(BaseModel):
     unit: str = Field(min_length=1)
 
 
+class DashboardAssetAvailability(BaseModel):
+    """Whether one asset contributed data to a dashboard response, and why not."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset: str = Field(min_length=1, description="Stable asset key")
+    status: Literal[
+        "available",
+        "empty",
+        "stale",
+        "not_configured",
+        "unavailable",
+        "invalid",
+    ] = Field(
+        description=(
+            "available: series returned; empty: history exists but has no "
+            "observation in the range; stale: series returned but the newest "
+            "observation exceeds the polling threshold; not_configured: the "
+            "installation has no source for this asset; unavailable: configured "
+            "but no usable persisted data; invalid: persisted data is corrupt or "
+            "could not be recovered and is withheld"
+        )
+    )
+    series_ids: list[str] = Field(default_factory=list)
+    reason: str | None = Field(
+        default=None, description="Actionable explanation when status is not available"
+    )
+
+
 class DashboardDataResponse(BaseModel):
     """Versioned read contract for actual, forecast, and plan dashboard data."""
 
@@ -449,6 +478,10 @@ class DashboardDataResponse(BaseModel):
     interval_minutes: Literal[60]
     series: list[DashboardSeries]
     metrics: list[DashboardMetric] = Field(default_factory=list)
+    assets: list[DashboardAssetAvailability] = Field(
+        default_factory=list,
+        description="Per-asset availability; populated for the actual scenario",
+    )
     diagnostics: list[str] = Field(default_factory=list)
     plan_summary: DashboardPlanSummary | None = None
 

@@ -176,7 +176,16 @@ paths:
   /api/v1/dashboard/data:
     get:
       summary: Dashboard Data
-      description: Return the versioned dashboard contract without mixing scenarios.
+      description: 'Return the versioned dashboard contract without mixing scenarios.
+
+
+        The actual scenario returns the hourly historic series of every available
+
+        asset, aligned to the requested half-open UTC range with null gaps, and
+
+        lists in `assets` why any asset contributed no series. Absent, stale, or
+
+        corrupt assets never invalidate the series of other assets.'
       operationId: dashboard_data_api_v1_dashboard_data_get
       parameters:
       - name: start_time
@@ -466,6 +475,48 @@ components:
       - power_unit
       title: BatteryResponse
       description: Response returned after battery data passes validation.
+    DashboardAssetAvailability:
+      properties:
+        asset:
+          type: string
+          minLength: 1
+          title: Asset
+          description: Stable asset key
+        status:
+          type: string
+          enum:
+          - available
+          - empty
+          - stale
+          - not_configured
+          - unavailable
+          - invalid
+          title: Status
+          description: 'available: series returned; empty: history exists but has
+            no observation in the range; stale: series returned but the newest observation
+            exceeds the polling threshold; not_configured: the installation has no
+            source for this asset; unavailable: configured but no usable persisted
+            data; invalid: persisted data is corrupt or could not be recovered and
+            is withheld'
+        series_ids:
+          items:
+            type: string
+          type: array
+          title: Series Ids
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+          description: Actionable explanation when status is not available
+      additionalProperties: false
+      type: object
+      required:
+      - asset
+      - status
+      title: DashboardAssetAvailability
+      description: Whether one asset contributed data to a dashboard response, and
+        why not.
     DashboardDataResponse:
       properties:
         schema_version:
@@ -505,6 +556,12 @@ components:
             $ref: '#/components/schemas/DashboardMetric'
           type: array
           title: Metrics
+        assets:
+          items:
+            $ref: '#/components/schemas/DashboardAssetAvailability'
+          type: array
+          title: Assets
+          description: Per-asset availability; populated for the actual scenario
         diagnostics:
           items:
             type: string

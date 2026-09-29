@@ -245,11 +245,26 @@ hour, so scheduled collection never re-fetches completed hours already in the
 store. If no completed hour is missing, the scheduled cycle skips the provider
 request and persistence write.
 
-Grid-flow collection retrieves the latest completed hour and persists the latest
-validated import/export record through the generic JSON provider store. It uses
-the same Home Assistant energy semantics as household load and can combine
-multiple signed entities independently for import and export. Historic grid-flow
-range queries are deferred to the unified multi-asset history feature.
+Grid-flow collection bootstraps and refreshes like household load: the first run
+requests up to the 87,672-hour maximum (or all history Home Assistant retains),
+and every later run requests only the completed hours after the retained history.
+Each save is merged into one contiguous hourly history in the generic JSON
+provider store, with incoming values replacing overlapping hours and the oldest
+hours dropped beyond the retention limit. A fetched range that would leave a gap
+fails the run and keeps the last valid history for the next attempt. It uses the
+same Home Assistant energy semantics as household load and can combine multiple
+signed entities independently for import and export. The retained history is
+served by the historic multi-asset dashboard read API (see
+[`docs/api.md`](docs/api.md)). The bootstrap only happens when no grid-flow
+record exists: a deployment that previously stored just the latest hour continues
+from that hour. To back-fill the history Home Assistant retains, stop the service,
+delete the `grid-flow-*` files from the persistence directory, and start it again.
+
+Electricity-price collection additionally records every retrieved price hour in a
+separate `electricity-price-history` record, because the forecast record used by
+the Forecast tab is replaced by each run. Only hours that have elapsed are exposed
+as historic prices. A failure to write the history is logged and never blocks the
+price forecast refresh.
 
 Scheduled collection requires `persistence.directory`, so normalized data survives
 application restarts. Automatic plan generation is disabled until an optimization
@@ -427,8 +442,9 @@ home_assistant:
   max_data_age_seconds: 7200
 ```
 
-The normalized result is persisted under `home-assistant/grid_flow`. See
-[`docs/api.md`](docs/api.md) for the corresponding endpoint behavior.
+The normalized result is persisted under `home-assistant/grid_flow` as a retained
+hourly history. See [`docs/api.md`](docs/api.md) for the corresponding endpoint
+behavior.
 
 The household-load and grid-flow categories are normalized independently, so a
 physical meter can be reused across both categories without double-counting it
