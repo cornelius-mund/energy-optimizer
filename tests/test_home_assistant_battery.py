@@ -9,7 +9,7 @@ from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
-from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
+from energy_optimizer.providers.home_assistant_history import HomeAssistantError
 from energy_optimizer.providers.interfaces import BatteryEfficiencyData, SourceMetadata
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,

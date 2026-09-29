@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter
 from typing import Any, Callable, Literal, Mapping, TypeVar
 
+import httpx
 from pydantic import TypeAdapter
 
 from energy_optimizer.config import (
@@ -33,9 +34,15 @@ from energy_optimizer.providers.home_assistant_battery_efficiency import (
     calculate_battery_efficiency,
     merge_battery_efficiency_history,
 )
-from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
+)
+from energy_optimizer.providers.home_assistant_history import (
+    HistoryNeed,
+    HistoryPlan,
+    HomeAssistantError,
+    HomeAssistantHistory,
+    HomeAssistantHistoryImporter,
 )
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
@@ -80,12 +87,18 @@ DataT = TypeVar("DataT")
 
 @dataclass(frozen=True)
 class ProviderRegistration:
-    """Connect a scheduled source to its provider-independent data contract."""
+    """Connect a scheduled source to its provider-independent data contract.
+
+    ``plan`` runs for a due source before anything is imported. It returns the
+    Home Assistant history the source needs and how to build its record from
+    that history, or ``None`` when there is nothing to fetch, for example
+    because every completed hour is already persisted.
+    """
 
     name: str
     data_type: str
     adapter: TypeAdapter[Any]
-    fetch: Callable[[datetime, DataSourceScheduleConfiguration], object | None]
+    plan: Callable[[datetime, DataSourceScheduleConfiguration], HistoryPlan[Any] | None]
     is_fresh: Callable[[object, datetime], bool]
     load: Callable[[], object | None] | None = None
 
@@ -132,7 +145,9 @@ def _make_provider_registration(
     data_type: str,
     data_class: type[DataT],
     adapter: TypeAdapter[DataT],
-    fetch: Callable[[datetime, DataSourceScheduleConfiguration], DataT | None],
+    plan: Callable[
+        [datetime, DataSourceScheduleConfiguration], HistoryPlan[DataT] | None
+    ],
     is_fresh: Callable[..., bool],
     load: Callable[[], DataT | None],
 ) -> ProviderRegistration:
@@ -140,10 +155,25 @@ def _make_provider_registration(
         name=name,
         data_type=data_type,
         adapter=adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=_make_freshness_checker(data_class, is_fresh),
         load=load,
     )
+
+
+def _without_history(build: Callable[[], DataT]) -> HistoryPlan[DataT]:
+    """Plan a source that needs no Home Assistant history and builds by itself."""
+    return HistoryPlan(needs=(), build=lambda history: build())
+
+
+@dataclass(frozen=True)
+class _PlannedSource:
+    """A due source whose plan is ready for the import and build phases."""
+
+    registration: ProviderRegistration
+    schedule: DataSourceScheduleConfiguration
+    started_at: datetime
+    plan: HistoryPlan[Any]
 
 
 class ProviderOrchestrator:
@@ -153,6 +183,10 @@ class ProviderOrchestrator:
     tests. ``run_forever`` supplies the asynchronous service lifecycle wrapper.
     A cycle never catches up missed intervals: a source that is due is fetched
     once and its next due time starts at the end of that attempt.
+
+    A cycle has three phases. Every due source plans the Home Assistant history
+    it needs, the needs of all sources are imported once per distinct entity, and
+    each source then builds and persists its record from that shared history.
     """
 
     def __init__(
@@ -162,6 +196,7 @@ class ProviderOrchestrator:
         store: ProviderDataStore,
         plan_generator: PlanGenerator | None = None,
         clock: Callable[[], datetime] | None = None,
+        history_importer: HomeAssistantHistoryImporter | None = None,
     ) -> None:
         registered = {registration.name for registration in registrations}
         configured = set(configuration.sources)
@@ -183,6 +218,7 @@ class ProviderOrchestrator:
         self.store = store
         self.plan_generator = plan_generator
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.history_importer = history_importer
         self._next_due: dict[str, datetime] = {}
         self._latest_data: dict[str, object] = {}
         self._cycle_lock = threading.Lock()
@@ -292,6 +328,10 @@ class ProviderOrchestrator:
     ) -> OrchestrationCycle:
         provider_runs: list[ProviderRun] = []
         fresh_data: dict[str, object] = {}
+
+        # Phase 1: every due source declares the history it needs and how to
+        # build its record. Nothing is imported yet.
+        slots: list[ProviderRun | _PlannedSource] = []
         for registration in self.registrations:
             schedule = self.configuration.sources.get(registration.name)
             if schedule is None or not schedule.enabled:
@@ -302,7 +342,7 @@ class ProviderOrchestrator:
                     "operation=refresh source=%s reason=not_due",
                     registration.name,
                 )
-                provider_runs.append(
+                slots.append(
                     ProviderRun(
                         source=registration.name,
                         status="skipped",
@@ -315,84 +355,53 @@ class ProviderOrchestrator:
 
             attempt_started = self._as_utc(cycle_clock())
             try:
-                data = registration.fetch(now, schedule)
-                if data is None:
-                    attempt_completed = self._as_utc(cycle_clock())
-                    self._set_next_due(registration.name, attempt_completed, schedule)
-                    provider_runs.append(
-                        ProviderRun(
-                            source=registration.name,
-                            status="skipped",
-                            started_at=attempt_started,
-                            completed_at=attempt_completed,
-                            error="no missing completed hours",
-                        )
-                    )
-                    logger.info(
-                        "event=provider_refresh_skipped component=orchestration "
-                        "operation=refresh source=%s reason=no_missing_completed_hours",
-                        registration.name,
-                    )
-                    continue
-                saved_data = self.store.save(
-                    self._key_for(registration.data_type, data),
-                    registration.adapter,
-                    data,
-                )
-                self._latest_data[registration.name] = saved_data
-                attempt_completed = self._as_utc(cycle_clock())
-                self._set_next_due(registration.name, attempt_completed, schedule)
-                status: RunStatus
-                if self._has_suspect_quality(saved_data):
-                    status = "suspect"
-                    error = "provider returned suspect interval data"
-                elif registration.is_fresh(saved_data, now):
-                    fresh_data[registration.name] = saved_data
-                    status = "success"
-                    error = None
-                else:
-                    status = "stale"
-                    error = "provider returned data outside its freshness threshold"
-                provider_runs.append(
-                    ProviderRun(
-                        source=registration.name,
-                        status=status,
-                        started_at=attempt_started,
-                        completed_at=attempt_completed,
-                        error=error,
-                    )
-                )
-                log_method = (
-                    logger.warning if status in {"stale", "suspect"} else logger.info
-                )
-                log_method(
-                    "event=provider_refresh_completed component=orchestration "
-                    "operation=refresh source=%s status=%s duration_seconds=%.3f",
-                    registration.name,
-                    status,
-                    (attempt_completed - attempt_started).total_seconds(),
-                )
+                plan = registration.plan(now, schedule)
             except Exception as error:
-                attempt_completed = self._as_utc(cycle_clock())
-                self._set_next_due(registration.name, attempt_completed, schedule)
-                message = str(error) or error.__class__.__name__
-                provider_runs.append(
-                    ProviderRun(
-                        source=registration.name,
-                        status="failed",
-                        started_at=attempt_started,
-                        completed_at=attempt_completed,
-                        error=message,
+                slots.append(
+                    self._failed_run(
+                        registration, schedule, attempt_started, cycle_clock, error
                     )
                 )
-                logger.error(
-                    "event=provider_refresh_failed component=orchestration "
-                    "operation=refresh source=%s error_type=%s error=%s",
-                    registration.name,
-                    error.__class__.__name__,
-                    message,
-                    exc_info=(None if isinstance(error, HomeAssistantError) else True),
+                continue
+            if plan is None:
+                attempt_completed = self._as_utc(cycle_clock())
+                self._set_next_due(registration.name, attempt_completed, schedule)
+                slots.append(
+                    ProviderRun(
+                        source=registration.name,
+                        status="skipped",
+                        started_at=attempt_started,
+                        completed_at=attempt_completed,
+                        error="no missing completed hours",
+                    )
                 )
+                logger.info(
+                    "event=provider_refresh_skipped component=orchestration "
+                    "operation=refresh source=%s reason=no_missing_completed_hours",
+                    registration.name,
+                )
+                continue
+            slots.append(_PlannedSource(registration, schedule, attempt_started, plan))
+
+        # Phase 2: import every distinct entity that any source needs, once.
+        planned = [slot for slot in slots if isinstance(slot, _PlannedSource)]
+        history, import_error = self._import_history(planned)
+
+        # Phase 3: build and persist each record from the shared history.
+        for slot in slots:
+            if isinstance(slot, ProviderRun):
+                provider_runs.append(slot)
+                continue
+            provider_runs.append(
+                self._build_and_persist(
+                    slot,
+                    history,
+                    import_error if slot.plan.needs else None,
+                    now,
+                    cycle_clock,
+                    fresh_data,
+                )
+            )
 
         blocked_sources = {
             run.source for run in provider_runs if run.status in {"failed", "stale"}
@@ -416,6 +425,124 @@ class ProviderOrchestrator:
             (completed_at - now).total_seconds(),
         )
         return cycle
+
+    def _import_history(
+        self, planned: list[_PlannedSource]
+    ) -> tuple[HomeAssistantHistory, Exception | None]:
+        """Import the history of all planned sources; never request without needs.
+
+        A failure of a single entity is recorded inside the returned history and
+        reaches only the sources that read it. An error that prevents the whole
+        import, such as inconsistent plans, is returned so that every source with
+        Home Assistant needs fails with it.
+        """
+        needs: list[HistoryNeed] = [
+            need for source in planned for need in source.plan.needs
+        ]
+        if not needs:
+            return HomeAssistantHistory(), None
+        try:
+            if self.history_importer is None:
+                raise OrchestrationError(
+                    "a Home Assistant history importer is required to import "
+                    "planned history needs"
+                )
+            return self.history_importer.import_history(needs), None
+        except Exception as error:
+            logger.error(
+                "event=history_import_failed component=orchestration "
+                "operation=import error_type=%s error=%s",
+                error.__class__.__name__,
+                error,
+                exc_info=(None if isinstance(error, HomeAssistantError) else True),
+            )
+            return HomeAssistantHistory(), error
+
+    def _build_and_persist(
+        self,
+        source: _PlannedSource,
+        history: HomeAssistantHistory,
+        import_error: Exception | None,
+        now: datetime,
+        cycle_clock: Callable[[], datetime],
+        fresh_data: dict[str, object],
+    ) -> ProviderRun:
+        """Build one planned source's record, persist it, and report its status."""
+        registration = source.registration
+        schedule = source.schedule
+        try:
+            if import_error is not None:
+                raise import_error
+            data = source.plan.build(history)
+            saved_data = self.store.save(
+                self._key_for(registration.data_type, data),
+                registration.adapter,
+                data,
+            )
+            self._latest_data[registration.name] = saved_data
+            attempt_completed = self._as_utc(cycle_clock())
+            self._set_next_due(registration.name, attempt_completed, schedule)
+            status: RunStatus
+            if self._has_suspect_quality(saved_data):
+                status = "suspect"
+                error_message: str | None = "provider returned suspect interval data"
+            elif registration.is_fresh(saved_data, now):
+                fresh_data[registration.name] = saved_data
+                status = "success"
+                error_message = None
+            else:
+                status = "stale"
+                error_message = "provider returned data outside its freshness threshold"
+            run = ProviderRun(
+                source=registration.name,
+                status=status,
+                started_at=source.started_at,
+                completed_at=attempt_completed,
+                error=error_message,
+            )
+            log_method = (
+                logger.warning if status in {"stale", "suspect"} else logger.info
+            )
+            log_method(
+                "event=provider_refresh_completed component=orchestration "
+                "operation=refresh source=%s status=%s duration_seconds=%.3f",
+                registration.name,
+                status,
+                (attempt_completed - source.started_at).total_seconds(),
+            )
+            return run
+        except Exception as error:
+            return self._failed_run(
+                registration, schedule, source.started_at, cycle_clock, error
+            )
+
+    def _failed_run(
+        self,
+        registration: ProviderRegistration,
+        schedule: DataSourceScheduleConfiguration,
+        attempt_started: datetime,
+        cycle_clock: Callable[[], datetime],
+        error: Exception,
+    ) -> ProviderRun:
+        """Record a failed attempt; the last valid persisted data stays in place."""
+        attempt_completed = self._as_utc(cycle_clock())
+        self._set_next_due(registration.name, attempt_completed, schedule)
+        message = str(error) or error.__class__.__name__
+        logger.error(
+            "event=provider_refresh_failed component=orchestration "
+            "operation=refresh source=%s error_type=%s error=%s",
+            registration.name,
+            error.__class__.__name__,
+            message,
+            exc_info=(None if isinstance(error, HomeAssistantError) else True),
+        )
+        return ProviderRun(
+            source=registration.name,
+            status="failed",
+            started_at=attempt_started,
+            completed_at=attempt_completed,
+            error=message,
+        )
 
     def _trigger_plan(
         self,
@@ -603,10 +730,10 @@ def _build_household_load_registration(
         entity_id=home_assistant.household_load_source_id,
     )
 
-    def fetch(
+    def plan(
         now: datetime,
         schedule: DataSourceScheduleConfiguration,
-    ) -> HouseholdLoadData | None:
+    ) -> HistoryPlan[HouseholdLoadData] | None:
         end_time = now.replace(minute=0, second=0, microsecond=0)
         persisted = store.load(key, adapter)
         if persisted is None:
@@ -615,7 +742,7 @@ def _build_household_load_registration(
             start_time = persisted.start_time + timedelta(hours=len(persisted.load_kw))
         if start_time >= end_time:
             return None
-        return importer.fetch(
+        return importer.plan(
             start_time,
             end_time,
             schedule.history_lookback_seconds,
@@ -630,7 +757,7 @@ def _build_household_load_registration(
         data_type="household-load",
         data_class=HouseholdLoadData,
         adapter=adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=importer.is_fresh,
         load=load,
     )
@@ -663,13 +790,13 @@ def _build_pv_generation_registration(
         entity_id=forecast_solar.pv_generation_source_id,
     )
 
-    def fetch(
+    def plan(
         now: datetime,
         schedule: DataSourceScheduleConfiguration,
-    ) -> PvGenerationData:
+    ) -> HistoryPlan[PvGenerationData]:
         del schedule
         start_time = now.replace(minute=0, second=0, microsecond=0)
-        return importer.fetch(start_time, now=now)
+        return _without_history(lambda: importer.fetch(start_time, now=now))
 
     def load() -> PvGenerationData | None:
         return store.load(key, adapter)
@@ -679,7 +806,7 @@ def _build_pv_generation_registration(
         data_type="pv-generation",
         data_class=PvGenerationData,
         adapter=adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=importer.is_fresh,
         load=load,
     )
@@ -707,11 +834,7 @@ def _build_electricity_prices_registration(
         entity_id=awattar.electricity_price_source_id,
     )
 
-    def fetch(
-        now: datetime,
-        schedule: DataSourceScheduleConfiguration,
-    ) -> ElectricityPriceData:
-        del schedule
+    def fetch(now: datetime) -> ElectricityPriceData:
         start_time = now.replace(minute=0, second=0, microsecond=0)
         data = importer.fetch(start_time, now=now)
         # The forecast record is replaced by every run, so hours that have since
@@ -733,6 +856,13 @@ def _build_electricity_prices_registration(
             )
         return data
 
+    def plan(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> HistoryPlan[ElectricityPriceData]:
+        del schedule
+        return _without_history(lambda: fetch(now))
+
     def load() -> ElectricityPriceData | None:
         return store.load(key, adapter)
 
@@ -741,7 +871,7 @@ def _build_electricity_prices_registration(
         data_type="electricity-prices",
         data_class=ElectricityPriceData,
         adapter=adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=importer.is_fresh,
         load=load,
     )
@@ -769,10 +899,10 @@ def _build_grid_flow_registration(
         entity_id=home_assistant.grid_flow_source_id,
     )
 
-    def fetch(
+    def plan(
         now: datetime,
         schedule: DataSourceScheduleConfiguration,
-    ) -> GridFlowData | None:
+    ) -> HistoryPlan[GridFlowData] | None:
         end_time = now.replace(minute=0, second=0, microsecond=0)
         persisted = store.load(key, adapter)
         if persisted is None:
@@ -783,7 +913,7 @@ def _build_grid_flow_registration(
             )
         if start_time >= end_time:
             return None
-        return importer.fetch(
+        return importer.plan(
             start_time,
             end_time,
             schedule.history_lookback_seconds,
@@ -798,7 +928,7 @@ def _build_grid_flow_registration(
         data_type="grid-flow",
         data_class=GridFlowData,
         adapter=adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=importer.is_fresh,
         load=load,
     )
@@ -825,11 +955,7 @@ def _build_battery_registration(
         entity_id=home_assistant.battery_source_id,
     )
 
-    def fetch(
-        now: datetime,
-        schedule: DataSourceScheduleConfiguration,
-    ) -> BatteryData:
-        del schedule
+    def fetch(now: datetime) -> BatteryData:
         efficiency_data = store.load(
             ProviderDataKey(
                 data_type="battery-efficiency",
@@ -842,6 +968,13 @@ def _build_battery_registration(
             return importer.fetch(now=now)
         return importer.fetch(now=now, efficiency_data=efficiency_data)
 
+    def plan(
+        now: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> HistoryPlan[BatteryData]:
+        del schedule
+        return _without_history(lambda: fetch(now))
+
     def load() -> BatteryData | None:
         return store.load(key, adapter)
 
@@ -850,7 +983,7 @@ def _build_battery_registration(
         data_type="battery",
         data_class=BatteryData,
         adapter=adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=importer.is_fresh,
         load=load,
     )
@@ -885,10 +1018,10 @@ def _build_battery_efficiency_registration(
         entity_id="battery_efficiency",
     )
 
-    def fetch(
+    def plan(
         now: datetime,
         schedule: DataSourceScheduleConfiguration,
-    ) -> BatteryEfficiencyData:
+    ) -> HistoryPlan[BatteryEfficiencyData]:
         del schedule
         end_time = now.replace(minute=0, second=0, microsecond=0)
         persisted = store.load(history_key, history_adapter)
@@ -901,31 +1034,48 @@ def _build_battery_efficiency_registration(
         else:
             start_time = end_time - timedelta(hours=HOUSEHOLD_LOAD_MAX_VALUES)
 
-        if persisted is not None and start_time >= end_time:
-            history = persisted
-        else:
-            incoming = importer.fetch(start_time, end_time, now=now)
-            history = merge_battery_efficiency_history(persisted, incoming)
-            store.save(history_key, history_adapter, history)
-        capacity: float | None = None
-        battery_data = store.load(
-            ProviderDataKey("battery", "home-assistant", "battery"),
-            TypeAdapter(BatteryData),
+        # Without missing completed hours the persisted history is recalculated
+        # without any Home Assistant request.
+        history_plan = (
+            None
+            if persisted is not None and start_time >= end_time
+            else importer.plan(start_time, end_time, now=now)
         )
-        if battery_data is not None:
-            capacity = battery_data.capacity_kwh
-        elif battery is not None and hasattr(battery.capacity, "value"):
-            capacity = float(battery.capacity.value)
-            if battery.capacity.unit == "Wh":
-                capacity /= 1000
-        result = calculate_battery_efficiency(
-            history,
-            calculation,
-            capacity_kwh=capacity,
-            now=now,
+
+        def build(imported: HomeAssistantHistory) -> BatteryEfficiencyData:
+            if history_plan is None:
+                assert persisted is not None
+                history = persisted
+            else:
+                incoming = history_plan.build(imported)
+                history = merge_battery_efficiency_history(persisted, incoming)
+                store.save(history_key, history_adapter, history)
+            # Read at build time so that a battery record persisted earlier in
+            # the same cycle supplies the capacity.
+            capacity: float | None = None
+            battery_data = store.load(
+                ProviderDataKey("battery", "home-assistant", "battery"),
+                TypeAdapter(BatteryData),
+            )
+            if battery_data is not None:
+                capacity = battery_data.capacity_kwh
+            elif battery is not None and hasattr(battery.capacity, "value"):
+                capacity = float(battery.capacity.value)
+                if battery.capacity.unit == "Wh":
+                    capacity /= 1000
+            result = calculate_battery_efficiency(
+                history,
+                calculation,
+                capacity_kwh=capacity,
+                now=now,
+            )
+            store.save(result_key, result_adapter, result)
+            return result
+
+        return HistoryPlan(
+            needs=history_plan.needs if history_plan is not None else (),
+            build=build,
         )
-        store.save(result_key, result_adapter, result)
-        return result
 
     def load() -> BatteryEfficiencyData | None:
         return store.load(result_key, result_adapter)
@@ -939,7 +1089,7 @@ def _build_battery_efficiency_registration(
         data_type="battery-efficiency",
         data_class=BatteryEfficiencyData,
         adapter=result_adapter,
-        fetch=fetch,
+        plan=plan,
         is_fresh=lambda data, now=None: _efficiency_history_is_fresh(
             store, history_key, history_adapter, schedule_interval_seconds, now
         ),
@@ -983,8 +1133,14 @@ def build_configured_orchestrator(
     configuration: Configuration,
     store: ProviderDataStore | None,
     plan_generator: PlanGenerator | None = None,
+    *,
+    home_assistant_client: httpx.Client | None = None,
 ) -> ProviderOrchestrator | None:
-    """Compose currently configured concrete providers into the orchestrator."""
+    """Compose currently configured concrete providers into the orchestrator.
+
+    ``home_assistant_client`` is the one HTTP client that every Home Assistant
+    history import of a cycle uses. Without it, each import opens its own.
+    """
     orchestration = configuration.orchestration
     if orchestration is None or not orchestration.enabled:
         logger.debug(
@@ -1002,11 +1158,19 @@ def build_configured_orchestrator(
         if registration is not None:
             registrations.append(registration)
 
+    history_importer = (
+        HomeAssistantHistoryImporter(
+            configuration.home_assistant, home_assistant_client
+        )
+        if configuration.home_assistant is not None
+        else None
+    )
     orchestrator = ProviderOrchestrator(
         configuration=orchestration,
         registrations=registrations,
         store=store,
         plan_generator=plan_generator,
+        history_importer=history_importer,
     )
     logger.info(
         "event=orchestration_composed component=orchestration operation=compose "

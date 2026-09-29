@@ -5,14 +5,16 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-import httpx
-
 from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant_energy import (
-    HomeAssistantEnergyAggregator,
-    HomeAssistantError,
+    EnergyAggregate,
     is_fresh,
     latest_completed_hour,
+)
+from energy_optimizer.providers.home_assistant_history import (
+    HistoryPlan,
+    HomeAssistantError,
+    HomeAssistantHistory,
 )
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_SOURCE_ID,
@@ -27,31 +29,32 @@ __all__ = ["HomeAssistantError", "HomeAssistantLoadImporter"]
 
 
 class HomeAssistantLoadImporter:
-    """Retrieve and normalize household-load history from Home Assistant."""
+    """Declare and build household-load history from Home Assistant."""
 
-    def __init__(
-        self,
-        configuration: HomeAssistantConfiguration,
-        client: httpx.Client | None = None,
-    ) -> None:
+    def __init__(self, configuration: HomeAssistantConfiguration) -> None:
         self.configuration = configuration
-        self._aggregator = HomeAssistantEnergyAggregator(configuration, client)
 
-    def fetch(
+    def plan(
         self,
         start_time: datetime,
         end_time: datetime | None = None,
         history_lookback_seconds: float = 0,
         *,
         now: datetime | None = None,
-    ) -> HouseholdLoadData:
+    ) -> HistoryPlan[HouseholdLoadData]:
+        """Declare the history a period needs and how to build its record.
+
+        Building reads the shared history that the caller imported for the
+        declared needs; this importer makes no Home Assistant request itself.
+        """
+        entities = self.configuration.household_load_entities
         logger.debug(
             "event=provider_fetch_started component=home_assistant operation=fetch "
             "start_time=%s end_time=%s history_lookback_seconds=%s entity_count=%s",
             start_time,
             end_time,
             history_lookback_seconds,
-            len(self.configuration.household_load_entities or []),
+            len(entities or []),
         )
         retrieved_at = as_utc(
             now or datetime.now(timezone.utc),
@@ -60,54 +63,68 @@ class HomeAssistantLoadImporter:
         )
         effective_end_time = end_time or latest_completed_hour(retrieved_at)
         try:
-            series = self._aggregator.aggregate(
-                self.configuration.household_load_entities,
+            aggregate = EnergyAggregate(
+                entities,
                 start_time,
                 effective_end_time,
                 history_lookback_seconds,
                 label="household-load",
             )
         except Exception as error:
-            if isinstance(error, HomeAssistantError) and any(
-                marker in str(error) for marker in ("unknown", "unavailable")
-            ):
-                logger.warning(
-                    "event=provider_data_degraded component=home_assistant "
-                    "operation=fetch error_type=%s entity_count=%s error=%s",
-                    error.__class__.__name__,
-                    len(self.configuration.household_load_entities or []),
-                    error,
-                )
-            logger.error(
-                "event=provider_fetch_failed component=home_assistant "
-                "operation=fetch error_type=%s entity_count=%s",
-                error.__class__.__name__,
-                len(self.configuration.household_load_entities or []),
-                exc_info=True,
-            )
+            self._log_failure(error)
             raise
-        data = HouseholdLoadData(
-            schema_version="1",
-            start_time=series.start_time,
-            interval_minutes=60,
-            load_kw=series.values_kw,
-            unit="kW",
-            source=SourceMetadata(
-                provider="home-assistant", entity_id=HOUSEHOLD_LOAD_SOURCE_ID
-            ),
-            retrieved_at=retrieved_at,
-            latest_observation_at=series.latest_observation_at,
-            quality=series.quality,
+
+        def build(history: HomeAssistantHistory) -> HouseholdLoadData:
+            try:
+                series = aggregate.build(history)
+            except Exception as error:
+                self._log_failure(error)
+                raise
+            data = HouseholdLoadData(
+                schema_version="1",
+                start_time=series.start_time,
+                interval_minutes=60,
+                load_kw=series.values_kw,
+                unit="kW",
+                source=SourceMetadata(
+                    provider="home-assistant", entity_id=HOUSEHOLD_LOAD_SOURCE_ID
+                ),
+                retrieved_at=retrieved_at,
+                latest_observation_at=series.latest_observation_at,
+                quality=series.quality,
+            )
+            logger.info(
+                "event=provider_fetch_succeeded component=home_assistant "
+                "operation=fetch start_time=%s end_time=%s record_count=%s "
+                "entity_count=%s",
+                data.start_time,
+                effective_end_time,
+                len(data.load_kw),
+                len(entities or []),
+            )
+            return data
+
+        return HistoryPlan(needs=aggregate.needs(), build=build)
+
+    def _log_failure(self, error: Exception) -> None:
+        entity_count = len(self.configuration.household_load_entities or [])
+        if isinstance(error, HomeAssistantError) and any(
+            marker in str(error) for marker in ("unknown", "unavailable")
+        ):
+            logger.warning(
+                "event=provider_data_degraded component=home_assistant "
+                "operation=fetch error_type=%s entity_count=%s error=%s",
+                error.__class__.__name__,
+                entity_count,
+                error,
+            )
+        logger.error(
+            "event=provider_fetch_failed component=home_assistant "
+            "operation=fetch error_type=%s entity_count=%s",
+            error.__class__.__name__,
+            entity_count,
+            exc_info=True,
         )
-        logger.info(
-            "event=provider_fetch_succeeded component=home_assistant operation=fetch "
-            "start_time=%s end_time=%s record_count=%s entity_count=%s",
-            data.start_time,
-            effective_end_time,
-            len(data.load_kw),
-            len(self.configuration.household_load_entities or []),
-        )
-        return data
 
     def is_fresh(
         self,

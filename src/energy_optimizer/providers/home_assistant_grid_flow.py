@@ -5,14 +5,17 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-import httpx
-
 from energy_optimizer.config import HomeAssistantConfiguration
 from energy_optimizer.providers.home_assistant_energy import (
-    HomeAssistantEnergyAggregator,
-    HomeAssistantError,
+    EnergyAggregate,
+    HomeAssistantEnergySeries,
     is_fresh,
     latest_completed_hour,
+)
+from energy_optimizer.providers.home_assistant_history import (
+    HistoryPlan,
+    HomeAssistantError,
+    HomeAssistantHistory,
 )
 from energy_optimizer.providers.interfaces import (
     GRID_FLOW_SOURCE_ID,
@@ -26,25 +29,24 @@ logger = logging.getLogger(__name__)
 
 
 class HomeAssistantGridFlowImporter:
-    """Retrieve and normalize grid import and export history."""
+    """Declare and build grid import and export history."""
 
-    def __init__(
-        self,
-        configuration: HomeAssistantConfiguration,
-        client: httpx.Client | None = None,
-    ) -> None:
+    def __init__(self, configuration: HomeAssistantConfiguration) -> None:
         self.configuration = configuration
-        self._aggregator = HomeAssistantEnergyAggregator(configuration, client)
 
-    def fetch(
+    def plan(
         self,
         start_time: datetime,
         end_time: datetime | None = None,
         history_lookback_seconds: float = 0,
         *,
         now: datetime | None = None,
-    ) -> GridFlowData:
-        """Fetch both grid channels for a requested half-open period."""
+    ) -> HistoryPlan[GridFlowData]:
+        """Declare the history both grid channels need for a half-open period.
+
+        Building reads the shared history that the caller imported for the
+        declared needs; this importer makes no Home Assistant request itself.
+        """
         retrieved_at = as_utc(
             now or datetime.now(timezone.utc),
             error_factory=HomeAssistantError,
@@ -63,51 +65,87 @@ class HomeAssistantGridFlowImporter:
             len(self.configuration.grid_export_entities or []),
         )
         try:
-            import_series = self._aggregator.aggregate(
+            import_aggregate = EnergyAggregate(
                 self.configuration.grid_import_entities,
                 start_time,
                 effective_end_time,
                 history_lookback_seconds,
                 label="grid import",
             )
-            export_series = self._aggregator.aggregate(
+            export_aggregate = EnergyAggregate(
                 self.configuration.grid_export_entities,
                 start_time,
                 effective_end_time,
                 history_lookback_seconds,
                 label="grid export",
             )
-            aggregate_start = max(import_series.start_time, export_series.start_time)
-            value_count = int(
-                (effective_end_time - aggregate_start).total_seconds() // 3600
-            )
-            import_offset = int(
-                (aggregate_start - import_series.start_time).total_seconds() // 3600
-            )
-            export_offset = int(
-                (aggregate_start - export_series.start_time).total_seconds() // 3600
-            )
-            import_values = import_series.values_kw[
-                import_offset : import_offset + value_count
-            ]
-            export_values = export_series.values_kw[
-                export_offset : export_offset + value_count
-            ]
-            if len(import_values) != value_count or len(export_values) != value_count:
-                raise HomeAssistantError(
-                    "Home Assistant grid import and export entities returned "
-                    "misaligned hourly series"
-                )
         except Exception as error:
-            logger.error(
-                "event=provider_fetch_failed component=home_assistant "
-                "operation=fetch data_type=grid_flow error_type=%s",
-                error.__class__.__name__,
-                exc_info=True,
-            )
+            self._log_failure(error)
             raise
 
-        data = GridFlowData(
+        def build(history: HomeAssistantHistory) -> GridFlowData:
+            try:
+                import_series = import_aggregate.build(history)
+                export_series = export_aggregate.build(history)
+                data = self._combine(
+                    import_series, export_series, effective_end_time, retrieved_at
+                )
+            except Exception as error:
+                self._log_failure(error)
+                raise
+            logger.info(
+                "event=provider_fetch_succeeded component=home_assistant "
+                "operation=fetch data_type=grid_flow start_time=%s end_time=%s "
+                "record_count=%s",
+                data.start_time,
+                effective_end_time,
+                len(data.import_kw),
+            )
+            return data
+
+        return HistoryPlan(
+            needs=import_aggregate.needs() + export_aggregate.needs(), build=build
+        )
+
+    @staticmethod
+    def _log_failure(error: Exception) -> None:
+        logger.error(
+            "event=provider_fetch_failed component=home_assistant "
+            "operation=fetch data_type=grid_flow error_type=%s",
+            error.__class__.__name__,
+            exc_info=True,
+        )
+
+    def _combine(
+        self,
+        import_series: HomeAssistantEnergySeries,
+        export_series: HomeAssistantEnergySeries,
+        effective_end_time: datetime,
+        retrieved_at: datetime,
+    ) -> GridFlowData:
+        """Align both channels to their common available start."""
+        aggregate_start = max(import_series.start_time, export_series.start_time)
+        value_count = int(
+            (effective_end_time - aggregate_start).total_seconds() // 3600
+        )
+        import_offset = int(
+            (aggregate_start - import_series.start_time).total_seconds() // 3600
+        )
+        export_offset = int(
+            (aggregate_start - export_series.start_time).total_seconds() // 3600
+        )
+        import_values = import_series.values_kw[
+            import_offset : import_offset + value_count
+        ]
+        export_values = export_series.values_kw[
+            export_offset : export_offset + value_count
+        ]
+        if len(import_values) != value_count or len(export_values) != value_count:
+            raise HomeAssistantError(
+                "Home Assistant grid import and export entities returned "
+                "misaligned hourly series"
+            )
+        return GridFlowData(
             schema_version="1",
             start_time=aggregate_start,
             interval_minutes=60,
@@ -130,14 +168,6 @@ class HomeAssistantGridFlowImporter:
                 export_offset,
             ),
         )
-        logger.info(
-            "event=provider_fetch_succeeded component=home_assistant operation=fetch "
-            "data_type=grid_flow start_time=%s end_time=%s record_count=%s",
-            data.start_time,
-            effective_end_time,
-            len(data.import_kw),
-        )
-        return data
 
     @staticmethod
     def _combine_quality(

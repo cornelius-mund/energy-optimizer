@@ -6,22 +6,22 @@ import logging
 import math
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any
-from urllib.parse import quote
-
-import httpx
 
 from energy_optimizer.config import (
     HomeAssistantBatteryEfficiencyConfiguration,
+    HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
 )
 from energy_optimizer.providers.home_assistant_energy import (
-    HOME_ASSISTANT_HISTORY_CHUNK,
-    HomeAssistantEnergyAggregator,
+    EnergyAggregate,
     HomeAssistantEnergySeries,
-    HomeAssistantError,
 )
-from energy_optimizer.providers.http import JsonHttpClient
+from energy_optimizer.providers.home_assistant_history import (
+    HistoryNeed,
+    HistoryPlan,
+    HomeAssistantError,
+    HomeAssistantHistory,
+)
 from energy_optimizer.providers.interfaces import (
     BATTERY_EFFICIENCY_HISTORY_SOURCE_ID,
     BATTERY_EFFICIENCY_SOURCE_ID,
@@ -36,20 +36,15 @@ from energy_optimizer.providers.interfaces import (
 from energy_optimizer.providers.normalization import (
     align_to_next_hour,
     as_utc,
-    parse_aware_timestamp,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class HomeAssistantBatteryEfficiencyImporter:
-    """Retrieve the aligned measured history needed by the calculator."""
+    """Declare and build the aligned measured history the calculator needs."""
 
-    def __init__(
-        self,
-        configuration: HomeAssistantConfiguration,
-        client: httpx.Client | None = None,
-    ) -> None:
+    def __init__(self, configuration: HomeAssistantConfiguration) -> None:
         if (
             configuration.battery is None
             or configuration.battery.efficiency_calculation is None
@@ -59,17 +54,19 @@ class HomeAssistantBatteryEfficiencyImporter:
             )
         self.configuration = configuration
         self.efficiency_configuration = configuration.battery.efficiency_calculation
-        self._aggregator = HomeAssistantEnergyAggregator(configuration, client)
-        self._http = JsonHttpClient(client)
 
-    def fetch(
+    def plan(
         self,
         start_time: datetime,
         end_time: datetime,
         *,
         now: datetime | None = None,
-    ) -> BatteryEfficiencyHistoryData:
-        """Fetch all configured expressions for one complete history range."""
+    ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
+        """Declare all configured expressions for one complete history range.
+
+        Building reads the shared history that the caller imported for the
+        declared needs; this importer makes no Home Assistant request itself.
+        """
         start = self._as_utc(start_time)
         end = self._as_utc(end_time)
         if start.minute or start.second or start.microsecond:
@@ -87,19 +84,16 @@ class HomeAssistantBatteryEfficiencyImporter:
             "inverter_charge": configuration.inverter_charge,
             "inverter_discharge": configuration.inverter_discharge,
         }
-        series: dict[
-            str, tuple[HomeAssistantEnergySeries, HomeAssistantEnergySeries]
-        ] = {}
-        for name, leg in legs.items():
-            series[name] = (
-                self._aggregator.aggregate(
+        aggregates = {
+            name: (
+                EnergyAggregate(
                     leg.energy_in,
                     start,
                     end,
                     label=f"battery efficiency {name} input",
                     allow_negative=True,
                 ),
-                self._aggregator.aggregate(
+                EnergyAggregate(
                     leg.energy_out,
                     start,
                     end,
@@ -107,39 +101,67 @@ class HomeAssistantBatteryEfficiencyImporter:
                     allow_negative=True,
                 ),
             )
-        soc = self._fetch_state_of_charge(
-            configuration.state_of_charge,
-            start,
-            end + timedelta(hours=1),
-        )
-        aligned_start, aligned_end, aligned, quality = self._align_history(
-            series, soc, end
-        )
-        retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
-        latest_observation_at = min(
-            [item.latest_observation_at for pair in series.values() for item in pair]
-            + [soc[2]]
-        )
-        return BatteryEfficiencyHistoryData(
-            schema_version="1",
-            start_time=aligned_start,
-            interval_minutes=60,
-            battery_energy_in_kwh=aligned["battery_in"],
-            battery_energy_out_kwh=aligned["battery_out"],
-            inverter_charge_energy_in_kwh=aligned["charge_in"],
-            inverter_charge_energy_out_kwh=aligned["charge_out"],
-            inverter_discharge_energy_in_kwh=aligned["discharge_in"],
-            inverter_discharge_energy_out_kwh=aligned["discharge_out"],
-            state_of_charge_percent=aligned["soc"],
-            unit="kWh",
-            source=SourceMetadata(
-                provider="home-assistant",
-                entity_id=BATTERY_EFFICIENCY_HISTORY_SOURCE_ID,
+            for name, leg in legs.items()
+        }
+        # The state-of-charge series needs one boundary sample after the last
+        # whole hour.
+        soc_end = end + timedelta(hours=1)
+        needs = tuple(
+            need
+            for pair in aggregates.values()
+            for aggregate in pair
+            for need in aggregate.needs()
+        ) + (
+            HistoryNeed(
+                configuration.state_of_charge.entity_id, "state", start, soc_end
             ),
-            retrieved_at=retrieved_at,
-            latest_observation_at=min(latest_observation_at, aligned_end),
-            quality=quality,
         )
+
+        def build(history: HomeAssistantHistory) -> BatteryEfficiencyHistoryData:
+            series = {
+                name: (
+                    energy_in.build(history),
+                    energy_out.build(history),
+                )
+                for name, (energy_in, energy_out) in aggregates.items()
+            }
+            soc = _state_of_charge_series(
+                history, configuration.state_of_charge, start, soc_end
+            )
+            aligned_start, aligned_end, aligned, quality = self._align_history(
+                series, soc, end
+            )
+            retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
+            latest_observation_at = min(
+                [
+                    item.latest_observation_at
+                    for pair in series.values()
+                    for item in pair
+                ]
+                + [soc[2]]
+            )
+            return BatteryEfficiencyHistoryData(
+                schema_version="1",
+                start_time=aligned_start,
+                interval_minutes=60,
+                battery_energy_in_kwh=aligned["battery_in"],
+                battery_energy_out_kwh=aligned["battery_out"],
+                inverter_charge_energy_in_kwh=aligned["charge_in"],
+                inverter_charge_energy_out_kwh=aligned["charge_out"],
+                inverter_discharge_energy_in_kwh=aligned["discharge_in"],
+                inverter_discharge_energy_out_kwh=aligned["discharge_out"],
+                state_of_charge_percent=aligned["soc"],
+                unit="kWh",
+                source=SourceMetadata(
+                    provider="home-assistant",
+                    entity_id=BATTERY_EFFICIENCY_HISTORY_SOURCE_ID,
+                ),
+                retrieved_at=retrieved_at,
+                latest_observation_at=min(latest_observation_at, aligned_end),
+                quality=quality,
+            )
+
+        return HistoryPlan(needs=needs, build=build)
 
     def is_fresh(
         self,
@@ -155,145 +177,6 @@ class HomeAssistantBatteryEfficiencyImporter:
             or (current - self._as_utc(data.latest_observation_at)).total_seconds()
             <= max_age
         )
-
-    def _fetch_state_of_charge(
-        self,
-        mapping: Any,
-        start_time: datetime,
-        end_time: datetime,
-    ) -> tuple[datetime, tuple[float, ...], datetime]:
-        records: dict[datetime, float] = {}
-        chunk_start = start_time
-        while chunk_start < end_time:
-            chunk_end = min(chunk_start + HOME_ASSISTANT_HISTORY_CHUNK, end_time)
-            url = self._history_url(chunk_start, chunk_end, mapping.entity_id)
-            payload = self._http.get_home_assistant_json(
-                url,
-                token=self.configuration.token.get_secret_value(),
-                timeout_seconds=self.configuration.timeout_seconds,
-                error_factory=HomeAssistantError,
-                not_found_message=(
-                    f"Home Assistant state-of-charge history was not found for "
-                    f"{mapping.entity_id}"
-                ),
-                status_message=lambda status: (
-                    f"Home Assistant returned HTTP {status} while retrieving state-of-"
-                    "charge history"
-                ),
-                timeout_message=(
-                    "Home Assistant request timed out while retrieving "
-                    "state-of-charge history"
-                ),
-                transport_message=(
-                    "Home Assistant request failed while retrieving "
-                    "state-of-charge history"
-                ),
-                malformed_message=(
-                    "Home Assistant returned malformed state-of-charge history"
-                ),
-                log_event="home_assistant_history_request",
-                component="home_assistant",
-                operation="history_request",
-                success_log_level=logging.DEBUG,
-                error_log_level=logging.DEBUG,
-            )
-            if not isinstance(payload, list):
-                raise HomeAssistantError(
-                    f"Home Assistant state-of-charge history for {mapping.entity_id} "
-                    "must contain one entity series"
-                )
-            if not payload or (len(payload) == 1 and payload[0] == []):
-                chunk_start = chunk_end
-                continue
-            if len(payload) != 1 or not isinstance(payload[0], list):
-                raise HomeAssistantError(
-                    f"Home Assistant state-of-charge history for {mapping.entity_id} "
-                    "must contain one entity series"
-                )
-            for record in payload[0]:
-                if not isinstance(record, dict):
-                    raise HomeAssistantError(
-                        "state-of-charge history contains an invalid record"
-                    )
-                timestamp = parse_aware_timestamp(
-                    record.get("last_updated", record.get("last_changed")),
-                    error_factory=HomeAssistantError,
-                    missing_message="state-of-charge history has a missing timestamp",
-                    invalid_message=lambda raw: (
-                        f"invalid state-of-charge timestamp: {raw!r}"
-                    ),
-                    naive_message="state-of-charge timestamps must include a timezone",
-                )
-                raw_state = record.get("state")
-                if isinstance(raw_state, str) and raw_state.strip().lower() in {
-                    "unknown",
-                    "unavailable",
-                }:
-                    continue
-                try:
-                    value = float(raw_state)  # type: ignore[arg-type]
-                except (TypeError, ValueError) as error:
-                    raise HomeAssistantError(
-                        f"state-of-charge entity {mapping.entity_id} returned a "
-                        "non-numeric value"
-                    ) from error
-                if mapping.unit in {"Wh", "kWh"}:
-                    unit = (
-                        record.get("attributes", {}).get("unit_of_measurement")
-                        if isinstance(record.get("attributes"), dict)
-                        else None
-                    )
-                    if unit not in {"Wh", "kWh"}:
-                        raise HomeAssistantError(
-                            f"state-of-charge entity {mapping.entity_id} has an "
-                            "incompatible unit"
-                        )
-                    if unit == "Wh":
-                        value /= 1000
-                if not math.isfinite(value) or value < 0:
-                    raise HomeAssistantError(
-                        f"state-of-charge entity {mapping.entity_id} returned an "
-                        "invalid value"
-                    )
-                records[timestamp] = value
-            chunk_start = chunk_end
-        if not records:
-            raise HomeAssistantError(
-                "Home Assistant returned no usable state-of-charge history for "
-                f"{mapping.entity_id}"
-            )
-        effective_start = align_to_next_hour(min(records))
-        hours = int((end_time - effective_start).total_seconds() // 3600)
-        if hours <= 0:
-            raise HomeAssistantError(
-                "Home Assistant returned no complete state-of-charge history for "
-                f"{mapping.entity_id}"
-            )
-        # Home Assistant's history API only returns a row when an entity's
-        # state changes, so an hour with no row does not mean the value is
-        # missing; it means the value has not changed since the previous
-        # observation. Carry the most recent known value forward for each
-        # hour instead of requiring a fresh row in every bucket.
-        sorted_records = sorted(records.items())
-        values: list[float] = []
-        last_value: float | None = None
-        next_index = 0
-        for index in range(hours):
-            boundary = effective_start + timedelta(hours=index + 1)
-            while (
-                next_index < len(sorted_records)
-                and sorted_records[next_index][0] < boundary
-            ):
-                last_value = sorted_records[next_index][1]
-                next_index += 1
-            if last_value is None:  # pragma: no cover - effective_start guarantees this
-                raise HomeAssistantError(
-                    "Home Assistant returned no state-of-charge observation "
-                    f"before {boundary.isoformat()} for {mapping.entity_id}"
-                )
-            values.append(last_value)
-        latest = max(records)
-        return effective_start, tuple(values), latest
 
     def _align_history(
         self,
@@ -365,16 +248,6 @@ class HomeAssistantBatteryEfficiencyImporter:
             tuple(quality),
         )
 
-    def _history_url(
-        self, start_time: datetime, end_time: datetime, entity_id: str
-    ) -> str:
-        base_url = str(self.configuration.base_url).rstrip("/")
-        return (
-            f"{base_url}/api/history/period/{quote(start_time.isoformat(), safe='')}"
-            f"?end_time={quote(end_time.isoformat(), safe='')}"
-            f"&filter_entity_id={quote(entity_id, safe='')}"
-        )
-
     @staticmethod
     def _as_utc(value: datetime) -> datetime:
         return as_utc(
@@ -382,6 +255,66 @@ class HomeAssistantBatteryEfficiencyImporter:
             error_factory=HomeAssistantError,
             message="Home Assistant efficiency times must include a timezone",
         )
+
+
+def _state_of_charge_series(
+    history: HomeAssistantHistory,
+    mapping: HomeAssistantBatteryEntityConfiguration,
+    start_time: datetime,
+    end_time: datetime,
+) -> tuple[datetime, tuple[float, ...], datetime]:
+    """Forward-fill the state-of-charge samples of a window into hourly values."""
+    records: dict[datetime, float] = {}
+    for sample in history.window(mapping.entity_id, "state", start_time, end_time):
+        if sample.problem is not None:
+            raise HomeAssistantError(sample.problem)
+        value = sample.value
+        if mapping.unit in {"Wh", "kWh"}:
+            if sample.unit not in {"Wh", "kWh"}:
+                raise HomeAssistantError(
+                    f"state-of-charge entity {mapping.entity_id} has an "
+                    "incompatible unit"
+                )
+            if sample.unit == "Wh":
+                value /= 1000
+        records[sample.timestamp] = value
+    if not records:
+        raise HomeAssistantError(
+            "Home Assistant returned no usable state-of-charge history for "
+            f"{mapping.entity_id}"
+        )
+    effective_start = align_to_next_hour(min(records))
+    hours = int((end_time - effective_start).total_seconds() // 3600)
+    if hours <= 0:
+        raise HomeAssistantError(
+            "Home Assistant returned no complete state-of-charge history for "
+            f"{mapping.entity_id}"
+        )
+    # Home Assistant's history API only returns a row when an entity's
+    # state changes, so an hour with no row does not mean the value is
+    # missing; it means the value has not changed since the previous
+    # observation. Carry the most recent known value forward for each
+    # hour instead of requiring a fresh row in every bucket.
+    sorted_records = sorted(records.items())
+    values: list[float] = []
+    last_value: float | None = None
+    next_index = 0
+    for index in range(hours):
+        boundary = effective_start + timedelta(hours=index + 1)
+        while (
+            next_index < len(sorted_records)
+            and sorted_records[next_index][0] < boundary
+        ):
+            last_value = sorted_records[next_index][1]
+            next_index += 1
+        if last_value is None:  # pragma: no cover - effective_start guarantees this
+            raise HomeAssistantError(
+                "Home Assistant returned no state-of-charge observation "
+                f"before {boundary.isoformat()} for {mapping.entity_id}"
+            )
+        values.append(last_value)
+    latest = max(records)
+    return effective_start, tuple(values), latest
 
 
 def _full_quality(data: BatteryEfficiencyHistoryData) -> tuple[IntervalQuality, ...]:

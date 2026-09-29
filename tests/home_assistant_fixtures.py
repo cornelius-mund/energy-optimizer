@@ -1,14 +1,38 @@
 """Shared factories for Home Assistant provider tests."""
 
-from collections.abc import Callable
-from typing import Any, TypeVar
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Protocol, TypeVar
 
 import httpx
 
-from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.config import (
+    HomeAssistantConfiguration,
+    HomeAssistantEnergyEntityConfiguration,
+)
+from energy_optimizer.providers.home_assistant_energy import (
+    EnergyAggregate,
+    HomeAssistantEnergySeries,
+)
+from energy_optimizer.providers.home_assistant_history import (
+    HistoryPlan,
+    HomeAssistantHistoryImporter,
+)
 
 ImporterT = TypeVar("ImporterT")
+DataT = TypeVar("DataT")
+DataT_co = TypeVar("DataT_co", covariant=True)
 ConfigurationFactory = Callable[..., HomeAssistantConfiguration]
+
+
+class HistoryPlanningImporter(Protocol[DataT_co]):
+    """An importer that declares Home Assistant history needs and builds a record."""
+
+    @property
+    def configuration(self) -> HomeAssistantConfiguration: ...
+
+    def plan(self, *args: Any, **kwargs: Any) -> HistoryPlan[DataT_co]: ...
 
 
 def home_assistant_configuration_factory(
@@ -44,6 +68,156 @@ def home_assistant_importer_factory(
         return importer_type(configuration(**configuration_overrides), client), client
 
     return create_importer
+
+
+def home_assistant_planning_importer_factory(
+    importer_type: Callable[[HomeAssistantConfiguration], ImporterT],
+    configuration: ConfigurationFactory,
+) -> Callable[..., tuple[ImporterT, httpx.Client]]:
+    """Build a factory for importers that declare needs instead of fetching.
+
+    Such importers make no requests themselves, so the mocked client is returned
+    next to the importer for :func:`import_and_build` to use and for the test to
+    close.
+    """
+
+    def create_importer(
+        handler: httpx.MockTransport | httpx.BaseTransport,
+        **configuration_overrides: Any,
+    ) -> tuple[ImporterT, httpx.Client]:
+        client = httpx.Client(transport=handler)
+        return importer_type(configuration(**configuration_overrides)), client
+
+    return create_importer
+
+
+@dataclass(frozen=True)
+class HistoryRequest:
+    """One history request received by :class:`FakeHomeAssistant`."""
+
+    entity_id: str
+    start_time: datetime
+    end_time: datetime
+
+
+@dataclass
+class FakeHomeAssistant:
+    """A Home Assistant history endpoint that records every request.
+
+    It answers like Home Assistant: the state in force at the requested start,
+    stamped with that start, followed by every state change up to the requested
+    end. ``states`` maps each entity to its ``(timestamp, state)`` changes in
+    ascending order. Entities listed in ``failures`` answer with that HTTP status.
+    """
+
+    states: Mapping[str, Sequence[tuple[datetime, str]]]
+    units: Mapping[str, str] = field(default_factory=dict)
+    state_classes: Mapping[str, str] = field(default_factory=dict)
+    failures: dict[str, int] = field(default_factory=dict)
+    requests: list[HistoryRequest] = field(default_factory=list)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        start_time = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        end_time = datetime.fromisoformat(request.url.params["end_time"])
+        self.requests.append(HistoryRequest(entity_id, start_time, end_time))
+        if entity_id in self.failures:
+            return httpx.Response(self.failures[entity_id])
+        return httpx.Response(200, json=self.payload(entity_id, start_time, end_time))
+
+    def payload(
+        self, entity_id: str, start_time: datetime, end_time: datetime
+    ) -> list[list[dict[str, Any]]]:
+        """Return the history response for one entity and requested period."""
+        in_force: tuple[datetime, str] | None = None
+        changes: list[tuple[datetime, str]] = []
+        for timestamp, state in self.states.get(entity_id, ()):
+            if timestamp <= start_time:
+                in_force = (timestamp, state)
+            elif timestamp <= end_time:
+                changes.append((timestamp, state))
+        answered = ([(start_time, in_force[1])] if in_force else []) + changes
+        return [
+            [
+                {
+                    "entity_id": entity_id,
+                    "state": state,
+                    "last_updated": timestamp.isoformat(),
+                    "attributes": {
+                        "unit_of_measurement": self.units.get(entity_id, "kWh"),
+                        "state_class": self.state_classes.get(
+                            entity_id, "total_increasing"
+                        ),
+                    },
+                }
+                for timestamp, state in answered
+            ]
+        ]
+
+    def client(self) -> httpx.Client:
+        """Return a client whose transport is this endpoint."""
+        return httpx.Client(transport=httpx.MockTransport(self))
+
+    def requested_entities(self) -> list[str]:
+        """Return the distinct requested entities in first-request order."""
+        return list(dict.fromkeys(request.entity_id for request in self.requests))
+
+    def requested_ranges(self, entity_id: str) -> list[tuple[datetime, datetime]]:
+        """Return the chunk ranges requested for one entity, in request order."""
+        return [
+            (request.start_time, request.end_time)
+            for request in self.requests
+            if request.entity_id == entity_id
+        ]
+
+
+def plan_without_needs(build: Callable[[], DataT]) -> HistoryPlan[DataT]:
+    """Plan a fake source that declares no history and builds its record itself."""
+    return HistoryPlan(needs=(), build=lambda history: build())
+
+
+def import_and_build(
+    importer: HistoryPlanningImporter[DataT_co],
+    client: httpx.Client,
+    *arguments: Any,
+    **keywords: Any,
+) -> DataT_co:
+    """Run the plan, import, and build phases for one importer in isolation.
+
+    This is what the orchestrator does for a single source: plan, import exactly
+    the declared needs through ``client``, then build from the imported history.
+    """
+    plan = importer.plan(*arguments, **keywords)
+    history = HomeAssistantHistoryImporter(
+        importer.configuration, client
+    ).import_history(plan.needs)
+    return plan.build(history)
+
+
+def import_and_aggregate(
+    configuration: HomeAssistantConfiguration,
+    client: httpx.Client,
+    entities: list[HomeAssistantEnergyEntityConfiguration] | None,
+    start_time: datetime,
+    end_time: datetime,
+    history_lookback_seconds: float = 0,
+    *,
+    label: str,
+    allow_negative: bool = False,
+) -> HomeAssistantEnergySeries:
+    """Import exactly what one signed energy expression needs and build it."""
+    aggregate = EnergyAggregate(
+        entities,
+        start_time,
+        end_time,
+        history_lookback_seconds,
+        label=label,
+        allow_negative=allow_negative,
+    )
+    history = HomeAssistantHistoryImporter(configuration, client).import_history(
+        aggregate.needs()
+    )
+    return aggregate.build(history)
 
 
 def home_assistant_state_payload(

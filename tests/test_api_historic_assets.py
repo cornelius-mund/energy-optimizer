@@ -37,6 +37,7 @@ from energy_optimizer.storage import (
 from home_assistant_fixtures import (
     home_assistant_history_payload,
     home_assistant_jittery_total_readings,
+    import_and_build,
 )
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -585,8 +586,12 @@ def test_battery_history_imported_from_jittery_total_counters_is_served(
     )
     client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
-        history = HomeAssistantBatteryEfficiencyImporter(configuration, client).fetch(
-            START, START + timedelta(hours=4), now=START
+        history = import_and_build(
+            HomeAssistantBatteryEfficiencyImporter(configuration),
+            client,
+            START,
+            START + timedelta(hours=4),
+            now=START,
         )
     finally:
         client.close()

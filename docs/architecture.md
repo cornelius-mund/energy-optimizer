@@ -31,8 +31,10 @@ src/energy_optimizer/
 │   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast adapter
 │   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── home_assistant.py     # Household-load Home Assistant composition
-│   ├── home_assistant_energy.py # Shared Home Assistant history and energy aggregation
+│   ├── home_assistant_history.py # Shared once-per-cycle Home Assistant history import
+│   ├── home_assistant_energy.py # Pure energy normalization and signed aggregation
 │   ├── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
+│   ├── home_assistant_battery_efficiency.py # Measured battery-efficiency composition
 │   └── home_assistant_battery.py # Current battery state composition
 ├── storage.py                # Generic durable normalized provider-data storage
 ├── history_merge.py          # Merge and retention rules for grid-flow and price history
@@ -134,25 +136,68 @@ services. Adapters own vendor-specific authentication, HTTP calls, response
 formats, and provider errors. Normalization and validation happen before data is
 passed to the application or optimizer.
 
-The shared `home_assistant_energy.py` component owns Home Assistant history
-requests, bearer-token authentication, energy-unit conversion, cumulative counter
-validation, reset-aware delta accumulation, signed entity aggregation, hourly
-normalization, and observation metadata. It follows Home Assistant's `total` and
-`total_increasing` state classes, rejects instantaneous power entities, and
-rejects failed or incomplete contributions. Requests covering more than seven
-days are split into contiguous half-open chunks, with the configured lookback
-applied only to the first chunk. Raw records from all chunks are combined before
-normalization so counter deltas and reset handling remain continuous at chunk
-boundaries. Reset transitions establish a new zero-contribution baseline, and a
+Home Assistant history is imported by one shared layer,
+`home_assistant_history.py`, so that an entity is downloaded once per
+orchestration cycle however many records use it. A cycle has three phases. In the
+plan phase every due source declares the history it needs as `HistoryNeed`
+values (entity ID, kind, and time range including the source's own lookback) and
+how to build its final record from that history; a source that is not due, or has
+no missing completed hour, declares nothing and causes no Home Assistant
+request. In the import phase the layer merges the needs per entity ID into one
+range (earliest start, latest end), fetches each entity exactly once with one
+HTTP client, and cleans it. In the build phase every source builds and persists
+its record from the shared series, in registration order. Sources without Home
+Assistant history needs (Forecast.Solar, aWATTar, and the live battery state)
+fetch inside their build step. An entity that is both a counter and plain state
+history in two plans, or a read of history that no plan declared, raises an
+explicit `HistoryPlanError`.
+
+The layer supports cumulative-energy counters and plain state history (the
+measured-efficiency state of charge). It only performs cleaning that does not
+depend on the consuming aggregate: timestamp parsing, skipping unknown and
+unavailable samples with one warning per entity, finite and non-negative values,
+and carrying `unit`, `state_class`, and `last_reset` from the previous sample
+where Home Assistant omits them. It keeps only the cleaned series and only until
+the cycle ends: raw responses are dropped as soon as they are cleaned, and there
+is no cross-cycle cache (that belongs to a separate provider-caching feature).
+Bearer-token authentication and the request timeout come from the Home
+Assistant configuration. Requests covering more than seven days are split into
+contiguous half-open chunks; the source's lookback is part of its declared range
+and so moves only the start of the first chunk. Records from all chunks are
+combined before normalization so counter deltas and reset handling remain
+continuous at chunk boundaries. A failure while importing one entity, which
+includes an HTTP error, a transport failure, or a malformed response, is recorded
+against that entity and re-raised, with the entity named in the message, to every
+source that reads it and to no other source; every other entity is still
+imported. A sample with an invalid value is reported to the sources whose window
+contains it, so a bad sample outside a source's window cannot fail that source.
+
+Each source reads its own window of the shared series exactly as Home Assistant
+would answer an independent request for it: the state in force at the window's
+start, stamped with that start, followed by every change up to its end. A state
+that became unavailable is not carried across the gap. Consequently a source's
+result equals what a separate fetch of its window would have produced, and a
+property-based test checks this equivalence.
+
+The `home_assistant_energy.py` component is the pure normalization step that runs
+on such a window with the consuming aggregate's own entity settings, so one
+entity ID may be configured differently in different aggregates: it is fetched
+once and normalized separately for each. Normalizations with identical settings
+and windows within a cycle are computed once. It owns energy-unit conversion,
+cumulative counter validation, reset-aware delta accumulation, signed entity
+aggregation, hourly normalization, and observation metadata. It follows Home
+Assistant's `total` and `total_increasing` state classes, rejects instantaneous
+power entities, and rejects failed or incomplete contributions. Reset transitions
+establish a new zero-contribution baseline, and a
 value that returns close to the pre-reset counter is treated as recovery rather
 than energy. Unknown and unavailable history samples are skipped without
 assigning energy; the next valid counter observation owns the resulting delta,
 and an entity with no usable observations still fails. Reset and recovery
 intervals carry explicit suspect quality metadata through aggregation,
 persistence, historic API responses, and orchestration; required suspect data
-cannot trigger an optimization plan. A failed chunk fails the complete provider
-fetch, so scheduled orchestration preserves the last valid persisted data and
-retries on a later due cycle.
+cannot trigger an optimization plan. A failed chunk fails the complete import of
+its entity and so the sources that read it, so scheduled orchestration preserves
+the last valid persisted data of those sources and retries on a later due cycle.
 For `total_increasing` counters, an increase followed by a return close to the
 pre-increase value is treated as a transient counter spike: the earlier delta is
 retracted, both observations are marked suspect, and no fabricated energy is
@@ -173,9 +218,11 @@ and tolerance. The reference is the last observation at or before the start
 of a requested period, so a dip that straddles that start can count at most one
 tolerance's worth of energy once. A changed `last_reset`, `total_increasing`
 counters, and unknown or unavailable samples are handled as described above.
-Individual chunk request outcomes are debug-level diagnostics. The shared
-aggregator emits one structured success summary at info level or one failure
-summary at warning level after the complete entity set has been processed.
+Individual chunk request outcomes are debug-level diagnostics. The import emits
+one structured summary at info level with its entity, failed-entity, and request
+counts, and a warning for every failed entity. Each aggregate build emits one
+structured success summary at info level or one failure summary at warning level
+after the complete entity set has been processed.
 Each cumulative-energy mapping may additionally define a physical upper bound
 for one hourly delta in kWh. The bound is applied after unit conversion and
 before signed aggregation; an exceeded bound produces zero energy and suspect
@@ -214,9 +261,14 @@ which still blocks that result from feeding automatic optimization triggers.
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns
 both channels to their common available start and returns `GridFlowData` under
-the logical `grid_flow` identity. Importers expose freshness checks but do not
-start polling, schedule requests, cache results, persist results, or invoke the
-API layer. The orchestration layer owns those policies.
+the logical `grid_flow` identity. These importers and
+`HomeAssistantBatteryEfficiencyImporter` have no `fetch` method. Their single
+`plan` method returns a `HistoryPlan`: the declared history needs and a build step
+that turns the imported history into the record. They make no Home Assistant
+request, and they expose freshness checks but do not start polling, schedule
+requests, cache results, persist results, or invoke the API layer. The
+orchestration layer owns those policies, including the incremental start time and
+the reads of the persisted store that decide it, which happen in the plan phase.
 
 `HomeAssistantBatteryImporter` is intentionally separate from the cumulative
 energy helper because battery state of charge and capabilities are instantaneous
@@ -230,7 +282,8 @@ entity-backed values determine freshness, and a failure in any required mapping
 prevents a partial snapshot from being returned. Historic SOC reconstruction for
 efficiency calculations is handled by the dedicated measured-efficiency importer,
 which aligns configured battery and inverter expressions with state-of-charge
-history before persisting it for the daily calculation.
+history, imported through the same shared layer, before persisting it for the
+daily calculation.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or

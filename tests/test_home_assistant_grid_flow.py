@@ -7,15 +7,19 @@ import httpx
 import pytest
 
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
-from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
+)
+from energy_optimizer.providers.home_assistant_history import (
+    HomeAssistantError,
+    HomeAssistantHistoryImporter,
 )
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
-    home_assistant_importer_factory,
+    home_assistant_planning_importer_factory,
     home_assistant_suspect_negative_hour_readings,
+    import_and_build,
 )
 
 ENTITY_ID = "sensor.grid_import"
@@ -61,7 +65,9 @@ def standard_payload(entity_id: str) -> list[list[dict[str, Any]]]:
     )
 
 
-importer = home_assistant_importer_factory(HomeAssistantGridFlowImporter, configuration)
+importer = home_assistant_planning_importer_factory(
+    HomeAssistantGridFlowImporter, configuration
+)
 
 
 def test_fetch_normalizes_import_and_export_entities() -> None:
@@ -85,7 +91,7 @@ def test_fetch_normalizes_import_and_export_entities() -> None:
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -99,7 +105,7 @@ def test_fetch_normalizes_import_and_export_entities() -> None:
     assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 
 
-def test_household_load_and_grid_flow_normalize_a_reused_entity_independently() -> None:
+def test_household_load_and_grid_flow_share_one_import_of_a_reused_entity() -> None:
     shared_entity = "sensor.main_grid_total_in"
     export_entity = "sensor.main_grid_total_out"
     shared_configuration = home_assistant_configuration_factory(
@@ -133,22 +139,32 @@ def test_household_load_and_grid_flow_normalize_a_reused_entity_independently() 
         export_entity: standard_payload(export_entity),
     }
 
+    requested: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.params["filter_entity_id"])
         return httpx.Response(
             200, json=responses[request.url.params["filter_entity_id"]]
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
-        household_load = HomeAssistantLoadImporter(shared_configuration, client).fetch(
+        load_plan = HomeAssistantLoadImporter(shared_configuration).plan(
             START, END, now=NOW
         )
-        grid_flow = HomeAssistantGridFlowImporter(shared_configuration, client).fetch(
+        grid_plan = HomeAssistantGridFlowImporter(shared_configuration).plan(
             START, END, now=NOW
         )
+        history = HomeAssistantHistoryImporter(
+            shared_configuration, client
+        ).import_history(load_plan.needs + grid_plan.needs)
+        household_load = load_plan.build(history)
+        grid_flow = grid_plan.build(history)
     finally:
         client.close()
 
+    # The entity that both records read is downloaded once, not once per record.
+    assert requested == [shared_entity, export_entity]
     assert household_load.load_kw == (1.0, 2.0, 3.0, 4.0)
     assert grid_flow.import_kw == (1.0, 2.0, 3.0, 4.0)
     assert grid_flow.export_kw == (1.0, 2.0, 3.0, 4.0)
@@ -194,7 +210,7 @@ def test_fetch_supports_multiple_signed_entities_per_channel() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -243,7 +259,7 @@ def test_fetch_rejects_negative_combined_import() -> None:
     )
     try:
         with pytest.raises(HomeAssistantError, match="negative"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -293,7 +309,9 @@ def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect(
         },
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=3), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=3), now=NOW
+        )
     finally:
         client.close()
 
@@ -328,7 +346,7 @@ def test_fetch_aligns_channels_to_the_latest_available_start() -> None:
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -350,7 +368,7 @@ def test_fetch_fails_without_returning_partial_data_when_one_channel_fails() -> 
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match="HTTP 503"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -379,7 +397,7 @@ def test_freshness_uses_the_oldest_channel_observation() -> None:
 
     provider, client = importer(httpx.MockTransport(handler), max_data_age_seconds=90)
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -404,7 +422,7 @@ def test_fetch_rejects_instantaneous_power_channel() -> None:
     )
     try:
         with pytest.raises(HomeAssistantError, match="instantaneous power"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -459,7 +477,9 @@ def test_grid_flow_tolerates_total_counter_dips_without_last_reset() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
