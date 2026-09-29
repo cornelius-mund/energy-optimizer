@@ -28,10 +28,10 @@ from energy_optimizer.orchestration import (
     ProviderRegistration,
     build_configured_orchestrator,
 )
-from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_battery_efficiency import (
     HomeAssistantBatteryEfficiencyImporter,
 )
+from energy_optimizer.providers.home_assistant_history import HistoryPlan
 from energy_optimizer.providers.interfaces import (
     BatteryData,
     BatteryEfficiencyData,
@@ -48,6 +48,7 @@ from home_assistant_fixtures import (
     home_assistant_history_payload,
     home_assistant_jittery_total_readings,
     home_assistant_suspect_negative_hour_readings,
+    plan_without_needs,
 )
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -136,7 +137,7 @@ def registration(
         name=source,
         data_type=data_type,
         adapter=ADAPTER,
-        fetch=fetch,
+        plan=lambda now, schedule: plan_without_needs(lambda: fetch(now, schedule)),
         is_fresh=lambda value, now: (
             isinstance(value, HouseholdLoadData)
             and value.latest_observation_at >= now - timedelta(minutes=90)
@@ -415,7 +416,9 @@ def test_restarted_orchestrator_loads_persisted_data(tmp_path: Path) -> None:
                 name="household_load",
                 data_type="household-load",
                 adapter=ADAPTER,
-                fetch=fetch,
+                plan=lambda now, schedule: plan_without_needs(
+                    lambda: fetch(now, schedule)
+                ),
                 is_fresh=lambda value, _: isinstance(value, HouseholdLoadData),
                 load=load,
             )
@@ -505,19 +508,21 @@ def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> HouseholdLoadData:
+        ) -> HistoryPlan[HouseholdLoadData]:
             del end_time, history_lookback_seconds
-            return data(
-                now or start_time,
-                source="home-assistant",
-                entity_id="household_load",
+            return plan_without_needs(
+                lambda: data(
+                    now or start_time,
+                    source="home-assistant",
+                    entity_id="household_load",
+                )
             )
 
         def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
@@ -669,16 +674,16 @@ def test_configured_grid_flow_orchestrator_persists_grid_flow(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> GridFlowData:
+        ) -> HistoryPlan[GridFlowData]:
             del start_time, end_time, history_lookback_seconds
-            return grid_flow_data(now or START)
+            return plan_without_needs(lambda: grid_flow_data(now or START))
 
         def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
             del now
@@ -716,14 +721,14 @@ class RecordingGridFlowImporter:
     def __init__(self, _: HomeAssistantConfiguration) -> None:
         pass
 
-    def fetch(
+    def plan(
         self,
         start_time: datetime,
         end_time: datetime | None = None,
         history_lookback_seconds: float = 0,
         *,
         now: datetime | None = None,
-    ) -> GridFlowData:
+    ) -> HistoryPlan[GridFlowData]:
         del history_lookback_seconds
         assert end_time is not None and now is not None
         self.requests.append((start_time, end_time))
@@ -735,16 +740,18 @@ class RecordingGridFlowImporter:
             else end_time - timedelta(hours=2)
         )
         count = int((end_time - first).total_seconds() // 3600)
-        return GridFlowData(
-            schema_version="1",
-            start_time=first,
-            interval_minutes=60,
-            import_kw=tuple(float(index + 1) for index in range(count)),
-            export_kw=(0.5,) * count,
-            unit="kW",
-            source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
-            retrieved_at=now,
-            latest_observation_at=now,
+        return plan_without_needs(
+            lambda: GridFlowData(
+                schema_version="1",
+                start_time=first,
+                interval_minutes=60,
+                import_kw=tuple(float(index + 1) for index in range(count)),
+                export_kw=(0.5,) * count,
+                unit="kW",
+                source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
+                retrieved_at=now,
+                latest_observation_at=now,
+            )
         )
 
     def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
@@ -838,10 +845,10 @@ def test_grid_flow_failure_preserves_the_retained_history(
     orchestrator.run_due(START + timedelta(hours=5, minutes=1))
     retained = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
 
-    def fail(*_: object, **__: object) -> GridFlowData:
+    def fail(*_: object, **__: object) -> HistoryPlan[GridFlowData]:
         raise RuntimeError("Home Assistant is unavailable")
 
-    monkeypatch.setattr(RecordingGridFlowImporter, "fetch", fail)
+    monkeypatch.setattr(RecordingGridFlowImporter, "plan", fail)
     cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
 
     assert cycle.provider_runs[0].status == "failed"
@@ -861,7 +868,7 @@ def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
     assert orchestrator is not None
     orchestrator.run_due(START + timedelta(hours=5, minutes=1))
     retained = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
-    original_fetch = RecordingGridFlowImporter.fetch
+    original_plan = RecordingGridFlowImporter.plan
 
     def skip_first_requested_hour(
         self: RecordingGridFlowImporter,
@@ -870,8 +877,8 @@ def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
         history_lookback_seconds: float = 0,
         *,
         now: datetime | None = None,
-    ) -> GridFlowData:
-        return original_fetch(
+    ) -> HistoryPlan[GridFlowData]:
+        return original_plan(
             self,
             start_time + timedelta(hours=1),
             end_time,
@@ -879,7 +886,7 @@ def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
             now=now,
         )
 
-    monkeypatch.setattr(RecordingGridFlowImporter, "fetch", skip_first_requested_hour)
+    monkeypatch.setattr(RecordingGridFlowImporter, "plan", skip_first_requested_hour)
     cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
 
     assert cycle.provider_runs[0].status == "failed"
@@ -1072,31 +1079,34 @@ def test_configured_efficiency_orchestrator_persists_daily_calculation(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime,
             *,
             now: datetime | None = None,
-        ) -> BatteryEfficiencyHistoryData:
+        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
             del end_time
-            return BatteryEfficiencyHistoryData(
-                schema_version="1",
-                start_time=start_time,
-                interval_minutes=60,
-                battery_energy_in_kwh=(0, 5, 0, 5, 0, 5),
-                battery_energy_out_kwh=(0, 4, 0, 4, 0, 4),
-                inverter_charge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
-                inverter_charge_energy_out_kwh=(9, 9, 9, 9, 9, 9),
-                inverter_discharge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
-                inverter_discharge_energy_out_kwh=(8, 8, 8, 8, 8, 8),
-                state_of_charge_percent=(50, 100, 50, 100, 50, 100, 50),
-                unit="kWh",
-                source=SourceMetadata(
-                    provider="home-assistant", entity_id="battery_efficiency_history"
-                ),
-                retrieved_at=now or START,
-                latest_observation_at=now or START,
+            return plan_without_needs(
+                lambda: BatteryEfficiencyHistoryData(
+                    schema_version="1",
+                    start_time=start_time,
+                    interval_minutes=60,
+                    battery_energy_in_kwh=(0, 5, 0, 5, 0, 5),
+                    battery_energy_out_kwh=(0, 4, 0, 4, 0, 4),
+                    inverter_charge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
+                    inverter_charge_energy_out_kwh=(9, 9, 9, 9, 9, 9),
+                    inverter_discharge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
+                    inverter_discharge_energy_out_kwh=(8, 8, 8, 8, 8, 8),
+                    state_of_charge_percent=(50, 100, 50, 100, 50, 100, 50),
+                    unit="kWh",
+                    source=SourceMetadata(
+                        provider="home-assistant",
+                        entity_id="battery_efficiency_history",
+                    ),
+                    retrieved_at=now or START,
+                    latest_observation_at=now or START,
+                )
             )
 
         def is_fresh(
@@ -1178,32 +1188,35 @@ def test_configured_efficiency_orchestrator_fetches_only_missing_hours(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime,
             *,
             now: datetime | None = None,
-        ) -> BatteryEfficiencyHistoryData:
+        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
             fetch_calls.append((start_time, end_time))
             hours = int((end_time - start_time).total_seconds() // 3600)
-            return BatteryEfficiencyHistoryData(
-                schema_version="1",
-                start_time=start_time,
-                interval_minutes=60,
-                battery_energy_in_kwh=(1.0,) * hours,
-                battery_energy_out_kwh=(0.0,) * hours,
-                inverter_charge_energy_in_kwh=(1.0,) * hours,
-                inverter_charge_energy_out_kwh=(1.0,) * hours,
-                inverter_discharge_energy_in_kwh=(1.0,) * hours,
-                inverter_discharge_energy_out_kwh=(1.0,) * hours,
-                state_of_charge_percent=(50.0,) * (hours + 1),
-                unit="kWh",
-                source=SourceMetadata(
-                    provider="home-assistant", entity_id="battery_efficiency_history"
-                ),
-                retrieved_at=now or start_time,
-                latest_observation_at=now or end_time,
+            return plan_without_needs(
+                lambda: BatteryEfficiencyHistoryData(
+                    schema_version="1",
+                    start_time=start_time,
+                    interval_minutes=60,
+                    battery_energy_in_kwh=(1.0,) * hours,
+                    battery_energy_out_kwh=(0.0,) * hours,
+                    inverter_charge_energy_in_kwh=(1.0,) * hours,
+                    inverter_charge_energy_out_kwh=(1.0,) * hours,
+                    inverter_discharge_energy_in_kwh=(1.0,) * hours,
+                    inverter_discharge_energy_out_kwh=(1.0,) * hours,
+                    state_of_charge_percent=(50.0,) * (hours + 1),
+                    unit="kWh",
+                    source=SourceMetadata(
+                        provider="home-assistant",
+                        entity_id="battery_efficiency_history",
+                    ),
+                    retrieved_at=now or start_time,
+                    latest_observation_at=now or end_time,
+                )
             )
 
         def is_fresh(self, *_: object, **__: object) -> bool:
@@ -1296,13 +1309,13 @@ def test_configured_efficiency_orchestrator_persists_through_a_suspect_interval(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime,
             *,
             now: datetime | None = None,
-        ) -> BatteryEfficiencyHistoryData:
+        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
             fetch_calls.append((start_time, end_time))
             hours = int((end_time - start_time).total_seconds() // 3600)
             quality = tuple(
@@ -1311,24 +1324,27 @@ def test_configured_efficiency_orchestrator_persists_through_a_suspect_interval(
                 else IntervalQuality()
                 for index in range(hours)
             )
-            return BatteryEfficiencyHistoryData(
-                schema_version="1",
-                start_time=start_time,
-                interval_minutes=60,
-                battery_energy_in_kwh=(1.0,) * hours,
-                battery_energy_out_kwh=(0.0,) * hours,
-                inverter_charge_energy_in_kwh=(1.0,) * hours,
-                inverter_charge_energy_out_kwh=(1.0,) * hours,
-                inverter_discharge_energy_in_kwh=(1.0,) * hours,
-                inverter_discharge_energy_out_kwh=(1.0,) * hours,
-                state_of_charge_percent=(50.0,) * (hours + 1),
-                unit="kWh",
-                source=SourceMetadata(
-                    provider="home-assistant", entity_id="battery_efficiency_history"
-                ),
-                retrieved_at=now or start_time,
-                latest_observation_at=now or end_time,
-                quality=quality,
+            return plan_without_needs(
+                lambda: BatteryEfficiencyHistoryData(
+                    schema_version="1",
+                    start_time=start_time,
+                    interval_minutes=60,
+                    battery_energy_in_kwh=(1.0,) * hours,
+                    battery_energy_out_kwh=(0.0,) * hours,
+                    inverter_charge_energy_in_kwh=(1.0,) * hours,
+                    inverter_charge_energy_out_kwh=(1.0,) * hours,
+                    inverter_discharge_energy_in_kwh=(1.0,) * hours,
+                    inverter_discharge_energy_out_kwh=(1.0,) * hours,
+                    state_of_charge_percent=(50.0,) * (hours + 1),
+                    unit="kWh",
+                    source=SourceMetadata(
+                        provider="home-assistant",
+                        entity_id="battery_efficiency_history",
+                    ),
+                    retrieved_at=now or start_time,
+                    latest_observation_at=now or end_time,
+                    quality=quality,
+                )
             )
 
         def is_fresh(self, *_: object, **__: object) -> bool:
@@ -1472,20 +1488,15 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
     fetch_calls: list[tuple[datetime, datetime]] = []
 
     class RecordingEfficiencyImporter(HomeAssistantBatteryEfficiencyImporter):
-        def __init__(self, configuration: HomeAssistantConfiguration) -> None:
-            super().__init__(
-                configuration, httpx.Client(transport=httpx.MockTransport(handler))
-            )
-
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime,
             *,
             now: datetime | None = None,
-        ) -> BatteryEfficiencyHistoryData:
+        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
             fetch_calls.append((start_time, end_time))
-            return super().fetch(start_time, end_time, now=now)
+            return super().plan(start_time, end_time, now=now)
 
     monkeypatch.setattr(
         "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
@@ -1546,11 +1557,17 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
         ),
     )
     store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration, store, home_assistant_client=client
+    )
     assert orchestrator is not None
 
-    first_cycle = orchestrator.run_due(START + timedelta(hours=2), force=True)
-    second_cycle = orchestrator.run_due(START + timedelta(hours=4), force=True)
+    try:
+        first_cycle = orchestrator.run_due(START + timedelta(hours=2), force=True)
+        second_cycle = orchestrator.run_due(START + timedelta(hours=4), force=True)
+    finally:
+        client.close()
 
     expected_status = "suspect" if suspect_hours else "success"
     assert first_cycle.provider_runs[0].status == (
@@ -1619,14 +1636,14 @@ def test_configured_home_assistant_failure_preserves_persisted_data(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> HouseholdLoadData:
+        ) -> HistoryPlan[HouseholdLoadData]:
             del start_time, end_time, history_lookback_seconds, now
             raise RuntimeError(
                 "Home Assistant entity sensor.household_energy has no usable "
@@ -1696,19 +1713,21 @@ def test_configured_home_assistant_fetch_bootstraps_to_ten_year_limit(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> HouseholdLoadData:
+        ) -> HistoryPlan[HouseholdLoadData]:
             calls.append((start_time, end_time, history_lookback_seconds, now))
-            return data(
-                end_time or start_time,
-                source="home-assistant",
-                entity_id="household_load",
+            return plan_without_needs(
+                lambda: data(
+                    end_time or start_time,
+                    source="home-assistant",
+                    entity_id="household_load",
+                )
             )
 
         def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
@@ -1768,26 +1787,28 @@ def test_configured_home_assistant_persists_short_bootstrap_history(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> HouseholdLoadData:
+        ) -> HistoryPlan[HouseholdLoadData]:
             del start_time, end_time, history_lookback_seconds, now
-            return HouseholdLoadData(
-                schema_version="1",
-                start_time=retained_start,
-                interval_minutes=60,
-                load_kw=(1.0, 2.0),
-                unit="kW",
-                source=SourceMetadata(
-                    provider="home-assistant", entity_id="household_load"
-                ),
-                retrieved_at=START,
-                latest_observation_at=START,
+            return plan_without_needs(
+                lambda: HouseholdLoadData(
+                    schema_version="1",
+                    start_time=retained_start,
+                    interval_minutes=60,
+                    load_kw=(1.0, 2.0),
+                    unit="kW",
+                    source=SourceMetadata(
+                        provider="home-assistant", entity_id="household_load"
+                    ),
+                    retrieved_at=START,
+                    latest_observation_at=START,
+                )
             )
 
         def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
@@ -1843,19 +1864,21 @@ def test_configured_home_assistant_fetch_starts_after_persisted_history(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> HouseholdLoadData:
+        ) -> HistoryPlan[HouseholdLoadData]:
             calls.append((start_time, end_time, history_lookback_seconds, now))
-            return data(
-                start_time,
-                source="home-assistant",
-                entity_id="household_load",
+            return plan_without_needs(
+                lambda: data(
+                    start_time,
+                    source="home-assistant",
+                    entity_id="household_load",
+                )
             )
 
         def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
@@ -1921,19 +1944,21 @@ def test_configured_home_assistant_skips_when_all_completed_hours_are_persisted(
         def __init__(self, _: HomeAssistantConfiguration) -> None:
             pass
 
-        def fetch(
+        def plan(
             self,
             start_time: datetime,
             end_time: datetime | None = None,
             history_lookback_seconds: float = 0,
             *,
             now: datetime | None = None,
-        ) -> HouseholdLoadData:
+        ) -> HistoryPlan[HouseholdLoadData]:
             calls.append((start_time, end_time, history_lookback_seconds, now))
-            return data(
-                start_time,
-                source="home-assistant",
-                entity_id="household_load",
+            return plan_without_needs(
+                lambda: data(
+                    start_time,
+                    source="home-assistant",
+                    entity_id="household_load",
+                )
             )
 
         def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
@@ -2001,7 +2026,7 @@ def test_configured_home_assistant_skips_when_all_completed_hours_are_persisted(
 
 
 def test_household_load_refresh_survives_a_negative_hour_flagged_suspect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """A suspect negative hour is persisted as suspect, not a failed refresh.
 
@@ -2035,10 +2060,6 @@ def test_household_load_refresh_survives_a_negative_hour_flagged_suspect(
             )
         )
     )
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        lambda home_assistant: HomeAssistantLoadImporter(home_assistant, client),
-    )
     runtime_configuration = Configuration(
         time_resolution_minutes=60,
         grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
@@ -2069,7 +2090,9 @@ def test_household_load_refresh_survives_a_negative_hour_flagged_suspect(
     )
     store = ProviderDataStore(tmp_path)
     key = ProviderDataKey("household-load", "home-assistant", "household_load")
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration, store, home_assistant_client=client
+    )
     assert orchestrator is not None
 
     try:

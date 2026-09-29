@@ -75,6 +75,11 @@ awattar:
 # Optional Home Assistant provider settings. The token should be a long-lived
 # access token and must not be committed to source control. Household-load
 # entities must be energy readings; instantaneous W/kW sensors are rejected.
+# An entity ID may be used by several mappings, for example in more than one
+# calculated efficiency leg or in both household load and grid import. Each
+# distinct entity ID is imported once per orchestration cycle and shared by every
+# mapping that uses it. Its settings, such as maximum_interval_energy_kwh, apply
+# to each mapping separately, so they may differ between mappings.
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token

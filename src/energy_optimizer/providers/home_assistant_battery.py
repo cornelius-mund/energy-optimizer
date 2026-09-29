@@ -16,10 +16,8 @@ from energy_optimizer.config import (
     HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
 )
-from energy_optimizer.providers.home_assistant_energy import (
-    HomeAssistantError,
-    is_fresh,
-)
+from energy_optimizer.providers.home_assistant_energy import is_fresh
+from energy_optimizer.providers.home_assistant_history import HomeAssistantError
 from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.interfaces import (
     BATTERY_SOURCE_ID,

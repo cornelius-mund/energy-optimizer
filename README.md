@@ -265,6 +265,21 @@ hour, so scheduled collection never re-fetches completed hours already in the
 store. If no completed hour is missing, the scheduled cycle skips the provider
 request and persistence write.
 
+Each cycle runs in three phases so that a Home Assistant entity is downloaded at
+most once per cycle, even when several sources use it. First, every due source
+declares the history it needs (entity, kind, and time range including its own
+lookback) and how to build its record; a source that is not due, or has no
+missing completed hour, declares nothing and causes no Home Assistant request,
+and the Forecast.Solar, aWATTar, and live battery sources need none. Second, the
+cycle imports each distinct entity once for the merged range of all sources that
+need it, with one HTTP client and in seven-day chunks. Third, each source builds
+and persists its record from those shared series, applying its own entity
+settings, so one entity ID can be configured with different
+`maximum_interval_energy_kwh` values in different aggregates. The imported series
+live only until the cycle ends. A failing entity fails only the sources that read
+it, the error names the entity, and a failed source keeps its last valid
+persisted data.
+
 Grid-flow collection bootstraps and refreshes like household load: the first run
 requests up to the 87,672-hour maximum (or all history Home Assistant retains),
 and every later run requests only the completed hours after the retained history.

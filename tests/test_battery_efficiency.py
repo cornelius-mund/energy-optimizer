@@ -19,15 +19,17 @@ from energy_optimizer.providers.home_assistant_battery_efficiency import (
     calculate_battery_efficiency,
     merge_battery_efficiency_history,
 )
-from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
+from energy_optimizer.providers.home_assistant_history import HomeAssistantError
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyHistoryData,
     SourceMetadata,
 )
 from home_assistant_fixtures import (
+    FakeHomeAssistant,
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_jittery_total_readings,
+    import_and_build,
 )
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -313,9 +315,9 @@ def test_importer_fetches_and_aligns_home_assistant_history() -> None:
         )
 
     importer_client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, importer_client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(start, end, now=end)
+        data = import_and_build(importer, importer_client, start, end, now=end)
     finally:
         importer_client.close()
 
@@ -370,9 +372,9 @@ def test_importer_persists_history_despite_a_suspect_interval() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(start, end, now=end)
+        data = import_and_build(importer, client, start, end, now=end)
     finally:
         client.close()
 
@@ -426,9 +428,9 @@ def test_importer_tolerates_one_watt_hour_dips_in_total_counters() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(START, end, now=end)
+        data = import_and_build(importer, client, START, end, now=end)
     finally:
         client.close()
 
@@ -482,9 +484,9 @@ def test_importer_flags_a_large_total_counter_decrease_without_failing() -> None
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(START, end, now=end)
+        data = import_and_build(importer, client, START, end, now=end)
     finally:
         client.close()
 
@@ -502,11 +504,105 @@ def test_importer_flags_a_large_total_counter_decrease_without_failing() -> None
 def test_importer_reports_home_assistant_history_failure() -> None:
     configuration = importer_configuration()
     client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(503)))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
 
     with pytest.raises(HomeAssistantError, match="HTTP 503"):
-        importer.fetch(START, START + timedelta(hours=4))
+        import_and_build(importer, client, START, START + timedelta(hours=4))
     client.close()
+
+
+def efficiency_home_assistant(
+    soc_states: list[tuple[datetime, str]],
+) -> FakeHomeAssistant:
+    """Serve six hourly counters per leg and the given state-of-charge changes."""
+    hours = range(7)
+    counters = {
+        f"sensor.{leg}_{side}": [
+            (START + timedelta(hours=hour), str(hour)) for hour in hours
+        ]
+        for leg in ("battery", "charge", "discharge")
+        for side in ("in", "out")
+    }
+    return FakeHomeAssistant(
+        {**counters, "sensor.soc": soc_states},
+        units={"sensor.soc": "%"},
+        state_classes={"sensor.soc": "measurement"},
+    )
+
+
+def build_efficiency_history(
+    home_assistant: FakeHomeAssistant, end_hours: int = 4
+) -> BatteryEfficiencyHistoryData:
+    client = home_assistant.client()
+    try:
+        return import_and_build(
+            HomeAssistantBatteryEfficiencyImporter(importer_configuration()),
+            client,
+            START,
+            START + timedelta(hours=end_hours),
+            now=START + timedelta(hours=end_hours),
+        )
+    finally:
+        client.close()
+
+
+def test_importer_reports_an_invalid_state_of_charge_sample() -> None:
+    home_assistant = efficiency_home_assistant(
+        [(START, "50"), (START + timedelta(hours=1), "not-a-number")]
+    )
+
+    with pytest.raises(
+        HomeAssistantError, match="sensor.soc contains a non-numeric value"
+    ):
+        build_efficiency_history(home_assistant)
+
+
+def test_importer_rejects_state_of_charge_history_that_starts_too_late() -> None:
+    # The first observation lies in the hour after the last requested boundary, so
+    # no complete hour of state of charge exists.
+    home_assistant = efficiency_home_assistant(
+        [(START + timedelta(hours=4, minutes=30), "50")]
+    )
+
+    with pytest.raises(HomeAssistantError, match="no complete state-of-charge history"):
+        build_efficiency_history(home_assistant)
+
+
+def test_importer_carries_state_of_charge_forward_through_unchanged_hours() -> None:
+    # Home Assistant only reports changes. Each hour takes the last value seen
+    # before its closing boundary, so the 03:30 change is visible from hour 3.
+    home_assistant = efficiency_home_assistant(
+        [(START, "50"), (START + timedelta(hours=3, minutes=30), "70")]
+    )
+
+    data = build_efficiency_history(home_assistant)
+
+    assert data.state_of_charge_percent == (50.0, 50.0, 50.0, 70.0, 70.0)
+
+
+@pytest.mark.parametrize(
+    ("start_time", "end_time", "message"),
+    [
+        (START + timedelta(minutes=30), START + timedelta(hours=4), "start on an hour"),
+        (START, START + timedelta(hours=4, minutes=30), "end on an hour"),
+        (START + timedelta(hours=4), START, "end on an hour"),
+        (datetime(2026, 1, 1), START + timedelta(hours=4), "must include a timezone"),
+    ],
+)
+def test_importer_validates_the_requested_period_when_planning(
+    start_time: datetime, end_time: datetime, message: str
+) -> None:
+    importer = HomeAssistantBatteryEfficiencyImporter(importer_configuration())
+
+    with pytest.raises(HomeAssistantError, match=message):
+        importer.plan(start_time, end_time)
+
+
+def test_importer_requires_a_calculation_configuration() -> None:
+    configuration = home_assistant_configuration_factory()()
+
+    with pytest.raises(HomeAssistantError, match="is not configured"):
+        HomeAssistantBatteryEfficiencyImporter(configuration)
 
 
 def test_importer_skips_empty_soc_history_chunks_until_history_is_available() -> None:
@@ -546,9 +642,9 @@ def test_importer_skips_empty_soc_history_chunks_until_history_is_available() ->
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(start, end, now=end)
+        data = import_and_build(importer, client, start, end, now=end)
     finally:
         client.close()
 
@@ -575,10 +671,12 @@ def test_importer_rejects_soc_history_with_no_usable_records(
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        with pytest.raises(HomeAssistantError, match="no usable state-of-charge"):
-            importer.fetch(START, START + timedelta(hours=1))
+        with pytest.raises(
+            HomeAssistantError, match="no usable history for sensor.soc"
+        ):
+            import_and_build(importer, client, START, START + timedelta(hours=1))
     finally:
         client.close()
 
@@ -613,9 +711,9 @@ def test_importer_carries_forward_soc_across_an_unchanged_state_gap() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(start, end, now=end)
+        data = import_and_build(importer, client, start, end, now=end)
     finally:
         client.close()
 
@@ -634,10 +732,10 @@ def test_importer_logs_soc_history_requests_at_debug_level(
         return httpx.Response(200, json=home_assistant_history_payload(entity_id))
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
         with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
-            importer.fetch(start, end, now=end)
+            import_and_build(importer, client, start, end, now=end)
     finally:
         client.close()
 
@@ -733,9 +831,9 @@ def test_importer_clamps_pv_surplus_instead_of_failing_the_refresh() -> None:
         return httpx.Response(200, json=responses[entity_id])
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
     try:
-        data = importer.fetch(start, end, now=end)
+        data = import_and_build(importer, client, start, end, now=end)
     finally:
         client.close()
 

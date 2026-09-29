@@ -14,12 +14,12 @@ import pytest
 
 from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
 from energy_optimizer.providers.home_assistant_energy import (
-    HomeAssistantEnergyAggregator,
     HomeAssistantEnergySeries,
 )
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
+    import_and_aggregate,
 )
 
 ENTITY_ID = "sensor.charging_battery_energy"
@@ -65,7 +65,9 @@ def aggregate(
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
     )
     try:
-        return HomeAssistantEnergyAggregator(configuration(), client).aggregate(
+        return import_and_aggregate(
+            configuration(),
+            client,
             [entity(state_class, unit, **settings)],
             START,
             end,
@@ -161,8 +163,13 @@ def test_a_dip_around_unavailable_samples_is_still_not_counted_twice() -> None:
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
     )
     try:
-        series = HomeAssistantEnergyAggregator(configuration(), client).aggregate(
-            [entity()], START, ONE_HOUR, label="battery efficiency battery input"
+        series = import_and_aggregate(
+            configuration(),
+            client,
+            [entity()],
+            START,
+            ONE_HOUR,
+            label="battery efficiency battery input",
         )
     finally:
         client.close()

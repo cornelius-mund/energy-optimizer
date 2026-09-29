@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import httpx
 import pytest
@@ -35,9 +35,13 @@ from energy_optimizer.orchestration import (
     build_configured_orchestrator,
 )
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
-from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
+from energy_optimizer.providers.home_assistant_history import (
+    HistoryPlan,
+    HomeAssistantError,
+)
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
+from home_assistant_fixtures import import_and_build
 
 MINIMAL_CONFIGURATION = """
 time_resolution_minutes: 60
@@ -468,7 +472,7 @@ def _restore_registration(
         name=name,
         data_type=name.replace("_", "-"),
         adapter=TypeAdapter(HouseholdLoadData),
-        fetch=lambda _now, _schedule: None,
+        plan=lambda _now, _schedule: None,
         is_fresh=lambda _data, _now: True,
         load=load,
     )
@@ -737,13 +741,15 @@ def test_provider_failure_log_excludes_token_and_raw_state(
             )
         )
     )
-    provider = HomeAssistantLoadImporter(configuration, client)
+    provider = HomeAssistantLoadImporter(configuration)
     configure_logging("DEBUG")
 
     try:
         with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
             with pytest.raises(RuntimeError, match="unavailable"):
-                provider.fetch(
+                import_and_build(
+                    provider,
+                    client,
                     datetime(2026, 1, 1, tzinfo=timezone.utc),
                     datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
                     now=datetime(2026, 1, 1, 2, tzinfo=timezone.utc),
@@ -803,14 +809,14 @@ def test_orchestration_failure_log_is_error_with_source_context(
 ) -> None:
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    def fetch(_: datetime, __: DataSourceScheduleConfiguration) -> object:
+    def plan(_: datetime, __: DataSourceScheduleConfiguration) -> HistoryPlan[Any]:
         raise RuntimeError("provider offline")
 
     registration = ProviderRegistration(
         name="household_load",
         data_type="household-load",
         adapter=TypeAdapter(HouseholdLoadData),
-        fetch=fetch,
+        plan=plan,
         is_fresh=lambda _data, _now: True,
     )
     configuration = OrchestrationConfiguration(
@@ -846,14 +852,14 @@ def test_home_assistant_refresh_failure_omits_expected_traceback(
 ) -> None:
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    def fetch(_: datetime, __: DataSourceScheduleConfiguration) -> object:
+    def plan(_: datetime, __: DataSourceScheduleConfiguration) -> HistoryPlan[Any]:
         raise HomeAssistantError("Home Assistant request timed out; retry later")
 
     registration = ProviderRegistration(
         name="household_load",
         data_type="household-load",
         adapter=TypeAdapter(HouseholdLoadData),
-        fetch=fetch,
+        plan=plan,
         is_fresh=lambda _data, _now: True,
     )
     configuration = OrchestrationConfiguration(

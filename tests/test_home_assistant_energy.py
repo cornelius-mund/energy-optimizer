@@ -1,4 +1,4 @@
-"""Tests for the shared Home Assistant energy aggregator's negative handling."""
+"""Tests for the shared Home Assistant energy aggregate's negative handling."""
 
 import logging
 import math
@@ -9,16 +9,15 @@ import httpx
 import pytest
 
 from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
-from energy_optimizer.providers.home_assistant_energy import (
-    HomeAssistantEnergyAggregator,
-    HomeAssistantEnergySeries,
-    HomeAssistantError,
-)
+from energy_optimizer.providers import home_assistant_energy
+from energy_optimizer.providers.home_assistant_energy import HomeAssistantEnergySeries
+from energy_optimizer.providers.home_assistant_history import HomeAssistantError
 from energy_optimizer.providers.interfaces import IntervalQuality
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_suspect_negative_hour_readings,
+    import_and_aggregate,
 )
 
 ADD_ENTITY_ID = "sensor.charging_battery_energy"
@@ -42,11 +41,27 @@ def entity(entity_id: str, operation: str) -> HomeAssistantEnergyEntityConfigura
     )
 
 
-def _aggregator(
+def _aggregate(
     handler: httpx.MockTransport,
-) -> tuple[HomeAssistantEnergyAggregator, httpx.Client]:
+    entities: list[HomeAssistantEnergyEntityConfiguration],
+    end_time: datetime,
+    *,
+    label: str,
+    allow_negative: bool = False,
+) -> HomeAssistantEnergySeries:
     client = httpx.Client(transport=handler)
-    return HomeAssistantEnergyAggregator(configuration(), client), client
+    try:
+        return import_and_aggregate(
+            configuration(),
+            client,
+            entities,
+            START,
+            end_time,
+            label=label,
+            allow_negative=allow_negative,
+        )
+    finally:
+        client.close()
 
 
 def _pv_surplus_responses() -> dict[str, list[list[dict[str, object]]]]:
@@ -79,17 +94,13 @@ def test_allow_negative_clamps_a_directional_net_to_zero() -> None:
             200, json=responses[request.url.params["filter_entity_id"]]
         )
 
-    aggregator, client = _aggregator(httpx.MockTransport(handler))
-    try:
-        result = aggregator.aggregate(
-            [entity(ADD_ENTITY_ID, "add"), entity(SUBTRACT_ENTITY_ID, "subtract")],
-            START,
-            END,
-            label="battery efficiency inverter_charge output",
-            allow_negative=True,
-        )
-    finally:
-        client.close()
+    result = _aggregate(
+        httpx.MockTransport(handler),
+        [entity(ADD_ENTITY_ID, "add"), entity(SUBTRACT_ENTITY_ID, "subtract")],
+        END,
+        label="battery efficiency inverter_charge output",
+        allow_negative=True,
+    )
 
     assert result.values_kw == (0.0,)
 
@@ -102,23 +113,16 @@ def test_default_behavior_still_rejects_a_negative_combined_value() -> None:
             200, json=responses[request.url.params["filter_entity_id"]]
         )
 
-    aggregator, client = _aggregator(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(
-            HomeAssistantError,
-            match=re.escape("negative value at 2026-01-01T00:00:00+00:00"),
-        ):
-            aggregator.aggregate(
-                [
-                    entity(ADD_ENTITY_ID, "add"),
-                    entity(SUBTRACT_ENTITY_ID, "subtract"),
-                ],
-                START,
-                END,
-                label="household-load",
-            )
-    finally:
-        client.close()
+    with pytest.raises(
+        HomeAssistantError,
+        match=re.escape("negative value at 2026-01-01T00:00:00+00:00"),
+    ):
+        _aggregate(
+            httpx.MockTransport(handler),
+            [entity(ADD_ENTITY_ID, "add"), entity(SUBTRACT_ENTITY_ID, "subtract")],
+            END,
+            label="household-load",
+        )
 
 
 def test_allow_negative_does_not_change_an_ordinary_positive_result() -> None:
@@ -137,17 +141,13 @@ def test_allow_negative_does_not_change_an_ordinary_positive_result() -> None:
             200, json=responses[request.url.params["filter_entity_id"]]
         )
 
-    aggregator, client = _aggregator(httpx.MockTransport(handler))
-    try:
-        result = aggregator.aggregate(
-            [entity(ADD_ENTITY_ID, "add")],
-            START,
-            END,
-            label="battery efficiency battery input",
-            allow_negative=True,
-        )
-    finally:
-        client.close()
+    result = _aggregate(
+        httpx.MockTransport(handler),
+        [entity(ADD_ENTITY_ID, "add")],
+        END,
+        label="battery efficiency battery input",
+        allow_negative=True,
+    )
 
     assert result.values_kw == (1.0,)
 
@@ -176,17 +176,13 @@ def _aggregate_three_hours(
             200, json=responses[request.url.params["filter_entity_id"]]
         )
 
-    aggregator, client = _aggregator(httpx.MockTransport(handler))
-    try:
-        return aggregator.aggregate(
-            [entity(ADD_ENTITY_ID, "add"), entity(SUBTRACT_ENTITY_ID, "subtract")],
-            START,
-            THREE_HOURS_END,
-            label="household-load",
-            allow_negative=allow_negative,
-        )
-    finally:
-        client.close()
+    return _aggregate(
+        httpx.MockTransport(handler),
+        [entity(ADD_ENTITY_ID, "add"), entity(SUBTRACT_ENTITY_ID, "subtract")],
+        THREE_HOURS_END,
+        label="household-load",
+        allow_negative=allow_negative,
+    )
 
 
 def _clamp_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -280,9 +276,7 @@ def test_negative_hour_without_suspect_contribution_still_fails_by_timestamp() -
 def test_non_finite_combined_value_is_rejected_even_when_flagged_suspect(
     monkeypatch: pytest.MonkeyPatch, bad_value: float
 ) -> None:
-    aggregator, client = _aggregator(httpx.MockTransport(lambda _: httpx.Response(500)))
-
-    def fetch_flagged_entity(
+    def normalize_flagged_entity(
         entity: HomeAssistantEnergyEntityConfiguration, *_: object
     ) -> HomeAssistantEnergySeries:
         return HomeAssistantEnergySeries(
@@ -298,14 +292,23 @@ def test_non_finite_combined_value_is_rejected_even_when_flagged_suspect(
             ),
         )
 
-    monkeypatch.setattr(aggregator, "_fetch_entity", fetch_flagged_entity)
-    try:
-        with pytest.raises(
-            HomeAssistantError,
-            match=re.escape("non-finite value at 2026-01-01T00:00:00+00:00"),
-        ):
-            aggregator.aggregate(
-                [entity(ADD_ENTITY_ID, "add")], START, END, label="household-load"
-            )
-    finally:
-        client.close()
+    monkeypatch.setattr(
+        home_assistant_energy, "normalize_counter_history", normalize_flagged_entity
+    )
+    responses = _pv_surplus_responses()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    with pytest.raises(
+        HomeAssistantError,
+        match=re.escape("non-finite value at 2026-01-01T00:00:00+00:00"),
+    ):
+        _aggregate(
+            httpx.MockTransport(handler),
+            [entity(ADD_ENTITY_ID, "add")],
+            END,
+            label="household-load",
+        )

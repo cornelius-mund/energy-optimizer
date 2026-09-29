@@ -14,8 +14,9 @@ from energy_optimizer.providers.home_assistant import (
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
-    home_assistant_importer_factory,
+    home_assistant_planning_importer_factory,
     home_assistant_suspect_negative_hour_readings,
+    import_and_build,
 )
 
 ENTITY_ID = "sensor.household_energy"
@@ -53,7 +54,9 @@ def history_payload(
     )
 
 
-importer = home_assistant_importer_factory(HomeAssistantLoadImporter, configuration)
+importer = home_assistant_planning_importer_factory(
+    HomeAssistantLoadImporter, configuration
+)
 
 
 def test_fetch_converts_total_increasing_energy_to_hourly_load(
@@ -76,7 +79,7 @@ def test_fetch_converts_total_increasing_energy_to_hourly_load(
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        data = provider.fetch(START, END, 3600, now=NOW)
+        data = import_and_build(provider, client, START, END, 3600, now=NOW)
     finally:
         client.close()
 
@@ -143,7 +146,9 @@ def test_fetch_splits_long_history_into_weekly_chunks_before_normalization(
     caplog.set_level(logging.INFO)
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        data = provider.fetch(
+        data = import_and_build(
+            provider,
+            client,
             requested_start,
             requested_end,
             history_lookback_seconds=3600,
@@ -207,7 +212,7 @@ def test_fetch_uses_one_request_for_a_week_without_lookback() -> None:
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        provider.fetch(START, requested_end, now=NOW)
+        import_and_build(provider, client, START, requested_end, now=NOW)
     finally:
         client.close()
 
@@ -256,7 +261,7 @@ def test_long_history_fetches_every_entity_for_each_chunk() -> None:
         household_load_entities=entities,
     )
     try:
-        data = provider.fetch(START, requested_end, now=NOW)
+        data = import_and_build(provider, client, START, requested_end, now=NOW)
     finally:
         client.close()
 
@@ -301,7 +306,7 @@ def test_counter_reset_at_chunk_boundary_is_normalized_after_chunks_are_combined
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        data = provider.fetch(START, requested_end, now=NOW)
+        data = import_and_build(provider, client, START, requested_end, now=NOW)
     finally:
         client.close()
 
@@ -336,7 +341,7 @@ def test_failed_history_chunk_does_not_return_partial_long_range_data() -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match="HTTP 503"):
-            provider.fetch(START, requested_end, now=NOW)
+            import_and_build(provider, client, START, requested_end, now=NOW)
     finally:
         client.close()
 
@@ -359,7 +364,7 @@ def test_total_increasing_observations_need_not_be_hour_aligned() -> None:
         )
     )
     try:
-        data = provider.fetch(START, END, 3600, now=NOW)
+        data = import_and_build(provider, client, START, END, 3600, now=NOW)
     finally:
         client.close()
 
@@ -374,7 +379,7 @@ def test_fetch_uses_available_history_when_requested_start_predates_retention() 
         httpx.MockTransport(lambda _: httpx.Response(200, json=history_payload()))
     )
     try:
-        data = provider.fetch(requested_start, end, now=NOW)
+        data = import_and_build(provider, client, requested_start, end, now=NOW)
     finally:
         client.close()
 
@@ -418,7 +423,9 @@ def test_fetch_aligns_entities_to_the_latest_available_start() -> None:
         ],
     )
     try:
-        data = provider.fetch(
+        data = import_and_build(
+            provider,
+            client,
             datetime(2025, 1, 1, tzinfo=timezone.utc),
             datetime(2026, 1, 1, 4, tzinfo=timezone.utc),
             now=NOW,
@@ -459,7 +466,7 @@ def test_fetch_converts_total_increasing_energy_and_unit() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -504,7 +511,7 @@ def test_fetch_combines_add_and_subtract_entities() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -524,7 +531,7 @@ def test_fetch_rejects_instantaneous_power_entities() -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match="instantaneous power"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -536,7 +543,7 @@ def test_fetch_rejects_incompatible_energy_unit() -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match="incompatible"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -544,7 +551,7 @@ def test_fetch_rejects_incompatible_energy_unit() -> None:
 @pytest.mark.parametrize(
     ("payload", "message"),
     [
-        ([], "no household-load history"),
+        ([], "returned no history for sensor.household_energy"),
         (
             [[{"state": "unavailable", "last_changed": "2026-01-01T00:00:00+00:00"}]],
             "unavailable",
@@ -562,7 +569,7 @@ def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match=message):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -584,7 +591,9 @@ def test_total_increasing_reset_mid_hour_starts_a_new_baseline() -> None:
         )
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -613,7 +622,9 @@ def test_total_increasing_skips_unavailable_observations_without_fabricating_ene
         )
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
     finally:
         client.close()
 
@@ -634,7 +645,9 @@ def test_total_increasing_skips_unknown_observations() -> None:
         )
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -654,7 +667,9 @@ def test_skips_unavailable_samples_outside_requested_window() -> None:
         )
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
     finally:
         client.close()
 
@@ -688,7 +703,9 @@ def test_total_increasing_does_not_interpolate_between_observations() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=2), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
     finally:
         client.close()
 
@@ -724,7 +741,9 @@ def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -747,7 +766,9 @@ def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> Non
         )
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -770,7 +791,9 @@ def test_total_increasing_transient_spike_is_retracted_when_counter_recovers() -
         )
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -821,7 +844,9 @@ def test_transient_spike_does_not_make_signed_aggregate_negative() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -850,7 +875,9 @@ def test_physical_limit_rejects_over_limit_delta_and_marks_interval_suspect() ->
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -879,7 +906,9 @@ def test_physical_limit_accepts_exact_boundary() -> None:
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -916,7 +945,9 @@ def test_total_decrease_without_last_reset_change_marks_the_hour_suspect() -> No
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -952,7 +983,9 @@ def test_household_load_tolerates_a_total_counter_dip_without_last_reset() -> No
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
     finally:
         client.close()
 
@@ -999,7 +1032,7 @@ def test_fetch_rejects_negative_combined_load() -> None:
     )
     try:
         with pytest.raises(HomeAssistantError, match="negative"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1034,7 +1067,9 @@ def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect() -> No
         ],
     )
     try:
-        data = provider.fetch(START, START + timedelta(hours=3), now=NOW)
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=3), now=NOW
+        )
     finally:
         client.close()
 
@@ -1072,7 +1107,7 @@ def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
     )
     try:
         with pytest.raises(HomeAssistantError, match="HTTP 503"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1115,7 +1150,7 @@ def test_fetch_does_not_return_partial_data_when_entity_has_no_usable_history() 
     )
     try:
         with pytest.raises(HomeAssistantError, match="no usable history"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1129,7 +1164,7 @@ def test_fetch_reports_http_failures(caplog: pytest.LogCaptureFixture) -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match="authentication failed"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1162,7 +1197,7 @@ def test_fetch_reports_timeout(caplog: pytest.LogCaptureFixture) -> None:
     provider, client = importer(httpx.MockTransport(handler))
     try:
         with pytest.raises(HomeAssistantError, match="timed out"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1191,7 +1226,7 @@ def test_fetch_reports_malformed_json() -> None:
     )
     try:
         with pytest.raises(HomeAssistantError, match="malformed JSON"):
-            provider.fetch(START, END, now=NOW)
+            import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1201,7 +1236,7 @@ def test_freshness_is_a_polling_health_check() -> None:
         httpx.MockTransport(lambda _: httpx.Response(200, json=history_payload()))
     )
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
         assert provider.is_fresh(data, now=NOW)
         provider.configuration = configuration(max_data_age_seconds=60)
         assert not provider.is_fresh(data, now=NOW)
@@ -1215,7 +1250,7 @@ def test_freshness_check_is_disabled_without_a_threshold() -> None:
         max_data_age_seconds=None,
     )
     try:
-        data = provider.fetch(START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -1244,6 +1279,6 @@ def test_fetch_validates_requested_period(
     provider, client = importer(httpx.MockTransport(lambda _: httpx.Response(200)))
     try:
         with pytest.raises(HomeAssistantError, match=message):
-            provider.fetch(start_time, end_time, lookback, now=NOW)
+            import_and_build(provider, client, start_time, end_time, lookback, now=NOW)
     finally:
         client.close()
