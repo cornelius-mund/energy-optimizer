@@ -210,7 +210,9 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(page.locator("#efficiency-metrics")).to_contain_text(
         "Completed battery cycles"
     )
-    expect(page.locator("#efficiency-metrics")).to_contain_text("5 kWh")
+    expect(page.locator("#efficiency-metrics dd")).to_have_text(
+        ["5.00 kWh", "10.00 kWh", "10.00 kWh", "1 cycles"]
+    )
     expect(page.locator("#range-form")).to_be_hidden()
     expect(page.locator("#range-heading")).to_have_text("Complete retained history")
     expect(page.locator("#efficiency-summary dt")).to_have_count(4)
@@ -318,6 +320,95 @@ def test_efficiency_tab_shows_one_annotation_for_each_fallback_status(
     annotations = _assistive_annotations(page)
     assert len(annotations) == 3
     assert not any("default" in text.lower() for text in annotations)
+    expect(page.locator("#efficiency-metrics dd")).to_have_text(
+        ["0.00 kWh", "0.00 kWh", "10.00 kWh", "0 cycles"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("throughput_kwh", "expected_texts"),
+    [
+        pytest.param(
+            (350.123456, 1234.5678, 0.999),
+            ["350.12 kWh", "1234.57 kWh", "1.00 kWh", "3 cycles"],
+            id="fractional",
+        ),
+        pytest.param(
+            (0.0, 0.0, 0.0),
+            ["0.00 kWh", "0.00 kWh", "0.00 kWh", "3 cycles"],
+            id="zero",
+        ),
+        pytest.param(
+            (5.0, 10.0, 7.0),
+            ["5.00 kWh", "10.00 kWh", "7.00 kWh", "3 cycles"],
+            id="whole",
+        ),
+    ],
+)
+def test_efficiency_tab_formats_throughput_to_two_decimals(
+    e2e_server: LiveServer,
+    e2e_api: httpx.Client,
+    page: Page,
+    throughput_kwh: tuple[float, float, float],
+    expected_texts: list[str],
+) -> None:
+    """Show every throughput with two decimals while the API keeps full precision."""
+    start, end = _window()
+    retrieved_at = datetime.now(UTC)
+    battery, charge, discharge = throughput_kwh
+    ProviderDataStore(e2e_server.data_directory).save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="ok",
+            inverter_charge_efficiency=0.95,
+            inverter_discharge_efficiency=0.8,
+            battery_efficiency=0.85,
+            round_trip_efficiency=0.646,
+            history_start=start,
+            history_end=end - timedelta(hours=1),
+            battery_throughput_kwh=battery,
+            charge_throughput_kwh=charge,
+            discharge_throughput_kwh=discharge,
+            complete_cycle_count=3,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=retrieved_at,
+            latest_observation_at=retrieved_at,
+        ),
+    )
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    page.locator("#efficiency-tab").click()
+
+    expect(page.locator("#efficiency-metrics dt")).to_have_text(
+        [
+            "Battery throughput",
+            "Inverter charge throughput",
+            "Inverter discharge throughput",
+            "Completed battery cycles",
+        ]
+    )
+    expect(page.locator("#efficiency-metrics dd")).to_have_text(expected_texts)
+    response = e2e_api.get(
+        "/api/v1/dashboard/data",
+        params={
+            "scenario_kind": "efficiency",
+            "start_time": start.isoformat(),
+            "end_time": end.isoformat(),
+        },
+    )
+    assert response.status_code == 200, response.text
+    metrics = {item["id"]: item["value"] for item in response.json()["metrics"]}
+    assert metrics == {
+        "battery_throughput": battery,
+        "inverter_charge_throughput": charge,
+        "inverter_discharge_throughput": discharge,
+        "completed_battery_cycles": 3,
+    }
 
 
 def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) -> None:

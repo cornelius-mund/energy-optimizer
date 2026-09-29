@@ -249,6 +249,59 @@ def test_efficiency_dashboard_marks_default_component_values(
     )
 
 
+def test_efficiency_dashboard_keeps_full_throughput_precision(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    persistence_configuration: Path,
+) -> None:
+    """Leave two-decimal display rounding to the UI; the API value is unrounded."""
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration))
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path / "provider-data")
+    store.save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="ok",
+            inverter_charge_efficiency=0.95,
+            inverter_discharge_efficiency=0.8,
+            battery_efficiency=0.85,
+            round_trip_efficiency=0.646,
+            history_start=start,
+            history_end=start + timedelta(hours=2),
+            battery_throughput_kwh=350.123456,
+            charge_throughput_kwh=0.0,
+            discharge_throughput_kwh=5.0,
+            complete_cycle_count=2,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=start,
+            latest_observation_at=start,
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "efficiency",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T03:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    metrics = {item["id"]: item for item in response.json()["metrics"]}
+    assert metrics["battery_throughput"]["value"] == 350.123456
+    assert metrics["inverter_charge_throughput"]["value"] == 0.0
+    assert metrics["inverter_discharge_throughput"]["value"] == 5.0
+    assert metrics["completed_battery_cycles"]["value"] == 2
+    assert {item["unit"] for item in metrics.values()} == {"kWh", "cycles"}
+
+
 def test_efficiency_dashboard_pairs_fallback_metadata_with_each_status(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -175,7 +175,11 @@ available beside the summary. The response also exposes battery throughput,
 inverter charge and discharge throughput, and `Completed battery cycles` as
 structured scalar metrics rather than diagnostics. The UI formats every
 displayed ratio to four digits after the decimal point while retaining the raw
-API value in the data element.
+API value in the data element. It formats the three throughput metrics, which
+carry the `kWh` unit, to exactly two digits after the decimal point, including
+trailing zeroes for whole and zero values such as `5.00 kWh` and `0.00 kWh`,
+and shows `Completed battery cycles` as a whole number. The metric values in
+the API response are not rounded.
 
 Ingestion persists the aligned hourly history under its own record and requests
 only the hours after the previously persisted history on every scheduled run,

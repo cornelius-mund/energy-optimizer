@@ -108,6 +108,13 @@
     invalid: "invalid",
   }[status] || "status unknown");
   const efficiencyFallbackStatuses = new Set(["defaulted", "unavailable", "invalid"]);
+  // Energy metrics always show two decimals, including for zero and whole
+  // numbers; cycle counts are whole numbers. Other units render unchanged.
+  const metricValueFormatters = {
+    kWh: (value) => value.toFixed(2),
+    cycles: (value) => String(Math.round(value)),
+  };
+  const formatMetricValue = (metric) => (metricValueFormatters[metric.unit] || String)(metric.value);
   const chartDefinitions = {
     power: {
       element: document.querySelector("#power-chart"),
@@ -304,7 +311,7 @@
         const label = document.createElement("dt");
         label.textContent = metric.label;
         const value = document.createElement("dd");
-        value.textContent = `${metric.value} ${metric.unit}`;
+        value.textContent = `${formatMetricValue(metric)} ${metric.unit}`;
         efficiencyMetrics.append(label, value);
       });
       if (efficiencyMetrics.childElementCount) efficiencyMetrics.removeAttribute("hidden");
