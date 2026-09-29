@@ -162,13 +162,20 @@ observations and the tab does not offer a selectable calculation time window.
 If a component cannot be calculated, it uses the `0.95` ratio fallback and is
 marked as `defaulted`, `unavailable`, or `invalid` in the response and UI. A
 measured component is `calculated`; complete round-trip efficiency is
-`calculated_with_defaults` when any input uses a fallback. The source, coverage,
-freshness, retrieval, and calculation diagnostics remain available beside the
-summary. The response also exposes battery throughput, inverter charge and
-discharge throughput, and `Completed battery cycles` as structured scalar
-metrics rather than diagnostics. The UI formats every displayed ratio to four
-digits after the decimal point while retaining the raw API value in the data
-element.
+`calculated_with_defaults` when any input uses a fallback. Each series carries
+its structured `calculation_status`, and the UI renders exactly one annotation
+per row from it: `(calculated)`, `(default)`, `(unavailable)`, `(invalid)`, or
+`(calculated with defaults)`. The `is_default` flag remains in the response as
+compatibility metadata that is `true` for the three fallback statuses
+(`defaulted`, `unavailable`, `invalid`) and `false` otherwise; the UI does not
+render it separately, so a fallback is never annotated twice. The fallback
+annotations carry a tooltip explaining that the fallback ratio was used. The
+source, coverage, freshness, retrieval, and calculation diagnostics remain
+available beside the summary. The response also exposes battery throughput,
+inverter charge and discharge throughput, and `Completed battery cycles` as
+structured scalar metrics rather than diagnostics. The UI formats every
+displayed ratio to four digits after the decimal point while retaining the raw
+API value in the data element.
 
 Ingestion persists the aligned hourly history under its own record and requests
 only the hours after the previously persisted history on every scheduled run,

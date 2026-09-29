@@ -53,6 +53,19 @@ def _load_range(page: Page, start: datetime, end: datetime) -> None:
     expect(page.locator("#status")).not_to_contain_text("Loading")
 
 
+def _assistive_annotations(page: Page) -> list[str]:
+    """Return tooltip and accessible-label text attached to the efficiency summary."""
+    texts: list[str] = page.locator("#efficiency-summary").evaluate(
+        """(summary) => [...summary.querySelectorAll("[title], [aria-label]")]
+            .flatMap((element) => [
+              element.getAttribute("title"),
+              element.getAttribute("aria-label"),
+            ])
+            .filter(Boolean)"""
+    )
+    return texts
+
+
 def _household_payload(
     start: datetime,
     values: list[float],
@@ -225,9 +238,6 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
         "Inverter charge efficiency"
     )
     expect(
-        page.locator("#efficiency-summary .efficiency-default-marker")
-    ).to_have_count(1)
-    expect(
         page.locator("#efficiency-summary .efficiency-status-calculated")
     ).to_have_count(2)
     expect(
@@ -236,10 +246,78 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     expect(
         page.locator("#efficiency-summary .efficiency-status-calculated_with_defaults")
     ).to_have_count(1)
-    expect(page.locator("#efficiency-summary")).to_contain_text(
-        "0.9500 ratio (default)"
+    expect(page.locator("#efficiency-summary dd")).to_have_text(
+        [
+            "0.8500 ratio (calculated)",
+            "0.9500 ratio (default)",
+            "0.8000 ratio (calculated)",
+            "0.6460 ratio (calculated with defaults)",
+        ]
     )
+    assert page.locator("#efficiency-summary").inner_text().count("(default)") == 1
+    annotations = _assistive_annotations(page)
+    assert len(annotations) == 1
+    assert not any("default" in text.lower() for text in annotations)
     expect(page.locator("#legend")).to_be_empty()
+
+
+def test_efficiency_tab_shows_one_annotation_for_each_fallback_status(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Keep unavailable and invalid fallbacks distinct without a default marker."""
+    start, end = _window()
+    retrieved_at = datetime.now(UTC)
+    ProviderDataStore(e2e_server.data_directory).save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="invalid",
+            inverter_charge_efficiency=0.95,
+            inverter_discharge_efficiency=0.8,
+            battery_efficiency=0.95,
+            round_trip_efficiency=0.722,
+            history_start=start,
+            history_end=end - timedelta(hours=1),
+            battery_throughput_kwh=0,
+            charge_throughput_kwh=0,
+            discharge_throughput_kwh=10,
+            complete_cycle_count=0,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=retrieved_at,
+            latest_observation_at=retrieved_at,
+            defaulted_components=(
+                "battery_efficiency",
+                "inverter_charge_efficiency",
+                "round_trip_efficiency",
+            ),
+            component_statuses={
+                "battery_efficiency": "unavailable",
+                "inverter_charge_efficiency": "invalid",
+                "inverter_discharge_efficiency": "calculated",
+                "round_trip_efficiency": "invalid",
+            },
+        ),
+    )
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    page.locator("#efficiency-tab").click()
+
+    expect(page.locator("#efficiency-summary dd")).to_have_text(
+        [
+            "0.9500 ratio (unavailable)",
+            "0.9500 ratio (invalid)",
+            "0.8000 ratio (calculated)",
+            "0.7220 ratio (invalid)",
+        ]
+    )
+    assert "(default)" not in page.locator("#efficiency-summary").inner_text()
+    annotations = _assistive_annotations(page)
+    assert len(annotations) == 3
+    assert not any("default" in text.lower() for text in annotations)
 
 
 def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) -> None:

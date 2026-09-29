@@ -249,6 +249,74 @@ def test_efficiency_dashboard_marks_default_component_values(
     )
 
 
+def test_efficiency_dashboard_pairs_fallback_metadata_with_each_status(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    persistence_configuration: Path,
+) -> None:
+    """Expose the fallback flag for every status that displays the fallback ratio."""
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration))
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path / "provider-data")
+    store.save(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+        BatteryEfficiencyData(
+            schema_version="1",
+            status="invalid",
+            inverter_charge_efficiency=0.95,
+            inverter_discharge_efficiency=0.95,
+            battery_efficiency=0.95,
+            round_trip_efficiency=0.857,
+            history_start=start,
+            history_end=start + timedelta(hours=2),
+            battery_throughput_kwh=0,
+            charge_throughput_kwh=0,
+            discharge_throughput_kwh=0.05,
+            complete_cycle_count=0,
+            unit="ratio",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency"
+            ),
+            retrieved_at=start,
+            latest_observation_at=start,
+            defaulted_components=(
+                "battery_efficiency",
+                "inverter_charge_efficiency",
+                "inverter_discharge_efficiency",
+            ),
+            component_statuses={
+                "battery_efficiency": "unavailable",
+                "inverter_charge_efficiency": "invalid",
+                "inverter_discharge_efficiency": "defaulted",
+                "round_trip_efficiency": "calculated_with_defaults",
+            },
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/dashboard/data",
+            params={
+                "scenario_kind": "efficiency",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T03:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    series = {item["id"]: item for item in response.json()["series"]}
+    assert {
+        name: (item["calculation_status"], item["is_default"])
+        for name, item in series.items()
+    } == {
+        "battery_efficiency_actual": ("unavailable", True),
+        "inverter_charge_efficiency_actual": ("invalid", True),
+        "inverter_discharge_efficiency_actual": ("defaulted", True),
+        "round_trip_efficiency_actual": ("calculated_with_defaults", False),
+    }
+
+
 def test_efficiency_dashboard_returns_history_values_for_any_requested_range(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
