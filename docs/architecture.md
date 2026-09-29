@@ -16,6 +16,7 @@ src/energy_optimizer/
 │   ├── lifecycle.py          # Startup and shutdown orchestration
 │   ├── middleware.py         # Request IDs and outcome logging
 │   ├── historic.py           # Historic multi-asset actual loaders and availability
+│   ├── excluded.py           # Excluded-hours read model for the dashboard tab
 │   ├── persistence.py        # Shared provider persistence mapping
 │   ├── schemas.py            # HTTP request and response models
 │   ├── series.py             # Dashboard series alignment
@@ -37,6 +38,8 @@ src/energy_optimizer/
 │   ├── home_assistant_battery_efficiency.py # Measured battery-efficiency composition
 │   └── home_assistant_battery.py # Current battery state composition
 ├── storage.py                # Generic durable normalized provider-data storage
+├── exclusions.py             # Excluded hours: reason codes, causes, data points
+├── legacy_quality.py         # Converts suspect quality of earlier versions on read
 ├── history_merge.py          # Merge and retention rules for grid-flow and price history
 ├── household_load_store.py   # Append-friendly household-load NDJSON storage
 ├── storage_errors.py          # Storage error contract
@@ -154,28 +157,33 @@ explicit `HistoryPlanError`.
 
 The layer supports cumulative-energy counters and plain state history (the
 measured-efficiency state of charge). It only performs cleaning that does not
-depend on the consuming aggregate: timestamp parsing, skipping unknown and
-unavailable samples with one warning per entity, finite and non-negative values,
-and carrying `unit`, `state_class`, and `last_reset` from the previous sample
-where Home Assistant omits them. It keeps only the cleaned series and only until
+depend on the consuming aggregate: timestamp parsing, classifying every state as
+a finite number or as invalid (`unavailable`, `non_numeric`, `not_finite`, or
+`negative_value` for a counter), and carrying `unit`, `state_class`, and
+`last_reset` from the previous sample where Home Assistant omits them. It never
+drops or repairs a sample: an invalid sample stays in the series with its raw
+state and its reason, so that a consumer can exclude the hours it touches and show
+the exact data point. It keeps only the cleaned series and only until
 the cycle ends: raw responses are dropped as soon as they are cleaned, and there
 is no cross-cycle cache (that belongs to a separate provider-caching feature).
 Bearer-token authentication and the request timeout come from the Home
 Assistant configuration. Requests covering more than seven days are split into
 contiguous half-open chunks; the source's lookback is part of its declared range
 and so moves only the start of the first chunk. Records from all chunks are
-combined before normalization so counter deltas and reset handling remain
+combined before normalization so counter steps and excluded hours remain
 continuous at chunk boundaries. A failure while importing one entity, which
 includes an HTTP error, a transport failure, or a malformed response, is recorded
 against that entity and re-raised, with the entity named in the message, to every
 source that reads it and to no other source; every other entity is still
-imported. A sample with an invalid value is reported to the sources whose window
-contains it, so a bad sample outside a source's window cannot fail that source.
+imported. A bad sample is not such a failure: it never fails an entity or a
+source.
 
 Each source reads its own window of the shared series exactly as Home Assistant
 would answer an independent request for it: the state in force at the window's
-start, stamped with that start, followed by every change up to its end. A state
-that became unavailable is not carried across the gap. Consequently a source's
+start, stamped with that start (the time Home Assistant recorded it is kept as
+`observed_at`, so data points show the true time), followed by every change up to
+its end. An invalid state in force is carried like any other, so a valid state is
+never carried across an outage. Consequently a source's
 result equals what a separate fetch of its window would have produced, and a
 property-based test checks this equivalence.
 
@@ -184,79 +192,84 @@ on such a window with the consuming aggregate's own entity settings, so one
 entity ID may be configured differently in different aggregates: it is fetched
 once and normalized separately for each. Normalizations with identical settings
 and windows within a cycle are computed once. It owns energy-unit conversion,
-cumulative counter validation, reset-aware delta accumulation, signed entity
-aggregation, hourly normalization, and observation metadata. It follows Home
-Assistant's `total` and `total_increasing` state classes, rejects instantaneous
-power entities, and rejects failed or incomplete contributions. Reset transitions
-establish a new zero-contribution baseline, and a
-value that returns close to the pre-reset counter is treated as recovery rather
-than energy. Unknown and unavailable history samples are skipped without
-assigning energy; the next valid counter observation owns the resulting delta,
-and an entity with no usable observations still fails. Reset and recovery
-intervals carry explicit suspect quality metadata through aggregation,
-persistence, historic API responses, and orchestration; required suspect data
-cannot trigger an optimization plan. A failed chunk fails the complete import of
-its entity and so the sources that read it, so scheduled orchestration preserves
-the last valid persisted data of those sources and retries on a later due cycle.
-For `total_increasing` counters, an increase followed by a return close to the
-pre-increase value is treated as a transient counter spike: the earlier delta is
-retracted, both observations are marked suspect, and no fabricated energy is
-retained.
-A `total` counter that decreases without a changed `last_reset` is treated as
-measurement jitter when it stays within the per-entity `decrease_tolerance_kwh`
-(default 0.01 kWh, compared after unit conversion) of the highest value it has
-reached. The step contributes no energy, the aggregator remembers that peak and
-counts energy again only once the counter rises above it, and the interval keeps
-its valid quality, because a suspect interval would block optimization. Because
-the peak, not the previous sample, is the reference, accumulated drift beyond
-the tolerance is not accepted as jitter. A single value never fails the fetch:
-a larger decrease is handled like a `total_increasing` decrease, contributing no
-energy, treating a return to the earlier peak as recovery, retracting a rise
-that immediately returns as a transient spike, and marking the interval suspect
-with a warning that names the entity, timestamp, previous value, current value,
-and tolerance. The reference is the last observation at or before the start
-of a requested period, so a dip that straddles that start can count at most one
-tolerance's worth of energy once. A changed `last_reset`, `total_increasing`
-counters, and unknown or unavailable samples are handled as described above.
-Individual chunk request outcomes are debug-level diagnostics. The import emits
-one structured summary at info level with its entity, failed-entity, and request
-counts, and a warning for every failed entity. Each aggregate build emits one
-structured success summary at info level or one failure summary at warning level
-after the complete entity set has been processed.
-Each cumulative-energy mapping may additionally define a physical upper bound
-for one hourly delta in kWh. The bound is applied after unit conversion and
-before signed aggregation; an exceeded bound produces zero energy and suspect
-quality with reason `physical_limit_exceeded`. By default, a negative combined
-hourly value fails the aggregate, since `household_load` and `grid_flow` totals
-must never be negative, and the error names the offending hour by its UTC
-timestamp. The one exception is an hour that at least one contributing entity
-has already flagged suspect (for example `counter_reset` or
-`physical_limit_exceeded`): the flagged counter explains the negative value, so
-it is clamped to zero, the hour keeps its suspect quality, and the surrounding
-hours are ingested. Each aggregation that clamps hours emits one structured
-`home_assistant_negative_hour_clamped` warning listing every clamped hour's UTC
-timestamp and the suspect reasons and entities of its contributors. The run is
-then marked `suspect` by orchestration and stays blocked from automatic
-optimization triggers, like any other suspect data. Because a suspect hour is
-persisted instead of failing the fetch, a bootstrap stores the retained history
-and a later incremental refresh continues past the hour instead of failing on
-it every cycle. The reset transition itself contributes zero energy, but later
-growth in the same hour from the new baseline is counted; the suspect flag, not
-a zeroed value, marks such an hour as unreliable. Callers whose signed
-expression represents a net directional flow instead of an absolute total, such
-as the measured battery-efficiency legs, opt into `allow_negative`, which clamps
-any negative hourly net to zero for that hour regardless of quality flags and
-without a warning; a non-finite value is always rejected regardless of quality
-flags or this option.
-The measured battery-efficiency importer aligns the six energy legs and
-state-of-charge history, then carries any suspect quality on those hours
-through to the persisted history and the calculated result instead of
-rejecting the fetch: a suspect hour must not prevent the surrounding,
-unaffected hours from being persisted, since the incremental history store
-can then only ever request the genuinely missing tail on the next scheduled
-attempt instead of re-fetching the complete configured history. Orchestration
-marks a run containing suspect quality as `suspect` rather than `failed`,
-which still blocks that result from feeding automatic optimization triggers.
+cumulative counter steps, signed entity aggregation, hourly normalization, and
+observation metadata. It follows Home Assistant's `total` and `total_increasing`
+state classes and rejects instantaneous power entities.
+
+**The hour rule.** An hour is imported only if every data point that contributes to
+it is valid; every other hour is excluded. Nothing is repaired, tolerated, or
+estimated: the former reset, spike, recovery, jitter-tolerance, and negative-hour
+clamping logic, the `suspect` quality, and the `decrease_tolerance_kwh` and
+`allow_negative` settings no longer exist. The observations of an entity form
+steps between consecutive valid observations. The energy of a step belongs to the
+hour of its later observation, and an observation exactly on an hour boundary
+belongs to the hour it closes. Home Assistant records only state changes, so a
+counter keeps its value between two observations, which decides which hours a
+cause excludes:
+
+- Invalid samples exclude every hour from the first invalid sample until the
+  first valid observation after them, because the invalid state stays in force
+  until then. The hour in which the entity returns is excluded too, since the
+  energy of the outage cannot be attributed. A trailing outage runs to the end.
+- A decrease of any size, the step directly after a decrease (a reset cannot be
+  told apart from a glitch, so a return from zero is not trusted), and a changed
+  `last_reset` exclude the hours of both observations of the step. This also
+  catches a spike that was recorded just before it fell back.
+- A step above the mapping's `maximum_interval_energy_kwh` (after unit
+  conversion, equality accepted) excludes the hour of its later observation, and
+  an hour whose steps add up to more than the maximum is excluded.
+- A sample with another unit, no unit, or another `state_class` than configured
+  is an invalid sample.
+
+An excluded hour has no value and carries one or more `ExclusionCause` records
+(`exclusions.py`): a reason code from a closed set, a message, the entity, and the
+exact data points (raw state, recorded time, and for a step the previous and
+current observation, the step's energy, and the maximum). At most 50 data points
+are kept per entity and hour, with the full count. Some conditions make the
+entity unusable as a whole and remain hard errors that fail the sources that read
+it: no history at all, an instantaneous power unit, duplicate timestamps, and a
+period without a complete hour.
+
+Signed aggregation excludes a combined hour when any contributing entity is
+excluded for it (the cause of the entity is kept; no partial sum is formed), and
+also when the operations make it negative or not finite (`combined_negative`,
+`combined_not_finite`, listing the signed energy of every entity); a combined
+hour is never clamped to zero. Individual chunk request outcomes are debug-level
+diagnostics. The import emits one structured summary at info level with its
+entity, failed-entity, request, and invalid-sample counts, and a warning for
+every failed entity. Each aggregate build emits one structured summary at info
+level, with its excluded-hour count, or one failure summary at warning level after
+the complete entity set has been processed. Orchestration emits one
+`provider_hours_excluded` warning per source and refresh with the number of newly
+excluded hours by reason.
+
+**Persistence of excluded hours.** The persisted series of household load, grid
+flow, and the efficiency history hold `null` for an excluded hour, so the hours
+stay contiguous and the incremental start (the first hour after the persisted
+history) advances past it. A permanently bad sample can therefore never block
+later refreshes. The exclusion records are stored with the history in the same
+atomic write, so a value can never lose its explanation: the household-load NDJSON
+record of an excluded hour has `"load_kw": null` and an embedded `exclusion`;
+grid-flow and efficiency-history JSON files hold a sparse `exclusions` list. A
+merge replaces an hour completely, value and exclusion. Data persisted by earlier
+versions is converted when it is read (`legacy_quality.py`): valid hours keep their
+values, and hours flagged `suspect` become excluded hours with the reason
+`flagged_by_earlier_version`, because Home Assistant may no longer hold the
+history that was persisted. A refresh with excluded hours is a `success` and does
+not block optimization; there is no `suspect` run status.
+
+**Battery efficiency.** The measured battery-efficiency importer aligns the six
+energy legs and the state-of-charge history. A state-of-charge sample that is
+unavailable, not a number, or outside 0 to 100 percent (`soc_out_of_range`) is
+never carried forward and excludes the hours in which it is in force. An hour
+excluded in any leg or in the state of charge is excluded in all six legs, and the
+state-of-charge values that bracket it (`state_of_charge_percent[i]` and
+`[i + 1]` for hour `i`) are dropped, so the ratios never mix valid and invalid
+legs. `calculate_battery_efficiency` skips excluded hours and does not use a
+full-charge cycle that contains one, which reduces the number of usable cycles
+instead of producing a wrong ratio. The exclusions are read through
+`GET /api/v1/dashboard/excluded-hours` (see [`docs/api.md`](api.md)) and shown
+on the dashboard's **Excluded hours** tab.
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns

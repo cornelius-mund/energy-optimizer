@@ -19,6 +19,7 @@ from energy_optimizer.config import (
     DataSourceScheduleConfiguration,
     OrchestrationConfiguration,
 )
+from energy_optimizer.exclusions import exclusion_summary
 from energy_optimizer.history_merge import HISTORY_RETENTION_HOURS, merge_price_history
 from energy_optimizer.providers.awattar import AwattarImporter
 from energy_optimizer.providers.forecast_solar import (
@@ -45,6 +46,7 @@ from energy_optimizer.providers.home_assistant_history import (
     HomeAssistantHistoryImporter,
 )
 from energy_optimizer.providers.interfaces import (
+    BATTERY_EFFICIENCY_SOURCE_ID,
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryData,
     BatteryEfficiencyData,
@@ -63,7 +65,7 @@ from energy_optimizer.storage import (
 
 logger = logging.getLogger(__name__)
 
-RunStatus = Literal["success", "failed", "stale", "suspect", "skipped"]
+RunStatus = Literal["success", "failed", "stale", "skipped"]
 PlanStatus = Literal[
     "disabled",
     "not-ready",
@@ -482,11 +484,10 @@ class ProviderOrchestrator:
             self._latest_data[registration.name] = saved_data
             attempt_completed = self._as_utc(cycle_clock())
             self._set_next_due(registration.name, attempt_completed, schedule)
+            _log_excluded_hours(registration.name, getattr(data, "exclusions", ()))
             status: RunStatus
-            if self._has_suspect_quality(saved_data):
-                status = "suspect"
-                error_message: str | None = "provider returned suspect interval data"
-            elif registration.is_fresh(saved_data, now):
+            error_message: str | None
+            if registration.is_fresh(saved_data, now):
                 fresh_data[registration.name] = saved_data
                 status = "success"
                 error_message = None
@@ -500,9 +501,7 @@ class ProviderOrchestrator:
                 completed_at=attempt_completed,
                 error=error_message,
             )
-            log_method = (
-                logger.warning if status in {"stale", "suspect"} else logger.info
-            )
+            log_method = logger.warning if status == "stale" else logger.info
             log_method(
                 "event=provider_refresh_completed component=orchestration "
                 "operation=refresh source=%s status=%s duration_seconds=%.3f",
@@ -571,8 +570,7 @@ class ProviderOrchestrator:
             )
             return (
                 "not-ready",
-                "a required source failed, returned stale data, or contains "
-                "suspect data",
+                "a required source failed or returned stale data",
             )
         if not required.issubset(fresh_data):
             logger.warning(
@@ -635,12 +633,6 @@ class ProviderOrchestrator:
             if registration.name == source
         )
         return registration.is_fresh(data, now)
-
-    @staticmethod
-    def _has_suspect_quality(data: object) -> bool:
-        """Return whether normalized provider data contains suspect intervals."""
-        quality = getattr(data, "quality", ())
-        return any(getattr(item, "status", None) == "suspect" for item in quality)
 
     def _is_due(
         self,
@@ -707,6 +699,23 @@ ConfiguredRegistrationFactory = Callable[
     [Configuration, OrchestrationConfiguration, ProviderDataStore],
     ProviderRegistration | None,
 ]
+
+
+def _log_excluded_hours(source: str, exclusions: object) -> None:
+    """Report the hours a refresh excluded, once per source, counted by reason."""
+    items = tuple(exclusions) if isinstance(exclusions, tuple) else ()
+    if not items:
+        return
+    summary = exclusion_summary(items)
+    logger.warning(
+        "event=provider_hours_excluded component=orchestration operation=refresh "
+        "source=%s excluded_hour_count=%s reasons=%s first_hour=%s last_hour=%s",
+        source,
+        len(items),
+        ",".join(f"{reason}:{count}" for reason, count in summary.items()),
+        items[0].hour_start.isoformat(),
+        items[-1].hour_start.isoformat(),
+    )
 
 
 def _build_household_load_registration(
@@ -1048,6 +1057,7 @@ def _build_battery_efficiency_registration(
                 history = persisted
             else:
                 incoming = history_plan.build(imported)
+                _log_excluded_hours(BATTERY_EFFICIENCY_SOURCE_ID, incoming.exclusions)
                 history = merge_battery_efficiency_history(persisted, incoming)
                 store.save(history_key, history_adapter, history)
             # Read at build time so that a battery record persisted earlier in

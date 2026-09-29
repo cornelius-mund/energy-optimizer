@@ -1,12 +1,24 @@
 """Provider-data persistence and history API tests."""
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 from pytest import MonkeyPatch
 
 from energy_optimizer.api import app
-from energy_optimizer.storage import ProviderDataKey
+from energy_optimizer.exclusions import (
+    ExcludedDataPoint,
+    ExclusionCause,
+    HourExclusion,
+)
+from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
+from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
+
+START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+HOUSEHOLD_KEY = ProviderDataKey("household-load", "home-assistant", "household_load")
 
 
 def test_grid_flow_provider_data_is_persisted_and_retrieved_after_restart(
@@ -127,7 +139,6 @@ def test_historic_household_load_returns_requested_range_and_metadata(
         "interval_minutes": 60,
         "timestamps": ["2026-01-01T01:00:00Z"],
         "load_kw": [1.0],
-        "quality": [{"status": "valid", "reason": None, "entity_id": None}],
         "unit": "kW",
         "source": {"provider": "home-assistant", "entity_id": "household_load"},
         "coverage_start_time": "2026-01-01T01:00:00Z",
@@ -136,10 +147,133 @@ def test_historic_household_load_returns_requested_range_and_metadata(
         "available_end_time": "2026-01-01T02:00:00Z",
         "retrieved_at": "2026-01-01T00:00:00Z",
         "latest_observation_at": "2026-01-01T01:00:00Z",
-        "validation_status": "valid",
         "freshness": "unknown",
         "freshness_checked_at": response.json()["freshness_checked_at"],
     }
+
+
+def seed_household_load_with_an_excluded_hour(configuration: Path) -> HourExclusion:
+    """Persist three hours whose middle hour is excluded and return its exclusion."""
+    hour_start = START + timedelta(hours=1)
+    excluded = HourExclusion(
+        hour_start,
+        (
+            ExclusionCause.of(
+                "counter_decrease",
+                "sensor.household_energy decreased from 3 kWh to 2 kWh",
+                "sensor.household_energy",
+                [ExcludedDataPoint(hour_start, state="2", unit="kWh")],
+            ),
+        ),
+    )
+    ProviderDataStore(configuration.parent / "provider-data").save(
+        HOUSEHOLD_KEY,
+        TypeAdapter(HouseholdLoadData),
+        HouseholdLoadData(
+            schema_version="1",
+            start_time=START,
+            interval_minutes=60,
+            load_kw=(1.0, None, 3.0),
+            unit="kW",
+            source=SourceMetadata("home-assistant", "household_load"),
+            retrieved_at=START,
+            latest_observation_at=START + timedelta(hours=3),
+            exclusions=(excluded,),
+        ),
+    )
+    return excluded
+
+
+def test_historic_household_load_returns_null_for_an_excluded_hour(
+    persistence_configuration: Path,
+) -> None:
+    seed_household_load_with_an_excluded_hour(persistence_configuration)
+
+    with TestClient(app) as client:
+        whole_range = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T03:00:00+00:00",
+            },
+        )
+        excluded_only = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T01:00:00+00:00",
+                "end_time": "2026-01-01T02:00:00+00:00",
+            },
+        )
+        stored = client.get("/api/v1/household-load")
+
+    assert whole_range.status_code == 200
+    body = whole_range.json()
+    assert body["status"] == "validated"
+    assert body["timestamps"] == [
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T01:00:00Z",
+        "2026-01-01T02:00:00Z",
+    ]
+    assert body["load_kw"] == [1.0, None, 3.0]
+    assert "quality" not in body
+    assert "validation_status" not in body
+    assert excluded_only.status_code == 200
+    assert excluded_only.json()["status"] == "validated"
+    assert excluded_only.json()["timestamps"] == ["2026-01-01T01:00:00Z"]
+    assert excluded_only.json()["load_kw"] == [None]
+    assert stored.status_code == 200
+    assert stored.json()["load_kw"] == [1.0, None, 3.0]
+
+
+def test_historic_household_load_serves_suspect_hours_of_legacy_data_as_null(
+    persistence_configuration: Path,
+) -> None:
+    directory = persistence_configuration.parent / "provider-data"
+    directory.mkdir()
+    quality = [
+        {"status": "valid", "reason": None, "entity_id": None},
+        {
+            "status": "suspect",
+            "reason": "reset_recovery",
+            "entity_id": "sensor.household_energy",
+        },
+        {"status": "valid", "reason": None, "entity_id": None},
+    ]
+    (directory / f"household-load-{HOUSEHOLD_KEY.digest()}.ndjson").write_bytes(
+        b"".join(
+            json.dumps(
+                {
+                    "timestamp": (START + timedelta(hours=hour)).isoformat(),
+                    "load_kw": float(hour + 1),
+                    "quality": quality[hour],
+                    "schema_version": "1",
+                    "unit": "kW",
+                    "source": {
+                        "provider": "home-assistant",
+                        "entity_id": "household_load",
+                    },
+                    "retrieved_at": START.isoformat(),
+                    "latest_observation_at": (START + timedelta(hours=3)).isoformat(),
+                }
+            ).encode()
+            + b"\n"
+            for hour in range(3)
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T03:00:00+00:00",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "validated"
+    assert response.json()["load_kw"] == [1.0, None, 3.0]
+    assert "quality" not in response.json()
 
 
 def test_historic_household_load_reports_empty_range(
@@ -190,7 +324,8 @@ def test_historic_household_load_reports_stale_but_valid_history(
 
     assert response.status_code == 200
     assert response.json()["status"] == "stale"
-    assert response.json()["validation_status"] == "valid"
+    assert "validation_status" not in response.json()
+    assert "quality" not in response.json()
 
 
 def test_historic_household_load_reports_corrupt_persistence(

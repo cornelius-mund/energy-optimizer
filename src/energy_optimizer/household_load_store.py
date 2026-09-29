@@ -16,15 +16,14 @@ from energy_optimizer.household_load_records import (
     as_utc,
     bounded_household_load,
     encode_household_records,
+    household_load_exclusion_points,
     household_load_points,
-    household_load_quality_points,
     household_load_records,
     merge_household_load_history,
     parse_household_history,
-    quality_at,
-    quality_slice,
     slice_household_load,
 )
+from energy_optimizer.legacy_quality import upgrade_legacy_quality
 from energy_optimizer.providers.interfaces import (
     HouseholdLoadData,
 )
@@ -347,7 +346,9 @@ class HouseholdLoadStore:
                 f"could not read normalized provider data from {path}: {error}"
             ) from error
         try:
-            return HouseholdLoadDataAdapter.validate_json(payload), True
+            return upgrade_legacy_quality(
+                HouseholdLoadDataAdapter.validate_json(payload)
+            ), True
         except ValueError, ValidationError:
             return None, True
 
@@ -367,12 +368,10 @@ __all__ = [
     "as_utc",
     "bounded_household_load",
     "encode_household_records",
+    "household_load_exclusion_points",
     "household_load_points",
-    "household_load_quality_points",
     "household_load_records",
     "merge_household_load_history",
     "parse_household_history",
-    "quality_at",
-    "quality_slice",
     "slice_household_load",
 ]

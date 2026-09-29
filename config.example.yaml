@@ -88,18 +88,15 @@ home_assistant:
       state_class: total_increasing
       unit: kWh
       operation: add
-      # Physical upper bound for one hourly cumulative-energy delta (default: 100 kWh).
+      # The most energy this entity may report in one hour and in one counter
+      # step (default: 100 kWh). A larger value excludes the hour instead of
+      # importing it.
       maximum_interval_energy_kwh: 15
     - entity_id: sensor.ev_energy
       state_class: total
       unit: kWh
       operation: subtract
       maximum_interval_energy_kwh: 11
-      # Largest decrease below the counter's highest value that is treated as
-      # measurement jitter (default: 0.01 kWh). Only for state_class: total
-      # entities without a changed last_reset; a larger decrease is flagged as a
-      # suspect counter reset and never fails the import.
-      decrease_tolerance_kwh: 0.01
   grid_import_entities:
     - entity_id: sensor.grid_import_energy
       state_class: total_increasing

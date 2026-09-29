@@ -20,7 +20,6 @@ from energy_optimizer.api.schemas import (
     GridFlowRequest,
     GridFlowResponse,
     HistoricHouseholdLoadResponse,
-    HouseholdLoadQuality,
     HouseholdLoadRequest,
     HouseholdLoadResponse,
     PvGenerationRequest,
@@ -31,7 +30,6 @@ from energy_optimizer.api.validation import require_aware_timestamps
 from energy_optimizer.providers.interfaces import (
     GridFlowData,
     HouseholdLoadData,
-    IntervalQuality,
 )
 from energy_optimizer.providers.interfaces import (
     SourceMetadata as ProviderSourceMetadata,
@@ -96,9 +94,7 @@ def _household_load_response(
         schema_version=data.schema_version,
         start_time=data.start_time,
         interval_minutes=data.interval_minutes,
-        load_kw=(
-            list(data.load_kw) if isinstance(data, HouseholdLoadData) else data.load_kw
-        ),
+        load_kw=list[float | None](data.load_kw),
         unit=data.unit,
         source=source,
         retrieved_at=data.retrieved_at,
@@ -120,12 +116,8 @@ def _grid_flow_response(
         schema_version=data.schema_version,
         start_time=data.start_time,
         interval_minutes=data.interval_minutes,
-        import_kw=(
-            list(data.import_kw) if isinstance(data, GridFlowData) else data.import_kw
-        ),
-        export_kw=(
-            list(data.export_kw) if isinstance(data, GridFlowData) else data.export_kw
-        ),
+        import_kw=list[float | None](data.import_kw),
+        export_kw=list[float | None](data.export_kw),
         unit=data.unit,
         source=source,
         retrieved_at=data.retrieved_at,
@@ -333,17 +325,10 @@ def historic_household_load(
         complete_data,
         configuration.home_assistant.max_data_age_seconds,
     )
-    has_suspect_quality = provider_data is not None and any(
-        item.status == "suspect" for item in _expanded_quality(provider_data)
-    )
-    response_status: Literal["validated", "stale", "suspect", "empty"] = (
+    response_status: Literal["validated", "stale", "empty"] = (
         "empty"
         if provider_data is None
-        else (
-            "suspect"
-            if has_suspect_quality
-            else ("stale" if freshness == "stale" else "validated")
-        )
+        else ("stale" if freshness == "stale" else "validated")
     )
     timestamps = (
         [
@@ -362,18 +347,6 @@ def historic_household_load(
         interval_minutes=complete_data.interval_minutes,
         timestamps=timestamps,
         load_kw=list(provider_data.load_kw) if provider_data is not None else [],
-        quality=(
-            [
-                HouseholdLoadQuality(
-                    status=item.status,
-                    reason=item.reason,
-                    entity_id=item.entity_id,
-                )
-                for item in _expanded_quality(provider_data)
-            ]
-            if provider_data is not None
-            else []
-        ),
         unit=complete_data.unit,
         source=SourceMetadata(
             provider=complete_data.source.provider,
@@ -391,22 +364,9 @@ def historic_household_load(
         available_end_time=available_end,
         retrieved_at=complete_data.retrieved_at,
         latest_observation_at=complete_data.latest_observation_at,
-        validation_status="suspect" if has_suspect_quality else "valid",
         freshness=freshness,
         freshness_checked_at=datetime.now(timezone.utc),
     )
-
-
-def _expanded_quality(data: HouseholdLoadData) -> tuple[IntervalQuality, ...]:
-    """Return one quality value for every persisted household-load interval."""
-    if data.quality:
-        if len(data.quality) != len(data.load_kw):
-            raise HTTPException(
-                status_code=503,
-                detail="persisted household-load quality metadata is misaligned",
-            )
-        return data.quality
-    return tuple(IntervalQuality() for _ in data.load_kw)
 
 
 def _household_load_freshness(

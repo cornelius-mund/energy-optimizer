@@ -25,6 +25,7 @@
         <button class="tab is-active" id="actuals-tab" type="button" role="tab" aria-selected="true" aria-controls="dashboard-panel">Historic actuals</button>
        <button class="tab" id="forecast-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Forecast</button>
        <button class="tab" id="efficiency-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Efficiency</button>
+       <button class="tab" id="excluded-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Excluded hours</button>
       </nav>
 
       <section id="dashboard-panel" class="panel" role="tabpanel" aria-labelledby="actuals-tab">
@@ -99,6 +100,38 @@
             <p id="interpretation-text">Measured actuals are not forecasts and do not describe an optimization plan.</p>
           </div>
         </aside>
+      </section>
+
+      <section id="excluded-content" class="excluded-grid" role="region" aria-live="polite" aria-labelledby="excluded-heading" hidden>
+        <article class="card excluded-card">
+          <p class="eyebrow">Import data quality</p>
+          <h2 id="excluded-heading">Excluded hours</h2>
+          <p class="excluded-lede">
+            An hour is imported only if every data point that contributes to it is valid.
+            Every other hour has no value, is left out of the charts, and is listed here with each
+            data point that caused it.
+          </p>
+          <ul id="excluded-sources" class="excluded-sources" aria-label="Sources checked"></ul>
+          <ul id="excluded-summary" class="excluded-summary" aria-label="Excluded hours by source and reason"></ul>
+          <p id="excluded-empty" class="excluded-empty" hidden>No hours were excluded in this window.</p>
+          <div class="table-wrap">
+            <table id="excluded-table" class="excluded-table" hidden>
+              <caption class="visually-hidden">Data points that excluded an hour from the imported history</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Hour (UTC)</th>
+                  <th scope="col">Source</th>
+                  <th scope="col">Entity</th>
+                  <th scope="col">Reason</th>
+                  <th scope="col">Data point (UTC)</th>
+                  <th scope="col">Reported value</th>
+                  <th scope="col">Detail</th>
+                </tr>
+              </thead>
+              <tbody id="excluded-rows"></tbody>
+            </table>
+          </div>
+        </article>
       </section>
 
       <footer>

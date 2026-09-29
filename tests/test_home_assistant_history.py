@@ -1,19 +1,21 @@
 """Tests for the shared Home Assistant history import layer."""
 
 import logging
-import re
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import httpx
 import pytest
 
 from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
+from energy_optimizer.exclusions import ExcludedDataPoint
 from energy_optimizer.providers import home_assistant_history
 from energy_optimizer.providers.home_assistant_energy import EnergyAggregate
 from energy_optimizer.providers.home_assistant_history import (
     HistoryNeed,
     HistoryPlanError,
+    HistorySample,
     HomeAssistantError,
     HomeAssistantHistory,
     HomeAssistantHistoryImporter,
@@ -26,6 +28,15 @@ from home_assistant_fixtures import (
 FIRST = "sensor.first"
 SECOND = "sensor.second"
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
+HALF_HOUR = timedelta(minutes=30)
+ENTITY = HomeAssistantEnergyEntityConfiguration.model_validate(
+    {
+        "entity_id": FIRST,
+        "state_class": "total_increasing",
+        "unit": "kWh",
+        "operation": "add",
+    }
+)
 
 configuration = home_assistant_configuration_factory()
 
@@ -280,10 +291,7 @@ def test_the_import_summary_counts_every_attempted_request(
     assert f"entity_id={FIRST}" in failures[0].getMessage()
 
 
-def test_unknown_and_unavailable_samples_are_skipped_with_one_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    caplog.set_level(logging.WARNING)
+def test_unavailable_samples_stay_in_the_series_as_invalid_samples() -> None:
     home_assistant = FakeHomeAssistant(
         {
             FIRST: [
@@ -298,33 +306,105 @@ def test_unknown_and_unavailable_samples_are_skipped_with_one_warning(
     history = import_history(home_assistant, counter_need(FIRST, hour(0), hour(3)))
 
     samples = history.window(FIRST, "counter", hour(0), hour(3))
-    assert [sample.value for sample in samples] == [0.0, 3.0]
-    warnings = [
+    assert [
+        (sample.timestamp, sample.value, sample.state, sample.invalid)
+        for sample in samples
+    ] == [
+        (hour(0), 0.0, "0", None),
+        (hour(1), None, "unavailable", "unavailable"),
+        (hour(2), None, "unknown", "unavailable"),
+        (hour(3), 3.0, "3", None),
+    ]
+    # An invalid sample still carries the attributes of the sample before it.
+    assert [sample.unit for sample in samples] == ["kWh"] * 4
+
+
+def test_the_import_summary_counts_invalid_samples_instead_of_warning_per_sample(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    home_assistant = FakeHomeAssistant(
+        {
+            FIRST: [
+                (hour(0), "0"),
+                (hour(1), "unavailable"),
+                (hour(2), "nan"),
+                (hour(3), "3"),
+            ],
+            SECOND: [(hour(0), "0"), (hour(1), "not-a-number"), (hour(2), "2")],
+        }
+    )
+
+    import_history(
+        home_assistant,
+        counter_need(FIRST, hour(0), hour(3)),
+        counter_need(SECOND, hour(0), hour(2)),
+    )
+
+    (summary,) = [
         record.getMessage()
         for record in caplog.records
-        if "unknown or unavailable" in record.getMessage()
+        if record.getMessage().startswith("event=home_assistant_history_import")
     ]
-    assert len(warnings) == 1
-    assert FIRST in warnings[0]
-    assert "2 unknown or unavailable" in warnings[0]
+    assert "status=success" in summary
+    assert "invalid_sample_count=3" in summary
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ] == []
 
 
 @pytest.mark.parametrize(
-    ("states", "message"),
+    ("kind", "message"),
     [
-        ([], "returned no history for sensor.first"),
-        ([(hour(0), "unavailable")], "no usable history after skipping"),
+        ("counter", "returned no history for sensor.first"),
+        ("state", "returned no usable history for sensor.first"),
     ],
 )
-def test_an_entity_without_usable_history_fails(
-    states: list[tuple[datetime, str]], message: str
+def test_an_entity_without_any_history_fails(
+    kind: home_assistant_history.HistoryKind, message: str
 ) -> None:
     history = import_history(
-        FakeHomeAssistant({FIRST: states}), counter_need(FIRST, hour(0), hour(2))
+        FakeHomeAssistant({FIRST: []}), HistoryNeed(FIRST, kind, hour(0), hour(2))
     )
 
     with pytest.raises(HomeAssistantError, match=message):
-        history.window(FIRST, "counter", hour(0), hour(2))
+        history.window(FIRST, kind, hour(0), hour(2))
+
+
+@pytest.mark.parametrize("kind", ["counter", "state"])
+def test_an_entity_with_only_unavailable_samples_is_imported_not_failed(
+    kind: home_assistant_history.HistoryKind,
+) -> None:
+    history = import_history(
+        FakeHomeAssistant({FIRST: [(hour(0), "unavailable")]}),
+        HistoryNeed(FIRST, kind, hour(0), hour(2)),
+    )
+
+    (only,) = history.window(FIRST, kind, hour(0), hour(2))
+
+    assert (only.value, only.state, only.invalid) == (
+        None,
+        "unavailable",
+        "unavailable",
+    )
+
+
+def test_an_entity_that_is_only_ever_unavailable_excludes_every_hour() -> None:
+    aggregate = EnergyAggregate([ENTITY], hour(0), hour(2), label="unavailable")
+    history = import_history(
+        FakeHomeAssistant({FIRST: [(hour(0), "unavailable")]}), *aggregate.needs()
+    )
+
+    series = aggregate.build(history)
+
+    assert series.values_kw == (None, None)
+    assert [item.hour_start for item in series.exclusions] == [hour(0), hour(1)]
+    for item in series.exclusions:
+        (cause,) = item.causes
+        assert (cause.reason, cause.entity_id) == ("unavailable", FIRST)
+        assert cause.data_points == (ExcludedDataPoint(hour(0), "unavailable", "kWh"),)
 
 
 def test_empty_chunks_are_tolerated_when_a_later_chunk_has_history() -> None:
@@ -352,7 +432,7 @@ def test_window_returns_the_state_in_force_at_its_start_stamped_with_the_start()
         counter_need(FIRST, hour(-2), hour(8)),
     )
 
-    def window(start: int, end: int) -> list[tuple[datetime, float]]:
+    def window(start: int, end: int) -> list[tuple[datetime, float | None]]:
         return [
             (sample.timestamp, sample.value)
             for sample in history.window(FIRST, "counter", hour(start), hour(end))
@@ -370,30 +450,69 @@ def test_window_returns_the_state_in_force_at_its_start_stamped_with_the_start()
     assert window(-2, -1) == []
 
 
-def test_window_does_not_carry_a_state_across_a_later_unavailable_sample() -> None:
+def window_view(
+    samples: tuple[HistorySample, ...],
+) -> list[tuple[datetime, float | None, str | None, str | None]]:
+    return [
+        (sample.timestamp, sample.value, sample.state, sample.invalid)
+        for sample in samples
+    ]
+
+
+def test_window_carries_an_invalid_state_in_force_and_never_a_valid_one_across_it() -> (
+    None
+):
+    states = [(hour(0), "5"), (hour(1), "unavailable"), (hour(3), "7")]
     history = import_history(
-        FakeHomeAssistant(
-            {FIRST: [(hour(0), "5"), (hour(1), "unavailable"), (hour(3), "7")]}
-        ),
+        FakeHomeAssistant({FIRST: states}), counter_need(FIRST, hour(0), hour(4))
+    )
+    valid_seven = (hour(3), 7.0, "7", None)
+
+    def window(start: datetime, end: datetime) -> list[tuple[Any, ...]]:
+        return window_view(history.window(FIRST, "counter", start, end))
+
+    # Before the sample became unavailable, the earlier value is in force.
+    assert window(hour(0) + HALF_HOUR, hour(4)) == [
+        (hour(0) + HALF_HOUR, 5.0, "5", None),
+        (hour(1), None, "unavailable", "unavailable"),
+        valid_seven,
+    ]
+    # Afterwards the unavailable state is in force, and the earlier value 5 is
+    # not carried across it.
+    assert window(hour(1) + HALF_HOUR, hour(4)) == [
+        (hour(1) + HALF_HOUR, None, "unavailable", "unavailable"),
+        valid_seven,
+    ]
+    # A sample that became unavailable exactly at the start is in force too.
+    assert window(hour(1), hour(4)) == [
+        (hour(1), None, "unavailable", "unavailable"),
+        valid_seven,
+    ]
+    # Every window equals what an independent request for it would see.
+    for start in (hour(0) + HALF_HOUR, hour(1) + HALF_HOUR, hour(1)):
+        independent = import_history(
+            FakeHomeAssistant({FIRST: states}), counter_need(FIRST, start, hour(4))
+        )
+        assert window_view(independent.window(FIRST, "counter", start, hour(4))) == (
+            window(start, hour(4))
+        )
+
+
+def test_a_window_keeps_when_the_state_in_force_was_recorded() -> None:
+    history = import_history(
+        FakeHomeAssistant({FIRST: [(hour(0), "5"), (hour(1), "unavailable")]}),
         counter_need(FIRST, hour(0), hour(4)),
     )
 
-    def window(start: datetime, end: datetime) -> list[tuple[datetime, float]]:
-        return [
-            (sample.timestamp, sample.value)
-            for sample in history.window(FIRST, "counter", start, end)
-        ]
+    (carried,) = history.window(FIRST, "counter", hour(2), hour(4))
+    (recorded,) = history.window(FIRST, "counter", hour(1), hour(4))
 
-    # Before the sample became unavailable, the earlier value is in force.
-    assert window(hour(0) + timedelta(minutes=30), hour(4)) == [
-        (hour(0) + timedelta(minutes=30), 5.0),
-        (hour(3), 7.0),
-    ]
-    # Afterwards the state is unknown, so an independent request for the window
-    # would have no state at its start and neither does the shared series.
-    assert window(hour(1) + timedelta(minutes=30), hour(4)) == [(hour(3), 7.0)]
-    # A sample that became unavailable exactly at the start is unknown too.
-    assert window(hour(1), hour(4)) == [(hour(3), 7.0)]
+    assert carried.timestamp == hour(2)
+    assert carried.observed_at == hour(1)
+    assert carried.recorded_at == hour(1)
+    # A state recorded exactly at the window start is not re-stamped.
+    assert recorded.observed_at is None
+    assert recorded.recorded_at == hour(1)
 
 
 def test_unit_state_class_and_reset_are_carried_to_samples_without_attributes() -> None:
@@ -455,77 +574,6 @@ def test_state_history_keeps_the_reported_unit_of_every_sample() -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    ("state", "message"),
-    [
-        ("not-a-number", "non-numeric value at 2026-01-01T01:00:00+00:00"),
-        ("-1", "invalid value at 2026-01-01T01:00:00+00:00"),
-        ("nan", "invalid value at 2026-01-01T01:00:00+00:00"),
-    ],
-)
-def test_an_invalid_sample_only_fails_consumers_whose_window_contains_it(
-    state: str, message: str
-) -> None:
-    home_assistant = FakeHomeAssistant(
-        {
-            FIRST: [
-                (hour(0), "0"),
-                (hour(1), state),
-                (hour(2), "2"),
-                (hour(3), "3"),
-                (hour(4), "4"),
-            ]
-        }
-    )
-    entity = HomeAssistantEnergyEntityConfiguration.model_validate(
-        {
-            "entity_id": FIRST,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "add",
-        }
-    )
-    early = EnergyAggregate([entity], hour(0), hour(4), label="early")
-    late = EnergyAggregate([entity], hour(2), hour(4), label="late")
-
-    # One shared import serves both consumers.
-    history = import_history(home_assistant, *early.needs(), *late.needs())
-
-    assert len(home_assistant.requests) == 1
-    with pytest.raises(HomeAssistantError, match=re.escape(message)):
-        early.build(history)
-    assert late.build(history).values_kw == (1.0, 1.0)
-
-
-def test_samples_without_a_unit_are_rejected_only_where_the_unit_is_unknown() -> None:
-    payload = [
-        [
-            {"state": "1", "last_updated": hour(0).isoformat(), "attributes": {}},
-            {
-                "state": "2",
-                "last_updated": hour(1).isoformat(),
-                "attributes": {"unit_of_measurement": "kWh"},
-            },
-            {"state": "3", "last_updated": hour(2).isoformat(), "attributes": {}},
-        ]
-    ]
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
-    )
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [counter_need(FIRST, hour(0), hour(2))]
-        )
-    finally:
-        client.close()
-
-    samples = history.window(FIRST, "counter", hour(0), hour(2))
-
-    assert [sample.problem is not None for sample in samples] == [True, False, False]
-    assert "missing unit_of_measurement" in (samples[0].problem or "")
-    assert [sample.unit for sample in samples[1:]] == ["kWh", "kWh"]
-
-
 def history_from_payload(
     payload: object, kind: home_assistant_history.HistoryKind = "counter"
 ) -> HomeAssistantHistory:
@@ -548,6 +596,183 @@ def record(
         "last_updated": timestamp.isoformat(),
         "attributes": {"unit_of_measurement": "kWh", **attributes},
     }
+
+
+@pytest.mark.parametrize(
+    ("kind", "state", "value", "invalid"),
+    [
+        ("counter", "1.5", 1.5, None),
+        ("counter", "1e3", 1000.0, None),
+        ("counter", 5, 5.0, None),
+        ("counter", "unavailable", None, "unavailable"),
+        ("counter", "unknown", None, "unavailable"),
+        ("counter", " Unavailable ", None, "unavailable"),
+        ("counter", "UNKNOWN", None, "unavailable"),
+        ("counter", "not-a-number", None, "non_numeric"),
+        ("counter", "", None, "non_numeric"),
+        ("counter", None, None, "non_numeric"),
+        ("counter", "nan", None, "not_finite"),
+        ("counter", "inf", None, "not_finite"),
+        ("counter", "-inf", None, "not_finite"),
+        ("counter", "-1", None, "negative_value"),
+        # Only a cumulative counter cannot be negative.
+        ("state", "-3.5", -3.5, None),
+        ("state", "unavailable", None, "unavailable"),
+        ("state", "not-a-number", None, "non_numeric"),
+        ("state", "inf", None, "not_finite"),
+    ],
+)
+def test_every_state_is_classified_and_keeps_its_raw_text(
+    kind: home_assistant_history.HistoryKind,
+    state: object,
+    value: float | None,
+    invalid: str | None,
+) -> None:
+    history = history_from_payload([[record(state, hour(0))]], kind)
+
+    (sample,) = history.window(FIRST, kind, hour(0), hour(2))
+
+    assert (sample.value, sample.invalid) == (value, invalid)
+    assert sample.state == (None if state is None else str(state))
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("not-a-number", "non_numeric"),
+        ("nan", "not_finite"),
+        ("-1", "negative_value"),
+        (" Unavailable ", "unavailable"),
+    ],
+)
+def test_an_invalid_sample_only_excludes_hours_of_the_windows_that_contain_it(
+    state: str, reason: str
+) -> None:
+    home_assistant = FakeHomeAssistant(
+        {
+            FIRST: [
+                (hour(0), "0"),
+                (hour(1) + HALF_HOUR, state),
+                (hour(2), "2"),
+                (hour(3), "3"),
+                (hour(4), "4"),
+            ]
+        }
+    )
+    early = EnergyAggregate([ENTITY], hour(0), hour(4), label="early")
+    late = EnergyAggregate([ENTITY], hour(2), hour(4), label="late")
+
+    # One shared import serves both consumers.
+    history = import_history(home_assistant, *early.needs(), *late.needs())
+
+    assert len(home_assistant.requests) == 1
+    # The sample is in force from 01:30 until the counter returns at 02:00, so
+    # only the hour from 01:00 to 02:00 has no trustworthy value. Nothing is
+    # counted for the hour before it: the counter did not change.
+    early_series = early.build(history)
+    assert early_series.values_kw == (0.0, None, 1.0, 1.0)
+    (excluded,) = early_series.exclusions
+    assert excluded.hour_start == hour(1)
+    (cause,) = excluded.causes
+    assert (cause.reason, cause.entity_id, cause.data_point_count) == (
+        reason,
+        FIRST,
+        1,
+    )
+    assert cause.data_points == (ExcludedDataPoint(hour(1) + HALF_HOUR, state, "kWh"),)
+    # The invalid sample lies before the late consumer's window.
+    late_series = late.build(history)
+    assert late_series.values_kw == (1.0, 1.0)
+    assert late_series.exclusions == ()
+
+
+def test_an_invalid_sample_on_an_hour_boundary_excludes_the_hour_it_closes() -> None:
+    aggregate = EnergyAggregate([ENTITY], hour(0), hour(4), label="boundary")
+    history = import_history(
+        FakeHomeAssistant(
+            {
+                FIRST: [
+                    (hour(0), "0"),
+                    (hour(1), "unavailable"),
+                    (hour(2), "2"),
+                    (hour(3), "3"),
+                    (hour(4), "4"),
+                ]
+            }
+        ),
+        *aggregate.needs(),
+    )
+
+    series = aggregate.build(history)
+
+    # An observation exactly on a boundary belongs to the earlier hour, so the
+    # unavailable state at 01:00 is the missing closing reading of the hour from
+    # 00:00 to 01:00, and the valid reading at 02:00 closes the hour it returns in.
+    # A sensor that publishes on the hour would otherwise import 0 kWh here.
+    assert series.values_kw == (None, None, 1.0, 1.0)
+    assert [item.hour_start for item in series.exclusions] == [hour(0), hour(1)]
+
+
+def test_an_invalid_state_in_force_at_the_window_start_excludes_until_it_ends() -> None:
+    home_assistant = FakeHomeAssistant(
+        {
+            FIRST: [
+                (hour(0), "0"),
+                (hour(1) + HALF_HOUR, "unavailable"),
+                (hour(3), "3"),
+                (hour(4), "4"),
+            ]
+        }
+    )
+    early = EnergyAggregate([ENTITY], hour(0), hour(4), label="early")
+    late = EnergyAggregate([ENTITY], hour(2), hour(4), label="late")
+
+    history = import_history(home_assistant, *early.needs(), *late.needs())
+
+    assert len(home_assistant.requests) == 1
+    # Both consumers see the outage from 01:30 to 03:00; the counter's steps
+    # after it are attributed to the hour that ends at 04:00.
+    early_series = early.build(history)
+    assert early_series.values_kw == (0.0, None, None, 1.0)
+    assert [item.hour_start for item in early_series.exclusions] == [hour(1), hour(2)]
+    late_series = late.build(history)
+    assert late_series.values_kw == (None, 1.0)
+    (excluded,) = late_series.exclusions
+    assert excluded.hour_start == hour(2)
+    (cause,) = excluded.causes
+    assert cause.reason == "unavailable"
+    # The state in force is re-stamped to the window start, but the data point
+    # and the message show when Home Assistant really recorded it.
+    assert cause.data_points == (
+        ExcludedDataPoint(hour(1) + HALF_HOUR, "unavailable", "kWh"),
+    )
+    assert "first at 2026-01-01T01:30:00+00:00" in cause.message
+
+
+def test_a_sample_without_a_unit_is_only_excluded_where_the_unit_is_unknown() -> None:
+    history = history_from_payload(
+        [
+            [
+                {"state": "1", "last_updated": hour(0).isoformat(), "attributes": {}},
+                record("2", hour(1)),
+                {"state": "3", "last_updated": hour(2).isoformat(), "attributes": {}},
+            ]
+        ]
+    )
+
+    samples = history.window(FIRST, "counter", hour(0), hour(2))
+
+    # The history layer keeps the sample; the unit is only known once a sample
+    # reports it, and carried forward from there.
+    assert [sample.unit for sample in samples] == [None, "kWh", "kWh"]
+    assert [sample.invalid for sample in samples] == [None, None, None]
+    series = EnergyAggregate([ENTITY], hour(0), hour(2), label="unit").build(history)
+    assert series.values_kw == (None, 1.0)
+    (excluded,) = series.exclusions
+    assert excluded.hour_start == hour(0)
+    (cause,) = excluded.causes
+    assert (cause.reason, cause.entity_id) == ("unit_missing", FIRST)
+    assert cause.data_points == (ExcludedDataPoint(hour(0), "1", None),)
 
 
 @pytest.mark.parametrize(
@@ -575,59 +800,77 @@ def test_malformed_history_payloads_fail_the_entity_naming_it(
 
 
 @pytest.mark.parametrize(
-    ("sample", "problem"),
+    ("sample", "invalid"),
     [
-        (record(None, hour(0)), "unavailable value"),
-        (record("1", hour(0), state_class=5), "invalid state_class"),
-        (record("1", hour(0), last_reset=5), "invalid last_reset timestamp"),
-        (record("1", hour(0), last_reset="garbage"), "invalid timestamp"),
+        (record("1", hour(0), state_class=5), "invalid_attribute"),
+        (record("1", hour(0), last_reset=5), "invalid_attribute"),
+        (record("1", hour(0), last_reset="garbage"), "invalid_attribute"),
+        # A state that is already invalid keeps its own reason.
+        (record("abc", hour(0), state_class=5), "non_numeric"),
     ],
 )
-def test_a_sample_with_unusable_attributes_carries_its_problem(
-    sample: dict[str, object], problem: str
+def test_a_sample_with_unusable_attributes_is_invalid_and_keeps_its_state(
+    sample: dict[str, object], invalid: str
 ) -> None:
     history = history_from_payload([[sample]])
 
     (only,) = history.window(FIRST, "counter", hour(0), hour(2))
 
-    assert only.problem is not None
-    assert problem in only.problem
-    assert FIRST in only.problem
+    assert only.value is None
+    assert only.invalid == invalid
+    assert only.state == sample["state"]
+
+
+def test_attributes_of_a_sample_with_an_invalid_attribute_are_not_carried_on() -> None:
+    history = history_from_payload(
+        [
+            [
+                record("1", hour(0), state_class="total"),
+                record("2", hour(1), unit_of_measurement="Wh", state_class=5),
+                {"state": "3", "last_updated": hour(2).isoformat(), "attributes": {}},
+            ]
+        ]
+    )
+
+    samples = history.window(FIRST, "counter", hour(0), hour(2))
+
+    assert [sample.invalid for sample in samples] == [None, "invalid_attribute", None]
+    assert [sample.unit for sample in samples] == ["kWh", "Wh", "kWh"]
+    assert [sample.state_class for sample in samples] == ["total"] * 3
 
 
 def test_duplicate_timestamps_within_one_response_are_left_for_the_consumer() -> None:
     history = history_from_payload(
         [[record("1", hour(0)), record("2", hour(0)), record("3", hour(1))]]
     )
-    entity = HomeAssistantEnergyEntityConfiguration.model_validate(
-        {
-            "entity_id": FIRST,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "add",
-        }
-    )
 
     assert len(history.window(FIRST, "counter", hour(0), hour(2))) == 3
     with pytest.raises(HomeAssistantError, match="contains duplicate timestamps"):
-        EnergyAggregate([entity], hour(0), hour(2), label="duplicates").build(history)
+        EnergyAggregate([ENTITY], hour(0), hour(2), label="duplicates").build(history)
 
 
-def test_counter_and_state_history_disagree_on_what_is_unavailable() -> None:
-    padded = [record(" Unavailable ", hour(1)), record("60", hour(2))]
+@pytest.mark.parametrize("kind", ["counter", "state"])
+def test_counter_and_state_history_treat_a_padded_unavailable_state_alike(
+    kind: home_assistant_history.HistoryKind,
+) -> None:
+    history = history_from_payload(
+        [
+            [
+                record("50", hour(0)),
+                record(" Unavailable ", hour(1)),
+                record("60", hour(2)),
+            ]
+        ],
+        kind,
+    )
 
-    counter = history_from_payload([[record("50", hour(0)), *padded]])
-    state = history_from_payload([[record("50", hour(0)), *padded]], "state")
+    samples = history.window(FIRST, kind, hour(0), hour(2))
 
-    # Counters skip only the exact states, so a padded one is an invalid value.
-    assert [
-        sample.problem is None
-        for sample in counter.window(FIRST, "counter", hour(0), hour(2))
-    ] == [True, False, True]
-    # Plain state history tolerates whitespace and case, as before.
-    assert [
-        sample.value for sample in state.window(FIRST, "state", hour(0), hour(2))
-    ] == [50.0, 60.0]
+    assert window_view(samples) == [
+        (hour(0), 50.0, "50", None),
+        (hour(1), None, " Unavailable ", "unavailable"),
+        (hour(2), 60.0, "60", None),
+    ]
 
 
 def test_an_unexpected_error_is_recorded_against_its_entity(

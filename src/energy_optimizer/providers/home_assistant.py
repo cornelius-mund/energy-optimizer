@@ -91,15 +91,16 @@ class HomeAssistantLoadImporter:
                 ),
                 retrieved_at=retrieved_at,
                 latest_observation_at=series.latest_observation_at,
-                quality=series.quality,
+                exclusions=series.exclusions,
             )
             logger.info(
                 "event=provider_fetch_succeeded component=home_assistant "
                 "operation=fetch start_time=%s end_time=%s record_count=%s "
-                "entity_count=%s",
+                "excluded_hour_count=%s entity_count=%s",
                 data.start_time,
                 effective_end_time,
                 len(data.load_kw),
+                len(data.exclusions),
                 len(entities or []),
             )
             return data
@@ -108,16 +109,6 @@ class HomeAssistantLoadImporter:
 
     def _log_failure(self, error: Exception) -> None:
         entity_count = len(self.configuration.household_load_entities or [])
-        if isinstance(error, HomeAssistantError) and any(
-            marker in str(error) for marker in ("unknown", "unavailable")
-        ):
-            logger.warning(
-                "event=provider_data_degraded component=home_assistant "
-                "operation=fetch error_type=%s entity_count=%s error=%s",
-                error.__class__.__name__,
-                entity_count,
-                error,
-            )
         logger.error(
             "event=provider_fetch_failed component=home_assistant "
             "operation=fetch error_type=%s entity_count=%s",

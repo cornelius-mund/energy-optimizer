@@ -6,9 +6,12 @@ An orchestration cycle first collects what every due source needs
 final record from the shared cleaned series (:class:`HomeAssistantHistory`).
 
 This layer only performs cleaning that does not depend on the consuming
-aggregate. Everything that depends on a consumer's own settings, such as counter
-deltas, unit and state-class validation, or physical limits, happens in the pure
-normalization steps that read a consumer's window from the shared series.
+aggregate. It never drops or repairs a sample: an unavailable, non-numeric,
+non-finite or negative state stays in the series as an invalid sample that keeps
+its raw state and its reason. Everything that depends on a consumer's own
+settings, such as counter steps, unit and state-class validation, or physical
+limits, happens in the pure normalization steps that read a consumer's window
+from the shared series and exclude every hour an invalid sample touches.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from urllib.parse import quote
 import httpx
 
 from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.exclusions import ExclusionReason
 from energy_optimizer.providers.http import JsonHttpClient
 from energy_optimizer.providers.normalization import as_utc, parse_aware_timestamp
 
@@ -91,35 +95,37 @@ class HistorySample:
 
     ``unit``, ``state_class``, and ``last_reset`` are carried forward from the
     previous sample for counters, because Home Assistant may omit unchanged
-    attributes. ``problem`` holds a data-integrity error that only matters to a
-    consumer whose window contains the sample; it is raised when that consumer
-    reads the window, so a bad sample outside a window never fails its build.
+    attributes. ``state`` is the raw state exactly as Home Assistant reported it.
+    An invalid sample has no ``value`` and names its reason in ``invalid``; it is
+    kept so a consumer can exclude every hour it touches and show the raw state.
+    A window re-stamps the state in force at its start to that start;
+    ``observed_at`` then keeps the time Home Assistant recorded it.
     """
 
     timestamp: datetime
-    value: float
+    value: float | None
     unit: str | None
     state_class: str | None
     last_reset: datetime | None
-    problem: str | None = None
+    state: str | None = None
+    invalid: ExclusionReason | None = None
+    observed_at: datetime | None = None
+
+    @property
+    def recorded_at(self) -> datetime:
+        """Return when Home Assistant recorded this state."""
+        return self.observed_at or self.timestamp
 
 
 @dataclass(frozen=True, slots=True)
 class HistorySeries:
-    """The cleaned samples of one entity over the imported time range.
-
-    ``skipped`` holds the timestamps of unknown or unavailable samples that were
-    left out of ``samples``. They matter only to :meth:`window`: a state that
-    became unavailable is no longer in force, so an earlier valid state must not
-    be carried across it.
-    """
+    """The cleaned samples of one entity over the imported time range."""
 
     entity_id: str
     kind: HistoryKind
     start_time: datetime
     end_time: datetime
     samples: tuple[HistorySample, ...]
-    skipped: tuple[datetime, ...] = ()
 
     def window(
         self, start_time: datetime, end_time: datetime
@@ -129,21 +135,24 @@ class HistorySeries:
         Home Assistant answers a history request with the state in force at the
         start of the requested period, stamped with that start, followed by
         every state change up to the end. Slicing the shared series the same way
-        makes a consumer's result equal to the result of its own request.
+        makes a consumer's result equal to the result of its own request. An
+        invalid state in force is carried like any other, so a valid state is
+        never carried across an outage.
         """
         first = bisect_left(self.samples, start_time, key=_sample_timestamp)
         last = bisect_right(self.samples, end_time, key=_sample_timestamp)
         inside = self.samples[first:last]
         if first > 0 and (not inside or inside[0].timestamp > start_time):
             in_force = self.samples[first - 1]
-            if not self._became_unavailable(in_force.timestamp, start_time):
-                return (replace(in_force, timestamp=start_time), *inside)
+            return (
+                replace(
+                    in_force,
+                    timestamp=start_time,
+                    observed_at=in_force.recorded_at,
+                ),
+                *inside,
+            )
         return inside
-
-    def _became_unavailable(self, after: datetime, until: datetime) -> bool:
-        """Whether a sample was skipped after ``after`` and at or before ``until``."""
-        index = bisect_right(self.skipped, after)
-        return index < len(self.skipped) and self.skipped[index] <= until
 
 
 def _sample_timestamp(sample: HistorySample) -> datetime:
@@ -256,6 +265,7 @@ class HomeAssistantHistoryImporter:
         series: dict[str, HistorySeries] = {}
         failures: dict[str, Exception] = {}
         statistics = _ImportStatistics()
+        invalid_sample_count = 0
         with self._shared_client() as client:
             http = JsonHttpClient(client)
             for entity_id, (kind, start_time, end_time) in ranges.items():
@@ -263,24 +273,28 @@ class HomeAssistantHistoryImporter:
                     records = self._fetch_records(
                         http, statistics, entity_id, start_time, end_time
                     )
-                    samples, skipped = (
+                    samples = (
                         _clean_counter_records(entity_id, records)
                         if kind == "counter"
                         else _clean_state_records(entity_id, records)
                     )
+                    invalid_sample_count += sum(
+                        1 for sample in samples if sample.invalid is not None
+                    )
                     series[entity_id] = HistorySeries(
-                        entity_id, kind, start_time, end_time, samples, skipped
+                        entity_id, kind, start_time, end_time, samples
                     )
                 except Exception as error:
                     failures[entity_id] = self._record_failure(entity_id, error)
         logger.info(
             "event=home_assistant_history_import component=home_assistant "
             "operation=import status=%s entity_count=%s failed_entity_count=%s "
-            "request_count=%s duration_ms=%.1f",
+            "request_count=%s invalid_sample_count=%s duration_ms=%.1f",
             "partial" if failures else "success",
             len(ranges),
             len(failures),
             statistics.request_count,
+            invalid_sample_count,
             (perf_counter() - started_at) * 1000,
         )
         return HomeAssistantHistory(series, failures)
@@ -473,55 +487,24 @@ def _parse_timestamp(value: Any, entity_id: str) -> datetime:
     )
 
 
-def _warn_skipped(entity_id: str, skipped: list[datetime]) -> None:
-    """Warn once per entity about samples skipped without assigning energy."""
-    if skipped:
-        logger.warning(
-            "Home Assistant entity %s has %d unknown or unavailable history "
-            "samples between %s and %s; skipped them without assigning energy",
-            entity_id,
-            len(skipped),
-            min(skipped).isoformat(),
-            max(skipped).isoformat(),
-        )
-
-
 def _clean_counter_records(
     entity_id: str, records: list[tuple[datetime, dict[str, Any]]]
-) -> tuple[tuple[HistorySample, ...], tuple[datetime, ...]]:
+) -> tuple[HistorySample, ...]:
     """Clean cumulative-counter records into sorted, attribute-complete samples.
 
-    Also returns the timestamps of the skipped unknown and unavailable samples.
+    Every record becomes a sample. A record whose state cannot be used keeps its
+    raw state and reason instead of being dropped or raising.
     """
-    usable: list[tuple[datetime, dict[str, Any]]] = []
-    skipped: list[datetime] = []
-    for timestamp, record in records:
-        state = record.get("state")
-        if isinstance(state, str) and state in _UNAVAILABLE_STATES:
-            skipped.append(timestamp)
-        else:
-            usable.append((timestamp, record))
-    _warn_skipped(entity_id, skipped)
-    if not usable:
-        if skipped:
-            raise HomeAssistantError(
-                f"Home Assistant entity {entity_id} has no usable history after "
-                "skipping unknown or unavailable records"
-            )
+    if not records:
         raise HomeAssistantError(f"Home Assistant returned no history for {entity_id}")
-    usable.sort(key=lambda item: item[0])
-
     samples: list[HistorySample] = []
     previous: HistorySample | None = None
-    for timestamp, record in usable:
-        try:
-            sample = _clean_counter_sample(entity_id, timestamp, record, previous)
-        except HomeAssistantError as error:
-            samples.append(HistorySample(timestamp, 0.0, None, None, None, str(error)))
-            continue
+    for timestamp, record in sorted(records, key=lambda item: item[0]):
+        sample = _clean_counter_sample(entity_id, timestamp, record, previous)
         samples.append(sample)
-        previous = sample
-    return tuple(samples), tuple(sorted(skipped))
+        if sample.invalid != "invalid_attribute":
+            previous = sample
+    return tuple(samples)
 
 
 def _clean_counter_sample(
@@ -531,79 +514,63 @@ def _clean_counter_sample(
     previous: HistorySample | None,
 ) -> HistorySample:
     state = record.get("state")
-    if not isinstance(state, str) or state in _UNAVAILABLE_STATES:
-        raise HomeAssistantError(
-            f"Home Assistant entity {entity_id} contains an unavailable value at "
-            f"{timestamp.isoformat()}"
-        )
-    value = _parse_value(entity_id, timestamp, state)
-    attributes = record.get("attributes")
-    if isinstance(attributes, dict) and isinstance(
-        attributes.get("unit_of_measurement"), str
-    ):
-        unit = attributes["unit_of_measurement"].strip()
-    elif previous is not None:
-        unit = previous.unit
-    else:
-        raise HomeAssistantError(
-            f"Home Assistant entity {entity_id} is missing unit_of_measurement"
-        )
+    value, invalid = _classify_state(state, reject_negative=True)
+    unit = previous.unit if previous is not None else None
     state_class = previous.state_class if previous is not None else None
-    if isinstance(attributes, dict) and "state_class" in attributes:
-        state_class = attributes["state_class"]
-        if not isinstance(state_class, str):
-            raise HomeAssistantError(
-                f"Home Assistant entity {entity_id} has an invalid state_class"
-            )
     last_reset = previous.last_reset if previous is not None else None
-    if isinstance(attributes, dict) and "last_reset" in attributes:
-        raw_reset = attributes["last_reset"]
-        if raw_reset is None:
-            last_reset = None
-        elif isinstance(raw_reset, str):
-            last_reset = _parse_timestamp(raw_reset, entity_id)
-        else:
-            raise HomeAssistantError(
-                f"Home Assistant entity {entity_id} has an invalid last_reset timestamp"
-            )
-    return HistorySample(timestamp, value, unit, state_class, last_reset)
+    attributes = record.get("attributes")
+    attribute_problem = False
+    if isinstance(attributes, dict):
+        raw_unit = attributes.get("unit_of_measurement")
+        if isinstance(raw_unit, str):
+            unit = raw_unit.strip()
+        if "state_class" in attributes:
+            if isinstance(attributes["state_class"], str):
+                state_class = attributes["state_class"]
+            else:
+                attribute_problem = True
+        if "last_reset" in attributes:
+            raw_reset = attributes["last_reset"]
+            if raw_reset is None:
+                last_reset = None
+            elif isinstance(raw_reset, str):
+                try:
+                    last_reset = _parse_timestamp(raw_reset, entity_id)
+                except HomeAssistantError:
+                    attribute_problem = True
+            else:
+                attribute_problem = True
+    if attribute_problem and invalid is None:
+        value, invalid = None, "invalid_attribute"
+    return HistorySample(
+        timestamp,
+        value,
+        unit,
+        state_class,
+        last_reset,
+        _raw_state(state),
+        invalid,
+    )
 
 
 def _clean_state_records(
     entity_id: str, records: list[tuple[datetime, dict[str, Any]]]
-) -> tuple[tuple[HistorySample, ...], tuple[datetime, ...]]:
-    """Clean plain state records into sorted samples with their reported unit.
-
-    Also returns the timestamps of the skipped unknown and unavailable samples.
-    """
-    usable: list[tuple[datetime, dict[str, Any]]] = []
-    skipped: list[datetime] = []
-    for timestamp, record in records:
-        state = record.get("state")
-        if isinstance(state, str) and state.strip().lower() in _UNAVAILABLE_STATES:
-            skipped.append(timestamp)
-        else:
-            usable.append((timestamp, record))
-    _warn_skipped(entity_id, skipped)
-    if not usable:
+) -> tuple[HistorySample, ...]:
+    """Clean plain state records into sorted samples with their reported unit."""
+    if not records:
         raise HomeAssistantError(
             f"Home Assistant returned no usable history for {entity_id}"
         )
-    usable.sort(key=lambda item: item[0])
-
     samples: list[HistorySample] = []
-    for timestamp, record in usable:
+    for timestamp, record in sorted(records, key=lambda item: item[0]):
+        state = record.get("state")
+        value, invalid = _classify_state(state, reject_negative=False)
         attributes = record.get("attributes")
         unit = (
             attributes.get("unit_of_measurement")
             if isinstance(attributes, dict)
             else None
         )
-        try:
-            value = _parse_value(entity_id, timestamp, record.get("state"))
-        except HomeAssistantError as error:
-            samples.append(HistorySample(timestamp, 0.0, None, None, None, str(error)))
-            continue
         samples.append(
             HistorySample(
                 timestamp,
@@ -611,26 +578,35 @@ def _clean_state_records(
                 unit if isinstance(unit, str) else None,
                 None,
                 None,
+                _raw_state(state),
+                invalid,
             )
         )
-    return tuple(samples), tuple(sorted(skipped))
+    return tuple(samples)
 
 
-def _parse_value(entity_id: str, timestamp: datetime, state: Any) -> float:
-    """Convert a state to a finite, non-negative number."""
+def _raw_state(state: Any) -> str | None:
+    """Return the state as reported, always as text."""
+    if state is None or isinstance(state, str):
+        return state
+    return str(state)
+
+
+def _classify_state(
+    state: Any, *, reject_negative: bool
+) -> tuple[float | None, ExclusionReason | None]:
+    """Parse a state into a finite number, or name why it cannot be used."""
+    if isinstance(state, str) and state.strip().lower() in _UNAVAILABLE_STATES:
+        return None, "unavailable"
     try:
         value = float(state)
-    except (TypeError, ValueError) as error:
-        raise HomeAssistantError(
-            f"Home Assistant entity {entity_id} contains a non-numeric value at "
-            f"{timestamp.isoformat()}"
-        ) from error
-    if not math.isfinite(value) or value < 0:
-        raise HomeAssistantError(
-            f"Home Assistant entity {entity_id} contains an invalid value at "
-            f"{timestamp.isoformat()}"
-        )
-    return value
+    except TypeError, ValueError:
+        return None, "non_numeric"
+    if not math.isfinite(value):
+        return None, "not_finite"
+    if reject_negative and value < 0:
+        return None, "negative_value"
+    return value, None
 
 
 __all__ = [

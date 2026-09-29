@@ -6,6 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
+from energy_optimizer.exclusions import ExcludedDataPoint
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
@@ -18,7 +19,6 @@ from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_planning_importer_factory,
-    home_assistant_suspect_negative_hour_readings,
     import_and_build,
 )
 
@@ -103,6 +103,7 @@ def test_fetch_normalizes_import_and_export_entities() -> None:
     assert data.source.entity_id == "grid_flow"
     assert data.retrieved_at == NOW
     assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+    assert data.exclusions == ()
 
 
 def test_household_load_and_grid_flow_share_one_import_of_a_reused_entity() -> None:
@@ -218,20 +219,31 @@ def test_fetch_supports_multiple_signed_entities_per_channel() -> None:
     assert data.export_kw == (1.0, 2.0, 3.0, 4.0)
 
 
-def test_fetch_rejects_negative_combined_import() -> None:
+def test_fetch_excludes_negative_combined_hours_in_both_channels() -> None:
     second_import = "sensor.grid_import_submeter"
     responses = {
+        # Steps of 0.5, 2.5, 0.5, and 2.5 kWh.
         ENTITY_ID: history_payload(
             ENTITY_ID,
             [
                 ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "0.1"),
-                ("2026-01-01T02:00:00+00:00", "0.2"),
-                ("2026-01-01T03:00:00+00:00", "0.3"),
-                ("2026-01-01T04:00:00+00:00", "0.4"),
+                ("2026-01-01T01:00:00+00:00", "0.5"),
+                ("2026-01-01T02:00:00+00:00", "3"),
+                ("2026-01-01T03:00:00+00:00", "3.5"),
+                ("2026-01-01T04:00:00+00:00", "6"),
             ],
         ),
-        second_import: standard_payload(second_import),
+        # Steps of 1 kWh, subtracted.
+        second_import: history_payload(
+            second_import,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "1"),
+                ("2026-01-01T02:00:00+00:00", "2"),
+                ("2026-01-01T03:00:00+00:00", "3"),
+                ("2026-01-01T04:00:00+00:00", "4"),
+            ],
+        ),
         EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
     }
 
@@ -258,30 +270,75 @@ def test_fetch_rejects_negative_combined_import() -> None:
         ],
     )
     try:
-        with pytest.raises(HomeAssistantError, match="negative"):
-            import_and_build(provider, client, START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
+    # The combined hours 0 and 2 would be -0.5 kWh. They are excluded, not
+    # clamped to zero, and the intact export of those hours is excluded with them.
+    assert data.import_kw == (None, 1.5, None, 1.5)
+    assert data.export_kw == (None, 2.0, None, 4.0)
+    assert [item.hour_start for item in data.exclusions] == [
+        START,
+        START + timedelta(hours=2),
+    ]
+    for item in data.exclusions:
+        (cause,) = item.causes
+        assert cause.reason == "combined_negative"
+        assert cause.entity_id is None
+        assert cause.message.startswith(
+            "The combined grid import energy is negative (-0.5 kWh) in the hour "
+            f"starting {item.hour_start.isoformat()}"
+        )
+        assert cause.data_points == (
+            ExcludedDataPoint(item.hour_start, entity_id=ENTITY_ID, step_kwh=0.5),
+            ExcludedDataPoint(item.hour_start, entity_id=second_import, step_kwh=-1.0),
+        )
+        assert cause.data_point_count == 2
+
 
 @pytest.mark.parametrize("flagged_channel", ["import", "export"])
-def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect(
+def test_an_hour_excluded_in_one_channel_is_excluded_in_both(
     flagged_channel: str,
 ) -> None:
-    add_readings, subtract_readings = home_assistant_suspect_negative_hour_readings()
     submeter_id = "sensor.grid_submeter"
     flagged_id = ENTITY_ID if flagged_channel == "import" else EXPORT_ENTITY_ID
     ordinary_id = EXPORT_ENTITY_ID if flagged_channel == "import" else ENTITY_ID
-    ordinary_readings = [
-        ("2026-01-01T00:00:00+00:00", "0"),
-        ("2026-01-01T01:00:00+00:00", "1"),
-        ("2026-01-01T02:00:00+00:00", "2"),
-        ("2026-01-01T03:00:00+00:00", "4"),
-    ]
     responses = {
-        flagged_id: history_payload(flagged_id, add_readings),
-        submeter_id: history_payload(submeter_id, subtract_readings),
-        ordinary_id: history_payload(ordinary_id, ordinary_readings),
+        # The counter falls at 02:00, so the hours of both observations of that
+        # step and of the step after it are excluded. Only 03:00 to 04:00 counts.
+        flagged_id: history_payload(
+            flagged_id,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "1"),
+                ("2026-01-01T02:00:00+00:00", "0.5"),
+                ("2026-01-01T03:00:00+00:00", "3.5"),
+                ("2026-01-01T04:00:00+00:00", "4.5"),
+            ],
+        ),
+        # Subtracting it from the flagged entity would make hour 0 negative if
+        # the flagged entity contributed to it.
+        submeter_id: history_payload(
+            submeter_id,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "0.25"),
+                ("2026-01-01T02:00:00+00:00", "0.5"),
+                ("2026-01-01T03:00:00+00:00", "0.75"),
+                ("2026-01-01T04:00:00+00:00", "1"),
+            ],
+        ),
+        ordinary_id: history_payload(
+            ordinary_id,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "1"),
+                ("2026-01-01T02:00:00+00:00", "2"),
+                ("2026-01-01T03:00:00+00:00", "4"),
+                ("2026-01-01T04:00:00+00:00", "6"),
+            ],
+        ),
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -309,9 +366,7 @@ def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect(
         },
     )
     try:
-        data = import_and_build(
-            provider, client, START, START + timedelta(hours=3), now=NOW
-        )
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
@@ -320,9 +375,113 @@ def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect(
         if flagged_channel == "import"
         else (data.export_kw, data.import_kw)
     )
-    assert flagged == pytest.approx((0.0, 0.5, 1.0))
-    assert ordinary == pytest.approx((1.0, 1.0, 2.0))
-    assert [item.status for item in data.quality] == ["suspect", "valid", "valid"]
+    assert flagged == (None, None, None, 0.75)
+    assert ordinary == (None, None, None, 2.0)
+    assert [
+        (item.hour_start, [cause.reason for cause in item.causes])
+        for item in data.exclusions
+    ] == [
+        (START, ["counter_decrease"]),
+        (START + timedelta(hours=1), ["counter_decrease", "step_after_decrease"]),
+        (START + timedelta(hours=2), ["step_after_decrease"]),
+    ]
+    # Only the entity that was excluded is blamed, never a combined hour.
+    assert {cause.entity_id for item in data.exclusions for cause in item.causes} == {
+        flagged_id
+    }
+    (decrease,) = data.exclusions[0].causes
+    assert decrease.data_points == (
+        ExcludedDataPoint(
+            START + timedelta(hours=2),
+            state="0.5",
+            unit="kWh",
+            previous_timestamp=START + timedelta(hours=1),
+            previous_value=1.0,
+            value=0.5,
+            step_kwh=-0.5,
+            maximum_kwh=100.0,
+        ),
+    )
+
+
+def test_an_unavailable_sample_excludes_its_hour_in_both_channels() -> None:
+    responses = {
+        ENTITY_ID: history_payload(
+            ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "1"),
+                ("2026-01-01T01:30:00+00:00", "unavailable"),
+                ("2026-01-01T02:00:00+00:00", "3"),
+                ("2026-01-01T03:00:00+00:00", "6"),
+                ("2026-01-01T04:00:00+00:00", "10"),
+            ],
+        ),
+        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
+    }
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json=responses[request.url.params["filter_entity_id"]]
+            )
+        )
+    )
+    try:
+        data = import_and_build(provider, client, START, END, now=NOW)
+    finally:
+        client.close()
+
+    # The counter is unknown from 01:30 until it is read again at 02:00, so the
+    # 3 kWh of the gap is never attributed to a single hour.
+    assert data.import_kw == (1.0, None, 3.0, 4.0)
+    assert data.export_kw == (1.0, None, 3.0, 4.0)
+    (excluded,) = data.exclusions
+    assert excluded.hour_start == START + timedelta(hours=1)
+    (cause,) = excluded.causes
+    assert (cause.reason, cause.entity_id) == ("unavailable", ENTITY_ID)
+    assert cause.data_points == (
+        ExcludedDataPoint(START + timedelta(hours=1, minutes=30), "unavailable", "kWh"),
+    )
+    assert cause.data_point_count == 1
+
+
+def test_a_trailing_outage_excludes_every_hour_to_the_end_and_ages_the_data() -> None:
+    responses = {
+        ENTITY_ID: history_payload(
+            ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "0"),
+                ("2026-01-01T01:00:00+00:00", "1"),
+                ("2026-01-01T02:00:00+00:00", "3"),
+                ("2026-01-01T02:30:00+00:00", "unavailable"),
+            ],
+        ),
+        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
+    }
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json=responses[request.url.params["filter_entity_id"]]
+            )
+        )
+    )
+    try:
+        data = import_and_build(provider, client, START, END, now=NOW)
+    finally:
+        client.close()
+
+    assert data.import_kw == (1.0, 2.0, None, None)
+    assert data.export_kw == (1.0, 2.0, None, None)
+    assert [item.hour_start for item in data.exclusions] == [
+        START + timedelta(hours=2),
+        START + timedelta(hours=3),
+    ]
+    assert all(
+        [cause.reason for cause in item.causes] == ["unavailable"]
+        for item in data.exclusions
+    )
+    # The freshest usable observation is the last valid one, not the outage.
+    assert data.latest_observation_at == START + timedelta(hours=2)
 
 
 def test_fetch_aligns_channels_to_the_latest_available_start() -> None:
@@ -427,8 +586,13 @@ def test_fetch_rejects_instantaneous_power_channel() -> None:
         client.close()
 
 
-def test_grid_flow_tolerates_total_counter_dips_without_last_reset() -> None:
-    """Regression test for issue #179 on the grid import and export legs."""
+def test_grid_flow_excludes_the_hour_of_a_total_counter_dip_without_last_reset() -> (
+    None
+):
+    """Regression test for issues #179 and #183 on both grid legs.
+
+    A dip of 1 Wh is a decrease like any other: nothing is tolerated or repaired.
+    """
     responses = {
         ENTITY_ID: history_payload(
             ENTITY_ID,
@@ -483,6 +647,19 @@ def test_grid_flow_tolerates_total_counter_dips_without_last_reset() -> None:
     finally:
         client.close()
 
-    assert data.import_kw == pytest.approx((1.0,), abs=1e-9)
-    assert data.export_kw == pytest.approx((0.5,), abs=1e-9)
+    assert data.import_kw == (None,)
+    assert data.export_kw == (None,)
+    (excluded,) = data.exclusions
+    assert excluded.hour_start == START
+    # Each channel explains the hour: the dip, then the step directly after it.
+    assert [(cause.entity_id, cause.reason) for cause in excluded.causes] == [
+        (ENTITY_ID, "counter_decrease"),
+        (ENTITY_ID, "step_after_decrease"),
+        (EXPORT_ENTITY_ID, "counter_decrease"),
+        (EXPORT_ENTITY_ID, "step_after_decrease"),
+    ]
+    dip = excluded.causes[0].data_points[0]
+    assert dip.timestamp == START + timedelta(minutes=30, seconds=12)
+    assert (dip.previous_value, dip.value) == (100.5, 100.499)
+    assert dip.step_kwh == pytest.approx(-0.001, abs=1e-9)
     assert data.quality == ()

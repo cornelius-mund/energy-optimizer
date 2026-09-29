@@ -203,7 +203,6 @@ def import_and_aggregate(
     history_lookback_seconds: float = 0,
     *,
     label: str,
-    allow_negative: bool = False,
 ) -> HomeAssistantEnergySeries:
     """Import exactly what one signed energy expression needs and build it."""
     aggregate = EnergyAggregate(
@@ -212,7 +211,6 @@ def import_and_aggregate(
         end_time,
         history_lookback_seconds,
         label=label,
-        allow_negative=allow_negative,
     )
     history = HomeAssistantHistoryImporter(configuration, client).import_history(
         aggregate.needs()
@@ -284,9 +282,8 @@ def home_assistant_jittery_total_readings(
     Hour ``dip_hour`` additionally holds three samples in which the counter dips
     by ``dip_kwh`` and recovers at the next sample. The default 1 Wh dip is the
     jitter observed on a real installation (3280.294 to 3280.293 kWh without
-    ``last_reset``). Every other step is non-decreasing, so each hour's energy
-    is exactly 1 kWh and a recovered dip that is counted twice shows up as
-    1.001 kWh.
+    ``last_reset``). Every other step is non-decreasing, so each hour without
+    the dip has exactly 1 kWh; the hours of the dip are excluded.
     """
     readings: Readings = []
     for hour in range(hours + 1):
@@ -299,58 +296,3 @@ def home_assistant_jittery_total_readings(
                 (f"2026-01-01T{hour:02d}:30:24+00:00", f"{peak:.3f}"),
             ]
     return readings
-
-
-def _three_hour_readings(first_hour: Readings, later_hours: list[str]) -> Readings:
-    """Join custom first-hour readings with one reading at each later hour mark."""
-    return [
-        *first_hour,
-        *(
-            (f"2026-01-01T{hour:02d}:00:00+00:00", value)
-            for hour, value in enumerate(later_hours, start=1)
-        ),
-    ]
-
-
-def home_assistant_suspect_negative_hour_readings(
-    *, add_side_valid: bool = False
-) -> tuple[Readings, Readings]:
-    """Return add and subtract counter readings for a suspect negative hour.
-
-    The readings span the three hours from 2026-01-01T00:00Z and reproduce the
-    live failure of a combined hour that is negative while its contributors
-    are already flagged suspect. In hour 0 the add counter resets and its
-    first post-reset delta of 150 kWh exceeds the default 100 kWh physical
-    limit, so it contributes zero with reason ``physical_limit_exceeded``. The
-    subtract counter resets too (reason ``counter_reset``) but its later
-    post-reset growth of 56.9 kWh is accepted, which makes the combined hour
-    -56.9 kWh. With ``add_side_valid`` the add counter only ticks up by 0.5
-    kWh, leaving the subtract counter as the sole suspect contributor. Hours 1
-    and 2 are ordinary and net to 0.5 and 1.0 kWh.
-    """
-    if add_side_valid:
-        add_readings = _three_hour_readings(
-            [
-                ("2026-01-01T00:00:00+00:00", "500"),
-                ("2026-01-01T00:40:00+00:00", "500.5"),
-            ],
-            ["500.5", "501.5", "503.5"],
-        )
-    else:
-        add_readings = _three_hour_readings(
-            [
-                ("2026-01-01T00:00:00+00:00", "500"),
-                ("2026-01-01T00:20:00+00:00", "0.5"),
-                ("2026-01-01T00:40:00+00:00", "150.5"),
-            ],
-            ["150.5", "151.5", "153.5"],
-        )
-    subtract_readings = _three_hour_readings(
-        [
-            ("2026-01-01T00:00:00+00:00", "1000"),
-            ("2026-01-01T00:20:00+00:00", "0.1"),
-            ("2026-01-01T00:40:00+00:00", "57"),
-        ],
-        ["57", "57.5", "58.5"],
-    )
-    return add_readings, subtract_readings

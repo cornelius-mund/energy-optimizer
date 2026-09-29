@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 
 from energy_optimizer.config import (
@@ -12,13 +12,24 @@ from energy_optimizer.config import (
     HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
 )
+from energy_optimizer.exclusions import (
+    ExcludedDataPoint,
+    ExclusionCause,
+    ExclusionReason,
+    HourExclusion,
+    cap_data_points,
+    merge_exclusions,
+)
 from energy_optimizer.providers.home_assistant_energy import (
     EnergyAggregate,
     HomeAssistantEnergySeries,
+    gap_causes,
+    overlapping_hours,
 )
 from energy_optimizer.providers.home_assistant_history import (
     HistoryNeed,
     HistoryPlan,
+    HistorySample,
     HomeAssistantError,
     HomeAssistantHistory,
 )
@@ -30,7 +41,6 @@ from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
     EfficiencyComponentStatus,
-    IntervalQuality,
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import (
@@ -39,6 +49,21 @@ from energy_optimizer.providers.normalization import (
 )
 
 logger = logging.getLogger(__name__)
+_HOUR = timedelta(hours=1)
+
+
+@dataclass(frozen=True)
+class _StateOfCharge:
+    """Hourly state of charge read from Home Assistant, with its excluded hours.
+
+    ``values[i]`` is the last state recorded before ``start_time + (i + 1)``
+    hours; it is ``None`` when that state is invalid.
+    """
+
+    start_time: datetime
+    values: tuple[float | None, ...]
+    latest_observation_at: datetime
+    exclusions: tuple[HourExclusion, ...]
 
 
 class HomeAssistantBatteryEfficiencyImporter:
@@ -91,14 +116,12 @@ class HomeAssistantBatteryEfficiencyImporter:
                     start,
                     end,
                     label=f"battery efficiency {name} input",
-                    allow_negative=True,
                 ),
                 EnergyAggregate(
                     leg.energy_out,
                     start,
                     end,
                     label=f"battery efficiency {name} output",
-                    allow_negative=True,
                 ),
             )
             for name, leg in legs.items()
@@ -128,7 +151,7 @@ class HomeAssistantBatteryEfficiencyImporter:
             soc = _state_of_charge_series(
                 history, configuration.state_of_charge, start, soc_end
             )
-            aligned_start, aligned_end, aligned, quality = self._align_history(
+            aligned_start, aligned_end, aligned, exclusions = self._align_history(
                 series, soc, end
             )
             retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
@@ -138,7 +161,7 @@ class HomeAssistantBatteryEfficiencyImporter:
                     for pair in series.values()
                     for item in pair
                 ]
-                + [soc[2]]
+                + [soc.latest_observation_at]
             )
             return BatteryEfficiencyHistoryData(
                 schema_version="1",
@@ -158,7 +181,7 @@ class HomeAssistantBatteryEfficiencyImporter:
                 ),
                 retrieved_at=retrieved_at,
                 latest_observation_at=min(latest_observation_at, aligned_end),
-                quality=quality,
+                exclusions=exclusions,
             )
 
         return HistoryPlan(needs=needs, build=build)
@@ -181,23 +204,26 @@ class HomeAssistantBatteryEfficiencyImporter:
     def _align_history(
         self,
         series: dict[str, tuple[HomeAssistantEnergySeries, HomeAssistantEnergySeries]],
-        soc: tuple[datetime, tuple[float, ...], datetime],
+        soc: _StateOfCharge,
         requested_end: datetime,
     ) -> tuple[
         datetime,
         datetime,
-        dict[str, tuple[float, ...]],
-        tuple[IntervalQuality, ...],
+        dict[str, tuple[float | None, ...]],
+        tuple[HourExclusion, ...],
     ]:
-        starts = [item.start_time for pair in series.values() for item in pair] + [
-            soc[0]
-        ]
+        """Align all legs and the state of charge and exclude hours across them.
+
+        An hour excluded in any energy leg or in the state of charge is excluded
+        in every component, so the efficiency ratios never mix valid and invalid
+        legs. A state-of-charge value next to an excluded hour is dropped too.
+        """
+        energy = [value for pair in series.values() for value in pair]
+        starts = [item.start_time for item in energy] + [soc.start_time]
         ends = [
-            item.start_time + timedelta(hours=len(item.values_kw))
-            for pair in series.values()
-            for item in pair
+            item.start_time + timedelta(hours=len(item.values_kw)) for item in energy
         ]
-        ends.append(soc[0] + timedelta(hours=len(soc[1]) - 1))
+        ends.append(soc.start_time + timedelta(hours=len(soc.values) - 1))
         start = max(starts)
         end = min(min(ends), requested_end)
         count = int((end - start).total_seconds() // 3600)
@@ -206,33 +232,34 @@ class HomeAssistantBatteryEfficiencyImporter:
                 "battery efficiency histories have no aligned intervals"
             )
 
-        def values(item: HomeAssistantEnergySeries) -> tuple[float, ...]:
+        sources: list[HomeAssistantEnergySeries | _StateOfCharge] = [*energy, soc]
+        exclusions = merge_exclusions(
+            *(
+                [item for item in source.exclusions if start <= item.hour_start < end]
+                for source in sources
+            )
+        )
+        excluded = {int((item.hour_start - start) / _HOUR) for item in exclusions}
+
+        def values(item: HomeAssistantEnergySeries) -> tuple[float | None, ...]:
             offset = int((start - item.start_time).total_seconds() // 3600)
             result = item.values_kw[offset : offset + count]
             if len(result) != count:
                 raise HomeAssistantError(
                     "battery efficiency energy histories are misaligned"
                 )
-            return result
+            return tuple(
+                None if index in excluded else value
+                for index, value in enumerate(result)
+            )
 
-        # A reset, spike, or recovery transition on any leg already contributes
-        # zero energy for its hour (see home_assistant_energy.py); it must not
-        # block persistence of the surrounding, unaffected hours. Instead, the
-        # suspect status is carried onto the calculated result so orchestration
-        # can flag the run without losing incremental progress.
-        quality = [IntervalQuality()] * count
-        for item in [value for pair in series.values() for value in pair]:
-            offset = int((start - item.start_time).total_seconds() // 3600)
-            for index, interval in enumerate(item.quality[offset : offset + count]):
-                if interval.status == "suspect":
-                    quality[index] = interval
-
-        soc_offset = int((start - soc[0]).total_seconds() // 3600)
-        soc_values = soc[1][soc_offset : soc_offset + count + 1]
+        soc_offset = int((start - soc.start_time).total_seconds() // 3600)
+        soc_values = soc.values[soc_offset : soc_offset + count + 1]
         if len(soc_values) != count + 1:
             raise HomeAssistantError(
                 "battery efficiency state-of-charge history is misaligned"
             )
+        adjacent = _soc_indexes_of(excluded)
         return (
             start,
             start + timedelta(hours=count),
@@ -243,9 +270,12 @@ class HomeAssistantBatteryEfficiencyImporter:
                 "charge_out": values(series["inverter_charge"][1]),
                 "discharge_in": values(series["inverter_discharge"][0]),
                 "discharge_out": values(series["inverter_discharge"][1]),
-                "soc": tuple(soc_values),
+                "soc": tuple(
+                    None if index in adjacent else value
+                    for index, value in enumerate(soc_values)
+                ),
             },
-            tuple(quality),
+            exclusions,
         )
 
     @staticmethod
@@ -262,72 +292,103 @@ def _state_of_charge_series(
     mapping: HomeAssistantBatteryEntityConfiguration,
     start_time: datetime,
     end_time: datetime,
-) -> tuple[datetime, tuple[float, ...], datetime]:
-    """Forward-fill the state-of-charge samples of a window into hourly values."""
-    records: dict[datetime, float] = {}
-    for sample in history.window(mapping.entity_id, "state", start_time, end_time):
-        if sample.problem is not None:
-            raise HomeAssistantError(sample.problem)
-        value = sample.value
-        if mapping.unit in {"Wh", "kWh"}:
-            if sample.unit not in {"Wh", "kWh"}:
-                raise HomeAssistantError(
-                    f"state-of-charge entity {mapping.entity_id} has an "
-                    "incompatible unit"
-                )
-            if sample.unit == "Wh":
-                value /= 1000
-        records[sample.timestamp] = value
+) -> _StateOfCharge:
+    """Forward-fill the state-of-charge samples of a window into hourly values.
+
+    A sample that is unavailable, not a number, or outside 0 to 100 percent is
+    not carried forward: the hours in which it is in force are excluded and the
+    values at their boundaries are ``None``.
+    """
+    entity_id = mapping.entity_id
+    records: dict[datetime, HistorySample] = {}
+    for sample in history.window(entity_id, "state", start_time, end_time):
+        records[sample.timestamp] = sample
     if not records:
         raise HomeAssistantError(
-            "Home Assistant returned no usable state-of-charge history for "
-            f"{mapping.entity_id}"
+            f"Home Assistant returned no usable state-of-charge history for {entity_id}"
         )
     effective_start = align_to_next_hour(min(records))
     hours = int((end_time - effective_start).total_seconds() // 3600)
     if hours <= 0:
         raise HomeAssistantError(
             "Home Assistant returned no complete state-of-charge history for "
-            f"{mapping.entity_id}"
+            f"{entity_id}"
         )
+    ordered = sorted(records.items())
+
+    causes_by_hour: dict[int, list[ExclusionCause]] = {}
+    gap: list[tuple[ExclusionReason, ExcludedDataPoint]] = []
+    gap_start = effective_start
+    last_valid_at: datetime | None = None
+
+    def flush(valid_after_at: datetime | None, span_end: datetime) -> None:
+        causes = gap_causes(entity_id, gap, last_valid_at, valid_after_at)
+        for hour in overlapping_hours(effective_start, gap_start, span_end, hours):
+            causes_by_hour.setdefault(hour, []).extend(causes)
+
+    for timestamp, sample in ordered:
+        if timestamp > end_time:
+            break
+        reason = _state_of_charge_reason(sample)
+        if reason is not None:
+            if not gap:
+                gap_start = timestamp
+            gap.append(
+                (
+                    reason,
+                    ExcludedDataPoint(sample.recorded_at, sample.state, sample.unit),
+                )
+            )
+            continue
+        if gap:
+            flush(sample.recorded_at, timestamp)
+            gap = []
+        last_valid_at = sample.recorded_at
+    if gap:
+        flush(None, end_time)
+
     # Home Assistant's history API only returns a row when an entity's
     # state changes, so an hour with no row does not mean the value is
     # missing; it means the value has not changed since the previous
     # observation. Carry the most recent known value forward for each
     # hour instead of requiring a fresh row in every bucket.
-    sorted_records = sorted(records.items())
-    values: list[float] = []
-    last_value: float | None = None
+    values: list[float | None] = []
+    last_sample: HistorySample | None = None
     next_index = 0
     for index in range(hours):
         boundary = effective_start + timedelta(hours=index + 1)
-        while (
-            next_index < len(sorted_records)
-            and sorted_records[next_index][0] < boundary
-        ):
-            last_value = sorted_records[next_index][1]
+        while next_index < len(ordered) and ordered[next_index][0] < boundary:
+            last_sample = ordered[next_index][1]
             next_index += 1
-        if last_value is None:  # pragma: no cover - effective_start guarantees this
+        if last_sample is None:  # pragma: no cover - effective_start guarantees this
             raise HomeAssistantError(
                 "Home Assistant returned no state-of-charge observation "
-                f"before {boundary.isoformat()} for {mapping.entity_id}"
+                f"before {boundary.isoformat()} for {entity_id}"
             )
-        values.append(last_value)
-    latest = max(records)
-    return effective_start, tuple(values), latest
+        values.append(
+            None if _state_of_charge_reason(last_sample) else last_sample.value
+        )
+    valid_times = [
+        sample.timestamp for _, sample in ordered if not _state_of_charge_reason(sample)
+    ]
+    return _StateOfCharge(
+        start_time=effective_start,
+        values=tuple(values),
+        latest_observation_at=max(valid_times or [max(records)]),
+        exclusions=tuple(
+            HourExclusion(effective_start + hour * _HOUR, cap_data_points(causes))
+            for hour, causes in sorted(causes_by_hour.items())
+        ),
+    )
 
 
-def _full_quality(data: BatteryEfficiencyHistoryData) -> tuple[IntervalQuality, ...]:
-    """Return one quality entry per hour, defaulting missing entries to valid.
-
-    Test fixtures and older data may omit ``quality`` entirely (the field
-    defaults to an empty tuple); treat that as "no known anomalies" so
-    concatenation stays aligned with the energy arrays.
-    """
-    count = len(data.battery_energy_in_kwh)
-    if len(data.quality) == count:
-        return data.quality
-    return (IntervalQuality(),) * count
+def _state_of_charge_reason(sample: HistorySample) -> ExclusionReason | None:
+    """Return why a state-of-charge sample cannot be used, or ``None``."""
+    if sample.invalid is not None:
+        return sample.invalid
+    if sample.value is None or not 0 <= sample.value <= 100:
+        return "soc_out_of_range"
+    return None
 
 
 def merge_battery_efficiency_history(
@@ -379,8 +440,23 @@ def merge_battery_efficiency_history(
         state_of_charge_percent=(
             existing.state_of_charge_percent[:-1] + incoming.state_of_charge_percent
         ),
-        quality=_full_quality(existing) + _full_quality(incoming),
+        exclusions=merge_exclusions(existing.exclusions, incoming.exclusions),
     )
+    # A full import drops the state of charge around every excluded hour. The
+    # incoming series cannot know that the last persisted hour is excluded, and
+    # that hour brackets the boundary value the two series share.
+    seam = len(existing.battery_energy_in_kwh)
+    if any(
+        item.hour_start == merged.start_time + (seam - 1) * _HOUR
+        for item in existing.exclusions
+    ):
+        merged = replace(
+            merged,
+            state_of_charge_percent=tuple(
+                None if index == seam else value
+                for index, value in enumerate(merged.state_of_charge_percent)
+            ),
+        )
     return bound_battery_efficiency_history(merged)
 
 
@@ -393,10 +469,10 @@ def bound_battery_efficiency_history(
     if count <= max_hours:
         return data
     offset = count - max_hours
-    quality = _full_quality(data)
+    new_start = data.start_time + timedelta(hours=offset)
     return replace(
         data,
-        start_time=data.start_time + timedelta(hours=offset),
+        start_time=new_start,
         battery_energy_in_kwh=data.battery_energy_in_kwh[offset:],
         battery_energy_out_kwh=data.battery_energy_out_kwh[offset:],
         inverter_charge_energy_in_kwh=data.inverter_charge_energy_in_kwh[offset:],
@@ -408,7 +484,9 @@ def bound_battery_efficiency_history(
             data.inverter_discharge_energy_out_kwh[offset:]
         ),
         state_of_charge_percent=data.state_of_charge_percent[offset:],
-        quality=quality[offset:],
+        exclusions=tuple(
+            item for item in data.exclusions if item.hour_start >= new_start
+        ),
     )
 
 
@@ -449,7 +527,10 @@ def calculate_battery_efficiency(
             component_statuses=_all_component_statuses("invalid"),
         )
     for name, values in arrays.items():
-        if any(not math.isfinite(value) or value < 0 for value in values):
+        if any(
+            value is not None and (not math.isfinite(value) or value < 0)
+            for value in values
+        ):
             return _result(
                 history,
                 retrieved_at,
@@ -458,7 +539,7 @@ def calculate_battery_efficiency(
                 component_statuses=_all_component_statuses("invalid"),
             )
     if any(
-        not math.isfinite(value) or value < 0
+        value is not None and (not math.isfinite(value) or value < 0)
         for value in history.state_of_charge_percent
     ):
         return _result(
@@ -472,26 +553,33 @@ def calculate_battery_efficiency(
     full_indices: list[int] = []
     was_below_full = True
     for index, value in enumerate(history.state_of_charge_percent):
+        if value is None:
+            continue
         if value < configuration.full_soc_threshold_percent:
             was_below_full = True
         elif was_below_full:
             full_indices.append(index)
             was_below_full = False
+    # An excluded hour has no energy, so a cycle that contains one is incomplete
+    # and is not used.
     cycles = [
         (left, right)
         for left, right in zip(full_indices, full_indices[1:])
         if right > left
+        and all(
+            value is not None for value in history.battery_energy_in_kwh[left:right]
+        )
     ]
     battery_in = sum(
-        sum(history.battery_energy_in_kwh[left:right]) for left, right in cycles
+        _total(history.battery_energy_in_kwh[left:right]) for left, right in cycles
     )
     battery_out = sum(
-        sum(history.battery_energy_out_kwh[left:right]) for left, right in cycles
+        _total(history.battery_energy_out_kwh[left:right]) for left, right in cycles
     )
-    charge_in = sum(history.inverter_charge_energy_in_kwh)
-    charge_out = sum(history.inverter_charge_energy_out_kwh)
-    discharge_in = sum(history.inverter_discharge_energy_in_kwh)
-    discharge_out = sum(history.inverter_discharge_energy_out_kwh)
+    charge_in = _total(history.inverter_charge_energy_in_kwh)
+    charge_out = _total(history.inverter_charge_energy_out_kwh)
+    discharge_in = _total(history.inverter_discharge_energy_in_kwh)
+    discharge_out = _total(history.inverter_discharge_energy_out_kwh)
     invalid = False
     battery_efficiency: float | None = None
     charge_efficiency: float | None = None
@@ -665,14 +753,16 @@ def _check_state_of_charge_balance(
     for index in range(count):
         energy_in = history.battery_energy_in_kwh[index]
         energy_out = history.battery_energy_out_kwh[index]
-        soc_delta = (
-            (
-                history.state_of_charge_percent[index + 1]
-                - history.state_of_charge_percent[index]
-            )
-            / 100
-            * capacity_kwh
-        )
+        soc_before = history.state_of_charge_percent[index]
+        soc_after = history.state_of_charge_percent[index + 1]
+        if (
+            energy_in is None
+            or energy_out is None
+            or soc_before is None
+            or soc_after is None
+        ):
+            continue
+        soc_delta = (soc_after - soc_before) / 100 * capacity_kwh
         deviation: float | None = None
         if energy_in > 0 and energy_out == 0:
             # Stored energy can never exceed what was delivered while charging.
@@ -689,6 +779,20 @@ def _check_state_of_charge_balance(
             f"battery energy for {violations} of {count} interval(s); maximum "
             f"deviation {max_deviation:.3f} kWh exceeds the configured tolerance"
         )
+
+
+def _soc_indexes_of(excluded_hours: set[int]) -> set[int]:
+    """Return the state-of-charge values that bracket the excluded hours.
+
+    Hour ``i`` lies between ``state_of_charge_percent[i]`` and
+    ``state_of_charge_percent[i + 1]``, so an excluded hour drops both.
+    """
+    return excluded_hours | {index + 1 for index in excluded_hours}
+
+
+def _total(values: tuple[float | None, ...]) -> float:
+    """Sum the hours that have a value; excluded hours contribute nothing."""
+    return sum(value for value in values if value is not None)
 
 
 def _ratio(numerator: float, denominator: float, label: str) -> float:
@@ -724,7 +828,7 @@ def _select_history(
             inverter_discharge_energy_in_kwh=(),
             inverter_discharge_energy_out_kwh=(),
             state_of_charge_percent=(),
-            quality=(),
+            exclusions=(),
         )
     return replace(
         history,
@@ -740,7 +844,11 @@ def _select_history(
             offset:
         ],
         state_of_charge_percent=history.state_of_charge_percent[offset:],
-        quality=_full_quality(history)[offset:],
+        exclusions=tuple(
+            item
+            for item in history.exclusions
+            if item.hour_start >= history.start_time + timedelta(hours=offset)
+        ),
     )
 
 
@@ -813,7 +921,6 @@ def _result(
         retrieved_at=retrieved_at,
         latest_observation_at=history.latest_observation_at,
         warnings=tuple(dict.fromkeys(warnings)),
-        quality=history.quality,
         defaulted_components=defaulted_components,
         component_statuses=resolved_statuses,
     )

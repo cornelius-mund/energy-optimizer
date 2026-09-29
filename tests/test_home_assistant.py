@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
+from energy_optimizer.exclusions import ExcludedDataPoint, HourExclusion
 from energy_optimizer.providers.home_assistant import (
     HomeAssistantError,
     HomeAssistantLoadImporter,
@@ -15,7 +16,6 @@ from home_assistant_fixtures import (
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_planning_importer_factory,
-    home_assistant_suspect_negative_hour_readings,
     import_and_build,
 )
 
@@ -57,6 +57,36 @@ def history_payload(
 importer = home_assistant_planning_importer_factory(
     HomeAssistantLoadImporter, configuration
 )
+
+
+def entity_settings(
+    entity_id: str = ENTITY_ID,
+    operation: str = "add",
+    state_class: str = "total_increasing",
+    unit: str = "kWh",
+    **settings: Any,
+) -> dict[str, Any]:
+    return {
+        "entity_id": entity_id,
+        "state_class": state_class,
+        "unit": unit,
+        "operation": operation,
+        **settings,
+    }
+
+
+def at(timestamp: str) -> datetime:
+    return datetime.fromisoformat(f"2026-01-01T{timestamp}+00:00")
+
+
+def excluded_hours(exclusions: tuple[HourExclusion, ...]) -> dict[int, list[str]]:
+    """Map each excluded hour's offset from START to its reasons, in cause order."""
+    return {
+        int((item.hour_start - START) / timedelta(hours=1)): [
+            cause.reason for cause in item.causes
+        ]
+        for item in exclusions
+    }
 
 
 def test_fetch_converts_total_increasing_energy_to_hourly_load(
@@ -282,10 +312,11 @@ def test_long_history_fetches_every_entity_for_each_chunk() -> None:
     assert data.load_kw[-1] == 0.75
 
 
-def test_counter_reset_at_chunk_boundary_is_normalized_after_chunks_are_combined() -> (
+def test_counter_decrease_at_chunk_boundary_is_excluded_after_chunks_are_combined() -> (
     None
 ):
     requested_end = START + timedelta(days=8)
+    boundary = START + timedelta(days=7)
 
     def handler(request: httpx.Request) -> httpx.Response:
         chunk_start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
@@ -310,11 +341,33 @@ def test_counter_reset_at_chunk_boundary_is_normalized_after_chunks_are_combined
     finally:
         client.close()
 
-    assert data.load_kw[7 * 24 - 2] == 7
-    assert data.load_kw[7 * 24 - 1] == 0
-    assert data.load_kw[7 * 24] == 1
-    assert max(data.load_kw) == 7
-    assert data.quality[7 * 24 - 1].reason == "counter_reset"
+    # The boundary observation is answered by both chunks and counts once, from
+    # the later chunk, so the counter falls from 107 to 0 instead of rising to 200.
+    first_excluded = 7 * 24 - 2
+    assert len(data.load_kw) == 8 * 24
+    assert data.load_kw[:first_excluded] == (0.0,) * first_excluded
+    assert data.load_kw[first_excluded : first_excluded + 3] == (None, None, None)
+    assert data.load_kw[first_excluded + 3 : -1] == (0.0,) * 22
+    assert data.load_kw[-1] == 1.0
+    assert excluded_hours(data.exclusions) == {
+        first_excluded: ["counter_decrease"],
+        first_excluded + 1: ["counter_decrease", "step_after_decrease"],
+        first_excluded + 2: ["step_after_decrease"],
+    }
+    decrease = data.exclusions[0].causes[0]
+    assert decrease.entity_id == ENTITY_ID
+    assert decrease.data_points == (
+        ExcludedDataPoint(
+            boundary,
+            state="0",
+            unit="kWh",
+            previous_timestamp=boundary - timedelta(hours=1),
+            previous_value=107.0,
+            value=0.0,
+            step_kwh=-107.0,
+            maximum_kwh=100.0,
+        ),
+    )
 
 
 def test_failed_history_chunk_does_not_return_partial_long_range_data() -> None:
@@ -536,45 +589,148 @@ def test_fetch_rejects_instantaneous_power_entities() -> None:
         client.close()
 
 
-def test_fetch_rejects_incompatible_energy_unit() -> None:
+@pytest.mark.parametrize(
+    ("reported_unit", "reported_state_class", "reason"),
+    [
+        ("Wh", "total_increasing", "unit_mismatch"),
+        ("kWh", "total", "state_class_mismatch"),
+    ],
+)
+def test_settings_other_than_configured_exclude_every_hour(
+    reported_unit: str, reported_state_class: str, reason: str
+) -> None:
     def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=history_payload(unit="Wh"))
+        return httpx.Response(
+            200,
+            json=history_payload(unit=reported_unit, state_class=reported_state_class),
+        )
 
     provider, client = importer(httpx.MockTransport(handler))
     try:
-        with pytest.raises(HomeAssistantError, match="incompatible"):
+        data = import_and_build(provider, client, START, END, now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (None,) * 4
+    assert excluded_hours(data.exclusions) == {hour: [reason] for hour in range(4)}
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id == ENTITY_ID
+    assert cause.data_point_count == 5
+    assert [(point.timestamp, point.state) for point in cause.data_points] == [
+        (START + timedelta(hours=hour), state)
+        for hour, state in enumerate(["0", "1", "3", "6", "10"])
+    ]
+    assert {point.unit for point in cause.data_points} == {reported_unit}
+
+
+def test_unit_change_mid_history_excludes_hours_until_the_configured_unit_returns() -> (
+    None
+):
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T01:00:00+00:00", "1"),
+        ("2026-01-01T01:30:00+00:00", "1500"),
+        ("2026-01-01T02:30:00+00:00", "2"),
+        ("2026-01-01T03:30:00+00:00", "3"),
+    ]
+    payload = history_payload(readings=readings)
+    payload[0][2]["attributes"]["unit_of_measurement"] = "Wh"
+
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    )
+    try:
+        data = import_and_build(provider, client, START, END, now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == (1.0, None, None, 1.0)
+    assert excluded_hours(data.exclusions) == {
+        1: ["unit_mismatch"],
+        2: ["unit_mismatch"],
+    }
+    assert data.exclusions[0].causes[0].data_points == (
+        ExcludedDataPoint(at("01:30:00"), state="1500", unit="Wh"),
+    )
+
+
+def test_missing_unit_excludes_the_hour_of_the_counter_return() -> None:
+    payload = history_payload(
+        readings=[
+            ("2026-01-01T00:00:00+00:00", "0"),
+            ("2026-01-01T01:00:00+00:00", "1"),
+            ("2026-01-01T02:00:00+00:00", "2"),
+        ]
+    )
+    del payload[0][0]["attributes"]
+
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    )
+    try:
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
+    finally:
+        client.close()
+
+    assert data.load_kw == (None, 1.0)
+    assert excluded_hours(data.exclusions) == {0: ["unit_missing"]}
+    assert data.exclusions[0].causes[0].data_points == (
+        ExcludedDataPoint(START, state="0", unit=None),
+    )
+
+
+@pytest.mark.parametrize("payload", [[], [[]]])
+def test_fetch_reports_empty_history(payload: Any) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    provider, client = importer(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(
+            HomeAssistantError, match="returned no history for sensor.household_energy"
+        ):
             import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
 
 @pytest.mark.parametrize(
-    ("payload", "message"),
+    ("state", "reason"),
     [
-        ([], "returned no history for sensor.household_energy"),
-        (
-            [[{"state": "unavailable", "last_changed": "2026-01-01T00:00:00+00:00"}]],
-            "unavailable",
-        ),
-        (
-            [[{"state": "not-a-number", "last_changed": "2026-01-01T00:00:00+00:00"}]],
-            "non-numeric",
-        ),
+        ("unavailable", "unavailable"),
+        ("unknown", "unavailable"),
+        ("  UnAvailable ", "unavailable"),
+        ("not-a-number", "non_numeric"),
+        ("", "non_numeric"),
+        ("nan", "not_finite"),
+        ("inf", "not_finite"),
+        ("-1", "negative_value"),
     ],
 )
-def test_fetch_reports_invalid_history(payload: Any, message: str) -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload)
+def test_history_without_a_valid_sample_excludes_every_hour(
+    state: str, reason: str
+) -> None:
+    payload = [[{"state": state, "last_changed": "2026-01-01T00:00:00+00:00"}]]
 
-    provider, client = importer(httpx.MockTransport(handler))
+    provider, client = importer(
+        httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    )
     try:
-        with pytest.raises(HomeAssistantError, match=message):
-            import_and_build(provider, client, START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
+    assert data.load_kw == (None,) * 4
+    assert excluded_hours(data.exclusions) == {hour: [reason] for hour in range(4)}
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id == ENTITY_ID
+    # The raw state is kept exactly as Home Assistant reported it.
+    assert cause.data_points == (ExcludedDataPoint(START, state=state, unit=None),)
 
-def test_total_increasing_reset_mid_hour_starts_a_new_baseline() -> None:
+
+def test_total_increasing_decrease_mid_hour_excludes_the_hour() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:20:00+00:00", "10.5"),
@@ -597,17 +753,50 @@ def test_total_increasing_reset_mid_hour_starts_a_new_baseline() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (1.5,)
+    # A reset cannot be told apart from a glitch: neither the decrease nor the
+    # step that follows it is trusted, and nothing is estimated for the hour.
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {
+        0: ["counter_decrease", "step_after_decrease"]
+    }
+    decrease, after_decrease = data.exclusions[0].causes
+    assert decrease.entity_id == ENTITY_ID
+    assert decrease.data_points == (
+        ExcludedDataPoint(
+            at("00:40:00"),
+            state="0.25",
+            unit="kWh",
+            previous_timestamp=at("00:20:00"),
+            previous_value=10.5,
+            value=0.25,
+            step_kwh=-10.25,
+            maximum_kwh=100.0,
+        ),
+    )
+    assert after_decrease.data_points == (
+        ExcludedDataPoint(
+            at("01:00:00"),
+            state="1.25",
+            unit="kWh",
+            previous_timestamp=at("00:40:00"),
+            previous_value=0.25,
+            value=1.25,
+            step_kwh=1.0,
+            maximum_kwh=100.0,
+        ),
+    )
 
 
-def test_total_increasing_skips_unavailable_observations_without_fabricating_energy(
+def test_total_increasing_unavailable_observation_excludes_hours_until_it_returns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:30:00+00:00", "unavailable"),
         ("2026-01-01T01:30:00+00:00", "11.5"),
         ("2026-01-01T02:30:00+00:00", "12.5"),
+        ("2026-01-01T03:30:00+00:00", "13.5"),
     ]
     provider, client = importer(
         httpx.MockTransport(
@@ -622,22 +811,40 @@ def test_total_increasing_skips_unavailable_observations_without_fabricating_ene
         )
     )
     try:
-        data = import_and_build(
-            provider, client, START, START + timedelta(hours=2), now=NOW
-        )
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
-    assert data.load_kw == (0.0, 1.5)
-    assert "skipped them without assigning energy" in caplog.text
-    assert ENTITY_ID in caplog.text
+    # Hour 1 holds the observation at which the counter returned, so it is
+    # excluded too; no energy is fabricated for the outage.
+    assert data.load_kw == (None, None, 1.0, 1.0)
+    assert excluded_hours(data.exclusions) == {0: ["unavailable"], 1: ["unavailable"]}
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id == ENTITY_ID
+    assert cause.data_points == (
+        ExcludedDataPoint(at("00:30:00"), state="unavailable", unit="kWh"),
+    )
+    assert ENTITY_ID in cause.message
+    assert "2026-01-01T01:30:00+00:00" in cause.message
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        message.startswith("event=home_assistant_history_import")
+        and "invalid_sample_count=1" in message
+        for message in messages
+    )
+    assert any(
+        message.startswith("event=home_assistant_history_aggregate")
+        and "excluded_hour_count=2" in message
+        for message in messages
+    )
 
 
-def test_total_increasing_skips_unknown_observations() -> None:
+def test_total_increasing_unknown_observation_excludes_only_its_return_hour() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:30:00+00:00", "unknown"),
         ("2026-01-01T01:00:00+00:00", "11.5"),
+        ("2026-01-01T02:00:00+00:00", "12.5"),
     ]
     provider, client = importer(
         httpx.MockTransport(
@@ -646,15 +853,22 @@ def test_total_increasing_skips_unknown_observations() -> None:
     )
     try:
         data = import_and_build(
-            provider, client, START, START + timedelta(hours=1), now=NOW
+            provider, client, START, START + timedelta(hours=2), now=NOW
         )
     finally:
         client.close()
 
-    assert data.load_kw == (1.5,)
+    # An observation exactly on the boundary belongs to the earlier hour.
+    assert data.load_kw == (None, 1.0)
+    assert excluded_hours(data.exclusions) == {0: ["unavailable"]}
+    assert data.exclusions[0].causes[0].data_points == (
+        ExcludedDataPoint(at("00:30:00"), state="unknown", unit="kWh"),
+    )
 
 
-def test_skips_unavailable_samples_outside_requested_window() -> None:
+def test_unavailable_sample_after_the_last_valid_one_excludes_hours_to_the_end() -> (
+    None
+):
     readings = [
         ("2025-12-31T23:30:00+00:00", "unavailable"),
         ("2026-01-01T00:00:00+00:00", "10"),
@@ -673,14 +887,53 @@ def test_skips_unavailable_samples_outside_requested_window() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (1.0, 0.0)
+    # The sample before the window is not part of it; the trailing one runs to
+    # the end of the imported period because no valid observation follows it.
+    assert data.load_kw == (1.0, None)
+    assert excluded_hours(data.exclusions) == {1: ["unavailable"]}
+    assert data.exclusions[0].causes[0].data_points == (
+        ExcludedDataPoint(at("01:30:00"), state="unavailable", unit="kWh"),
+    )
+
+
+def test_unavailable_state_in_force_at_the_window_start_excludes_the_first_hour() -> (
+    None
+):
+    readings = [
+        ("2025-12-31T23:30:00+00:00", "unavailable"),
+        ("2026-01-01T01:00:00+00:00", "11"),
+        ("2026-01-01T02:00:00+00:00", "12"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        )
+    )
+    try:
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
+    finally:
+        client.close()
+
+    assert data.load_kw == (None, 1.0)
+    assert excluded_hours(data.exclusions) == {0: ["unavailable"]}
+    # The data point names when Home Assistant recorded the state, not the
+    # window start it is carried to.
+    assert data.exclusions[0].causes[0].data_points == (
+        ExcludedDataPoint(
+            datetime(2025, 12, 31, 23, 30, tzinfo=timezone.utc),
+            state="unavailable",
+            unit="kWh",
+        ),
+    )
 
 
 def test_total_increasing_does_not_interpolate_between_observations() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:30:00+00:00", "10.5"),
-        ("2026-01-01T01:30:00+00:00", "1.5"),
+        ("2026-01-01T01:30:00+00:00", "11.5"),
     ]
     provider, client = importer(
         httpx.MockTransport(
@@ -709,10 +962,40 @@ def test_total_increasing_does_not_interpolate_between_observations() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (0.5, 0.0)
+    assert data.load_kw == (0.5, 1.0)
+    assert data.exclusions == ()
 
 
-def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
+def test_total_increasing_decrease_across_hours_excludes_both_observation_hours() -> (
+    None
+):
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:30:00+00:00", "10.5"),
+        ("2026-01-01T01:30:00+00:00", "1.5"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        )
+    )
+    try:
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
+    finally:
+        client.close()
+
+    # Hour 0 is excluded as well: the decrease casts doubt on the counter value
+    # at 00:30, which is where the valid step of that hour ended.
+    assert data.load_kw == (None, None)
+    assert excluded_hours(data.exclusions) == {
+        0: ["counter_decrease"],
+        1: ["counter_decrease"],
+    }
+
+
+def test_total_decrease_with_a_changed_last_reset_is_still_excluded() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:20:00+00:00", "10.5"),
@@ -747,10 +1030,60 @@ def test_total_accepts_a_decrease_only_when_last_reset_changes() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == (1.5,)
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {
+        0: ["last_reset_changed", "counter_decrease", "step_after_decrease"]
+    }
 
 
-def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> None:
+def test_total_last_reset_change_excludes_the_hours_of_both_observations() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "10"),
+        ("2026-01-01T00:30:00+00:00", "10.5"),
+        ("2026-01-01T01:30:00+00:00", "11.5"),
+        ("2026-01-01T02:30:00+00:00", "12.5"),
+    ]
+    reset_time = "2026-01-01T01:30:00+00:00"
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json=history_payload(
+                    readings=readings,
+                    state_class="total",
+                    last_resets=[None, None, reset_time, reset_time],
+                ),
+            )
+        ),
+        household_load_entities=[entity_settings(state_class="total")],
+    )
+    try:
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=3), now=NOW
+        )
+    finally:
+        client.close()
+
+    assert data.load_kw == (None, None, 1.0)
+    assert excluded_hours(data.exclusions) == {
+        0: ["last_reset_changed"],
+        1: ["last_reset_changed"],
+    }
+    assert data.exclusions[0].causes[0].data_points == (
+        ExcludedDataPoint(
+            at("01:30:00"),
+            state="11.5",
+            unit="kWh",
+            previous_timestamp=at("00:30:00"),
+            previous_value=10.5,
+            value=11.5,
+            step_kwh=1.0,
+            maximum_kwh=100.0,
+        ),
+    )
+
+
+def test_total_increasing_drop_to_zero_and_jump_back_lists_every_cause() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "700"),
         ("2026-01-01T00:30:00+00:00", "0"),
@@ -772,18 +1105,24 @@ def test_total_increasing_reset_recovery_does_not_add_counter_magnitude() -> Non
     finally:
         client.close()
 
-    assert data.load_kw == (0.25,)
-    assert data.quality[0].status == "suspect"
-    assert data.quality[0].reason == "reset_recovery"
-    assert data.quality[0].entity_id == ENTITY_ID
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {
+        0: ["counter_decrease", "step_after_decrease", "step_above_maximum"]
+    }
+    assert {cause.entity_id for cause in data.exclusions[0].causes} == {ENTITY_ID}
+    jump = data.exclusions[0].causes[2].data_points[0]
+    assert (jump.step_kwh, jump.maximum_kwh) == (700.25, 100.0)
 
 
-def test_total_increasing_transient_spike_is_retracted_when_counter_recovers() -> None:
+def test_total_increasing_transient_spike_excludes_the_hours_of_its_rise_and_fall() -> (
+    None
+):
     readings = [
         ("2026-01-01T00:00:00+00:00", "0.0182"),
-        ("2026-01-01T00:10:38+00:00", "57.2166"),
-        ("2026-01-01T00:11:30+00:00", "0.0182"),
-        ("2026-01-01T00:30:00+00:00", "0.5"),
+        ("2026-01-01T00:50:00+00:00", "57.2166"),
+        ("2026-01-01T01:05:00+00:00", "0.0182"),
+        ("2026-01-01T01:30:00+00:00", "0.5"),
+        ("2026-01-01T02:30:00+00:00", "1.5"),
     ]
     provider, client = importer(
         httpx.MockTransport(
@@ -792,18 +1131,21 @@ def test_total_increasing_transient_spike_is_retracted_when_counter_recovers() -
     )
     try:
         data = import_and_build(
-            provider, client, START, START + timedelta(hours=1), now=NOW
+            provider, client, START, START + timedelta(hours=3), now=NOW
         )
     finally:
         client.close()
 
-    assert data.load_kw == pytest.approx((0.4818,))
-    assert data.quality[0].status == "suspect"
-    assert data.quality[0].reason == "transient_counter_spike"
-    assert data.quality[0].entity_id == ENTITY_ID
+    # The spike stays below the maximum, so it is recognized only by the fall
+    # that follows it, and that fall excludes the hour the spike was recorded in.
+    assert data.load_kw == (None, None, 1.0)
+    assert excluded_hours(data.exclusions) == {
+        0: ["counter_decrease"],
+        1: ["counter_decrease", "step_after_decrease"],
+    }
 
 
-def test_transient_spike_does_not_make_signed_aggregate_negative() -> None:
+def test_spike_in_a_subtracted_entity_excludes_the_combined_hour() -> None:
     responses = {
         ENTITY_ID: history_payload(
             readings=[
@@ -829,18 +1171,8 @@ def test_transient_spike_does_not_make_signed_aggregate_negative() -> None:
     provider, client = importer(
         httpx.MockTransport(handler),
         household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
+            entity_settings(ENTITY_ID, "add"),
+            entity_settings(SECOND_ENTITY_ID, "subtract"),
         ],
     )
     try:
@@ -850,11 +1182,13 @@ def test_transient_spike_does_not_make_signed_aggregate_negative() -> None:
     finally:
         client.close()
 
-    assert data.load_kw == pytest.approx((1.0,))
-    assert data.quality[0].reason == "transient_counter_spike"
+    # The valid entity's 1 kWh is not returned as if it were the combined load.
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {0: ["counter_decrease"]}
+    assert data.exclusions[0].causes[0].entity_id == SECOND_ENTITY_ID
 
 
-def test_physical_limit_rejects_over_limit_delta_and_marks_interval_suspect() -> None:
+def test_step_above_maximum_excludes_the_hour_of_its_later_observation() -> None:
     readings = [
         ("2026-01-01T00:00:00+00:00", "0"),
         ("2026-01-01T00:30:00+00:00", "5"),
@@ -881,9 +1215,77 @@ def test_physical_limit_rejects_over_limit_delta_and_marks_interval_suspect() ->
     finally:
         client.close()
 
-    assert data.load_kw == (5.0,)
-    assert data.quality[0].status == "suspect"
-    assert data.quality[0].reason == "physical_limit_exceeded"
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {0: ["step_above_maximum"]}
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id == ENTITY_ID
+    assert cause.data_points == (
+        ExcludedDataPoint(
+            at("00:40:00"),
+            state="20",
+            unit="kWh",
+            previous_timestamp=at("00:30:00"),
+            previous_value=5.0,
+            value=20.0,
+            step_kwh=15.0,
+            maximum_kwh=10.0,
+        ),
+    )
+
+
+def test_step_above_maximum_leaves_the_hour_of_its_earlier_observation_valid() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T00:30:00+00:00", "5"),
+        ("2026-01-01T01:30:00+00:00", "20"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        ),
+        household_load_entities=[
+            entity_settings(maximum_interval_energy_kwh=10),
+        ],
+    )
+    try:
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=2), now=NOW
+        )
+    finally:
+        client.close()
+
+    assert data.load_kw == (5.0, None)
+    assert excluded_hours(data.exclusions) == {1: ["step_above_maximum"]}
+
+
+def test_hour_above_maximum_is_excluded_although_no_single_step_exceeds_it() -> None:
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "0"),
+        ("2026-01-01T00:20:00+00:00", "6"),
+        ("2026-01-01T00:40:00+00:00", "12"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(200, json=history_payload(readings=readings))
+        ),
+        household_load_entities=[
+            entity_settings(maximum_interval_energy_kwh=10),
+        ],
+    )
+    try:
+        data = import_and_build(
+            provider, client, START, START + timedelta(hours=1), now=NOW
+        )
+    finally:
+        client.close()
+
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {0: ["hour_above_maximum"]}
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id == ENTITY_ID
+    assert cause.data_points == (
+        ExcludedDataPoint(START, step_kwh=12.0, maximum_kwh=10.0),
+    )
 
 
 def test_physical_limit_accepts_exact_boundary() -> None:
@@ -913,16 +1315,17 @@ def test_physical_limit_accepts_exact_boundary() -> None:
         client.close()
 
     assert data.load_kw == (10.0,)
-    assert data.quality == ()
+    assert data.exclusions == ()
 
 
-def test_total_decrease_without_last_reset_change_marks_the_hour_suspect() -> None:
-    """A large unmarked decrease never fails the fetch; it flags the interval."""
+def test_total_decrease_without_last_reset_change_excludes_the_hours_it_touches() -> (
+    None
+):
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
-        ("2026-01-01T00:20:00+00:00", "10.5"),
-        ("2026-01-01T00:40:00+00:00", "0.25"),
-        ("2026-01-01T00:50:00+00:00", "0.75"),
+        ("2026-01-01T00:30:00+00:00", "10.5"),
+        ("2026-01-01T01:30:00+00:00", "0.25"),
+        ("2026-01-01T02:30:00+00:00", "0.75"),
     ]
     provider, client = importer(
         httpx.MockTransport(
@@ -935,31 +1338,25 @@ def test_total_decrease_without_last_reset_change_marks_the_hour_suspect() -> No
                 ),
             )
         ),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        household_load_entities=[entity_settings(state_class="total")],
     )
     try:
         data = import_and_build(
-            provider, client, START, START + timedelta(hours=1), now=NOW
+            provider, client, START, START + timedelta(hours=3), now=NOW
         )
     finally:
         client.close()
 
-    # The decreasing step contributes nothing; growth from the new level counts.
-    assert data.load_kw == pytest.approx((1.0,), abs=1e-9)
-    assert data.quality[0].status == "suspect"
-    assert data.quality[0].reason == "counter_reset"
-    assert data.quality[0].entity_id == ENTITY_ID
+    assert data.load_kw == (None, None, None)
+    assert excluded_hours(data.exclusions) == {
+        0: ["counter_decrease"],
+        1: ["counter_decrease", "step_after_decrease"],
+        2: ["step_after_decrease"],
+    }
 
 
-def test_household_load_tolerates_a_total_counter_dip_without_last_reset() -> None:
-    """Regression test for issue #179 on the household-load leg."""
+def test_household_load_excludes_the_hour_of_a_one_watt_hour_counter_dip() -> None:
+    """A dip of any size is a decrease; there is no jitter tolerance."""
     readings = [
         ("2026-01-01T00:00:00+00:00", "3280.000"),
         ("2026-01-01T00:20:00+00:00", "3280.294"),
@@ -973,14 +1370,7 @@ def test_household_load_tolerates_a_total_counter_dip_without_last_reset() -> No
                 200, json=history_payload(readings=readings, state_class="total")
             )
         ),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        household_load_entities=[entity_settings(state_class="total")],
     )
     try:
         data = import_and_build(
@@ -989,11 +1379,17 @@ def test_household_load_tolerates_a_total_counter_dip_without_last_reset() -> No
     finally:
         client.close()
 
-    assert data.load_kw == pytest.approx((0.6,), abs=1e-9)
-    assert data.quality == ()
+    assert data.load_kw == (None,)
+    assert excluded_hours(data.exclusions) == {
+        0: ["counter_decrease", "step_after_decrease"]
+    }
+    dip = data.exclusions[0].causes[0].data_points[0]
+    assert dip.timestamp == at("00:20:12")
+    assert dip.state == "3280.293"
+    assert dip.step_kwh == pytest.approx(-0.001, abs=1e-9)
 
 
-def test_fetch_rejects_negative_combined_load() -> None:
+def test_fetch_excludes_negative_combined_load_hours() -> None:
     responses = {
         ENTITY_ID: history_payload(),
         SECOND_ENTITY_ID: history_payload(
@@ -1031,17 +1427,48 @@ def test_fetch_rejects_negative_combined_load() -> None:
         ],
     )
     try:
-        with pytest.raises(HomeAssistantError, match="negative"):
-            import_and_build(provider, client, START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
 
+    # Hour 1 nets to exactly zero and is a valid value; hours 2 and 3 are negative.
+    assert data.load_kw == (1.0, 0.0, None, None)
+    assert excluded_hours(data.exclusions) == {
+        2: ["combined_negative"],
+        3: ["combined_negative"],
+    }
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id is None
+    assert [(point.entity_id, point.step_kwh) for point in cause.data_points] == [
+        (ENTITY_ID, -3.0),
+        (SECOND_ENTITY_ID, 2.0),
+    ]
 
-def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect() -> None:
-    add_readings, subtract_readings = home_assistant_suspect_negative_hour_readings()
+
+def test_fetch_excludes_the_reset_hour_of_both_counters_and_keeps_other_hours() -> None:
     responses = {
-        ENTITY_ID: history_payload(ENTITY_ID, add_readings),
-        SECOND_ENTITY_ID: history_payload(SECOND_ENTITY_ID, subtract_readings),
+        ENTITY_ID: history_payload(
+            ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "500"),
+                ("2026-01-01T00:20:00+00:00", "0.5"),
+                ("2026-01-01T00:40:00+00:00", "150.5"),
+                ("2026-01-01T01:00:00+00:00", "150.5"),
+                ("2026-01-01T02:00:00+00:00", "151.5"),
+                ("2026-01-01T03:00:00+00:00", "153.5"),
+            ],
+        ),
+        SECOND_ENTITY_ID: history_payload(
+            SECOND_ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "1000"),
+                ("2026-01-01T00:20:00+00:00", "0.1"),
+                ("2026-01-01T00:40:00+00:00", "57"),
+                ("2026-01-01T01:00:00+00:00", "57"),
+                ("2026-01-01T02:00:00+00:00", "57.5"),
+                ("2026-01-01T03:00:00+00:00", "58.5"),
+            ],
+        ),
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1052,18 +1479,8 @@ def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect() -> No
     provider, client = importer(
         httpx.MockTransport(handler),
         household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
+            entity_settings(ENTITY_ID, "add"),
+            entity_settings(SECOND_ENTITY_ID, "subtract"),
         ],
     )
     try:
@@ -1074,8 +1491,16 @@ def test_fetch_completes_when_a_negative_hour_is_already_flagged_suspect() -> No
         client.close()
 
     assert data.start_time == START
-    assert data.load_kw == pytest.approx((0.0, 0.5, 1.0))
-    assert [item.status for item in data.quality] == ["suspect", "valid", "valid"]
+    assert data.load_kw == pytest.approx((None, 0.5, 1.0))
+    assert len(data.exclusions) == 1
+    assert data.exclusions[0].hour_start == START
+    assert [(cause.entity_id, cause.reason) for cause in data.exclusions[0].causes] == [
+        (ENTITY_ID, "counter_decrease"),
+        (ENTITY_ID, "step_after_decrease"),
+        (ENTITY_ID, "step_above_maximum"),
+        (SECOND_ENTITY_ID, "counter_decrease"),
+        (SECOND_ENTITY_ID, "step_after_decrease"),
+    ]
 
 
 def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
@@ -1114,7 +1539,34 @@ def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
     assert calls == 2
 
 
-def test_fetch_does_not_return_partial_data_when_entity_has_no_usable_history() -> None:
+def test_fetch_does_not_return_partial_data_when_entity_has_no_history() -> None:
+    responses = {
+        ENTITY_ID: history_payload(),
+        SECOND_ENTITY_ID: [],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    provider, client = importer(
+        httpx.MockTransport(handler),
+        household_load_entities=[
+            entity_settings(ENTITY_ID, "add"),
+            entity_settings(SECOND_ENTITY_ID, "add"),
+        ],
+    )
+    try:
+        with pytest.raises(
+            HomeAssistantError, match="returned no history for sensor.ev_energy"
+        ):
+            import_and_build(provider, client, START, END, now=NOW)
+    finally:
+        client.close()
+
+
+def test_fetch_excludes_every_hour_when_an_entity_has_only_invalid_samples() -> None:
     responses = {
         ENTITY_ID: history_payload(),
         SECOND_ENTITY_ID: history_payload(
@@ -1134,25 +1586,27 @@ def test_fetch_does_not_return_partial_data_when_entity_has_no_usable_history() 
     provider, client = importer(
         httpx.MockTransport(handler),
         household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
+            entity_settings(ENTITY_ID, "add"),
+            entity_settings(SECOND_ENTITY_ID, "add"),
         ],
     )
     try:
-        with pytest.raises(HomeAssistantError, match="no usable history"):
-            import_and_build(provider, client, START, END, now=NOW)
+        data = import_and_build(provider, client, START, END, now=NOW)
     finally:
         client.close()
+
+    # The valid entity's hours are not returned as if they were the total load.
+    assert data.load_kw == (None,) * 4
+    assert excluded_hours(data.exclusions) == {
+        hour: ["unavailable"] for hour in range(4)
+    }
+    cause = data.exclusions[0].causes[0]
+    assert cause.entity_id == SECOND_ENTITY_ID
+    assert cause.data_point_count == 2
+    assert [(point.timestamp, point.state) for point in cause.data_points] == [
+        (at("00:00:00"), "unavailable"),
+        (at("01:00:00"), "unknown"),
+    ]
 
 
 def test_fetch_reports_http_failures(caplog: pytest.LogCaptureFixture) -> None:
