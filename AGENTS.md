@@ -16,10 +16,21 @@
   GitHub, the virtual environment, or the browser; a plain run only warns.
 - Set `GH_TOKEN_FILE` to a file that holds a valid GitHub token. `scripts/preflight`
   and `scripts/start-issue` then use it instead of any ambient `GH_TOKEN`.
-- Use `scripts/verify` to run the lint, format, type, OpenAPI, and unit steps
-  exactly as CI does. Add `--e2e` for the browser suite, or name steps
-  (`scripts/verify lint types`). It runs every requested step and summarizes
-  all failures, so one run shows every problem.
+- Use `scripts/verify` to run the lint, format, type, OpenAPI, unit, and
+  file-linter steps exactly as CI does. Add `--e2e` for the browser suite, or
+  name steps (`scripts/verify lint types`). It runs every requested step and
+  summarizes all failures, so one run shows every problem.
+- The file-linter steps are `workflows` (`actionlint`), `dockerfile`
+  (`hadolint`), `yaml` (`yamllint --strict`), and `shell` (`shellcheck` and
+  `shfmt -d`). Each fails on any finding. Their configuration is `.yamllint`,
+  `.hadolint.yaml`, and `.editorconfig`. Every disabled rule, ignored rule, or
+  excluded file needs a comment stating why, including inline
+  `# shellcheck disable=` and `# hadolint ignore=` directives. Shell scripts
+  live in `scripts/`.
+- The file linters are pinned in the `dev` extra of `pyproject.toml`, locked in
+  `uv.lock`, and installed by `scripts/bootstrap` into `.venv`. Do not rely on
+  system-wide copies; `scripts/verify` runs the pinned ones. `scripts/preflight`
+  names any that is missing.
 - Use `uv run python` instead of assuming a system `python` command exists.
 - Use `uv run pytest` for tests.
 - Use `uv run ruff check .` for linting.
@@ -334,6 +345,9 @@ The workflow should:
   `uv run pytest -m e2e`, reporting logs on failure.
 - Invoke every verification step through `scripts/verify <step>` so a local run
   and a CI run execute identical commands.
+- Run the file linters in a separate job that installs the pinned tools with
+  `uv sync --locked --extra dev` and calls `scripts/verify workflows`,
+  `scripts/verify dockerfile`, `scripts/verify yaml`, and `scripts/verify shell`.
 - Run the browser end-to-end job independently of the unit-test job, and cache
   the Playwright browser download keyed by the Playwright version.
 - Use `permissions: contents: read` unless a job requires more.

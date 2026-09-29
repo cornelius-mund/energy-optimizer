@@ -1,0 +1,7 @@
+# hadolint configuration for scripts/verify dockerfile. No rules are ignored:
+# every finding must be fixed or must be justified with an inline
+# "# hadolint ignore=<rule>" comment that states why.
+
+# Fail on every severity, including info. This is hadolint's default, spelled
+# out so the "any finding fails" contract does not depend on that default.
+failure-threshold: info

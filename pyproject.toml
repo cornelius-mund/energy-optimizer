@@ -25,6 +25,15 @@ dev = [
     "pytest-playwright>=0.7,<1.0",
     "ruff>=0.9,<1.0",
     "types-PyYAML>=6.0,<7.0",
+    # File linters run by scripts/verify, all pinned to exact versions. Except
+    # for yamllint, which is pure Python, each package provides the upstream
+    # release binary and verifies its SHA-256 against a table shipped in the
+    # package. The first three version components are the upstream tool version.
+    "actionlint-py==1.7.12.25",
+    "hadolint-py==2.15.1.2",
+    "shellcheck-py==0.11.0.1",
+    "shfmt-py==3.12.0.2",
+    "yamllint==1.37.1",
 ]
 
 [tool.setuptools.packages.find]

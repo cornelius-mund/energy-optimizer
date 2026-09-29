@@ -1,5 +1,6 @@
 """Tests for the production Docker image configuration."""
 
+import json
 import re
 from pathlib import Path
 
@@ -18,10 +19,12 @@ def test_healthcheck_runs_every_ten_seconds_with_existing_probe_settings() -> No
     assert match.group("options") == (
         "--interval=10s --timeout=3s --start-period=5s --retries=3"
     )
-    assert match.group("command") == (
-        'python -c "import urllib.request; '
-        "urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)\""
-    )
+    assert json.loads(match.group("command")) == [
+        "python",
+        "-c",
+        "import urllib.request; "
+        "urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)",
+    ]
 
 
 def test_dockerfile_copies_the_dashboard_assets() -> None:
@@ -29,3 +32,10 @@ def test_dockerfile_copies_the_dashboard_assets() -> None:
 
     assert "COPY frontend ./frontend" in dockerfile
     assert "ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend" in dockerfile
+
+
+def test_container_runs_as_the_numeric_application_user() -> None:
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "useradd --create-home --uid 10001 appuser" in dockerfile
+    assert re.search(r"^USER 10001$", dockerfile, re.MULTILINE)
