@@ -107,6 +107,7 @@
     unavailable: "unavailable",
     invalid: "invalid",
   }[status] || "status unknown");
+  const efficiencyFallbackStatuses = new Set(["defaulted", "unavailable", "invalid"]);
   const chartDefinitions = {
     power: {
       element: document.querySelector("#power-chart"),
@@ -283,19 +284,18 @@
           numericValue.className = "efficiency-value";
           numericValue.value = String(value);
           numericValue.textContent = value.toFixed(4);
-           valueCell.append(numericValue, ` ${unitForSeries(item)}`);
-           if (item.calculation_status) {
-             const status = document.createElement("span");
-             status.className = `efficiency-status efficiency-status-${item.calculation_status}`;
-             status.textContent = ` (${efficiencyStatusLabel(item.calculation_status)})`;
-             valueCell.append(status);
-           }
-           if (item.is_default) {
-            const marker = document.createElement("span");
-            marker.className = "efficiency-default-marker";
-            marker.textContent = " (default)";
-            marker.title = "Fallback ratio used because this component was not calculable.";
-            valueCell.append(marker);
+          valueCell.append(numericValue, ` ${unitForSeries(item)}`);
+          // calculation_status is the only source for the row annotation. The API's
+          // legacy default flag describes the same fallback state, so rendering it
+          // as well would show one condition twice.
+          if (item.calculation_status) {
+            const status = document.createElement("span");
+            status.className = `efficiency-status efficiency-status-${item.calculation_status}`;
+            status.textContent = ` (${efficiencyStatusLabel(item.calculation_status)})`;
+            if (efficiencyFallbackStatuses.has(item.calculation_status)) {
+              status.title = "Fallback ratio used because this component was not calculable.";
+            }
+            valueCell.append(status);
           }
           efficiencySummary.append(label, valueCell);
       });

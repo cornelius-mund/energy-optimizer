@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Perform the mandatory "Before Changing Application Files" workflow for one
+# issue and print the Work Start Record.
+#
+# Usage: scripts/start-issue [--dry-run] <issue-number> <short-description>
+#
+# The script confirms the issue exists, moves it to "In Progress" on its project
+# board, verifies the working tree, fast-forwards local devel from origin,
+# enforces that local devel equals origin/devel, and creates
+# feature/issue-<number>-<short-description> from devel.
+#
+# --dry-run performs the read-only checks and reports what would change,
+# without moving the issue, fetching, switching branches, or creating anything.
+#
+# Authentication: gh and git use GH_TOKEN. Set GH_TOKEN_FILE to a file holding
+# a token to override a stale ambient GH_TOKEN. The token needs repo and
+# project scopes and is never printed.
+set -euo pipefail
+
+dry_run=0
+if [ "${1:-}" = "--dry-run" ]; then
+    dry_run=1
+    shift
+fi
+if [ "$#" -ne 2 ]; then
+    printf 'Usage: %s [--dry-run] <issue-number> <short-description>\n' "$0" >&2
+    exit 2
+fi
+issue_number=$1
+description=$2
+
+if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    printf 'Issue number must be numeric: %s\n' "$issue_number" >&2
+    exit 2
+fi
+if ! [[ "$description" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+    printf 'Description must be lowercase words joined by hyphens: %s\n' "$description" >&2
+    exit 2
+fi
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root"
+branch="feature/issue-${issue_number}-${description}"
+
+if [ -n "${GH_TOKEN_FILE:-}" ]; then
+    GH_TOKEN=$(tr -d '\r\n' <"$GH_TOKEN_FILE")
+    export GH_TOKEN
+fi
+
+# Every network operation is bounded so a stalled connection fails visibly.
+network_timeout="${START_ISSUE_TIMEOUT_SECONDS:-60}"
+bounded() { timeout "$network_timeout" "$@"; }
+
+# Pass the token to git through the environment, not through command-line
+# arguments that other processes could read.
+git_authenticated() {
+    local header
+    header="Authorization: Basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+    GIT_CONFIG_COUNT=2 \
+        GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
+        GIT_CONFIG_KEY_1=http.extraheader GIT_CONFIG_VALUE_1="$header" \
+        bounded git "$@"
+}
+
+if ! bounded gh api user --jq .login >/dev/null 2>&1; then
+    printf 'GitHub authentication failed: the API rejected the credentials.\n' >&2
+    printf 'Set GH_TOKEN_FILE to a valid token file and retry.\n' >&2
+    exit 1
+fi
+
+# Fields are joined with the ASCII unit separator, which cannot occur in a title
+# and, unlike whitespace, keeps empty fields when split.
+separator=$'\x1f'
+IFS="$separator" read -r issue_title issue_state project_title issue_status < <(
+    bounded gh issue view "$issue_number" --json title,state,projectItems --jq \
+        '[.title, .state, (.projectItems[0].title // ""), (.projectItems[0].status.name // "")] | join("\u001f")'
+) || true
+if [ "$issue_state" != "OPEN" ]; then
+    printf 'Issue #%s is %s, not OPEN.\n' "$issue_number" "$issue_state" >&2
+    exit 1
+fi
+printf 'Issue #%s: %s\n' "$issue_number" "$issue_title"
+
+# Resolve the project board, item, and Status option by name rather than by
+# stored identifiers, so the script keeps working when the board is recreated.
+if [ -z "$project_title" ]; then
+    printf 'Issue #%s is not on a project board; cannot set In Progress.\n' "$issue_number" >&2
+    exit 1
+fi
+owner=$(bounded gh repo view --json owner --jq .owner.login)
+IFS="$separator" read -r project_number project_id < <(
+    bounded gh project list --owner "$owner" --format json --jq \
+        ".projects[] | select(.title==\"$project_title\") | [(.number|tostring), .id] | join(\"\\u001f\")"
+) || true
+field_id=$(bounded gh project field-list "$project_number" --owner "$owner" --format json \
+    --jq '.fields[] | select(.name=="Status") | .id')
+option_id=$(bounded gh project field-list "$project_number" --owner "$owner" --format json \
+    --jq '.fields[] | select(.name=="Status") | .options[] | select(.name=="In Progress") | .id')
+item_id=$(bounded gh project item-list "$project_number" --owner "$owner" --limit 500 --format json \
+    --jq ".items[] | select(.content.number==$issue_number) | .id")
+if [ -z "$project_number" ] || [ -z "$field_id" ] || [ -z "$option_id" ] || [ -z "$item_id" ]; then
+    printf 'Could not resolve the project item or the "In Progress" status option.\n' >&2
+    exit 1
+fi
+
+worktree_changes=$(git status --porcelain | wc -l | tr -d ' ')
+initial_worktree="clean"
+if [ "$worktree_changes" -ne 0 ]; then
+    initial_worktree="${worktree_changes} changed path(s)"
+fi
+
+if [ "$dry_run" -eq 1 ]; then
+    printf '\nDry run: no changes made. Would perform:\n'
+    printf '  - set issue #%s status "%s" -> "In Progress" on "%s"\n' \
+        "$issue_number" "${issue_status:-unset}" "$project_title"
+    printf '  - git fetch origin --prune, then fast-forward devel\n'
+    printf '  - create and switch to %s from devel\n' "$branch"
+    printf '  - worktree status right now: %s\n' "$initial_worktree"
+    exit 0
+fi
+
+if [ "$worktree_changes" -ne 0 ]; then
+    printf 'Working tree has unrelated changes (%s). Commit or stash them first.\n' \
+        "$initial_worktree" >&2
+    exit 1
+fi
+
+if [ "$issue_status" = "In Progress" ]; then
+    printf 'Issue #%s is already In Progress.\n' "$issue_number"
+else
+    bounded gh project item-edit --id "$item_id" --project-id "$project_id" \
+        --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null
+    printf 'Issue #%s moved to In Progress.\n' "$issue_number"
+fi
+
+git_authenticated fetch origin --prune
+git switch devel
+git_authenticated pull --ff-only origin devel
+if [ "$(git rev-parse devel)" != "$(git rev-parse origin/devel)" ]; then
+    printf 'Local devel and origin/devel differ; resolve this before branching.\n' >&2
+    exit 1
+fi
+base_commit=$(git rev-parse --short devel)
+
+git switch -c "$branch"
+current_branch=$(git branch --show-current)
+if [ "$current_branch" = "main" ] || [ "$current_branch" = "devel" ]; then
+    printf 'Refusing to continue on %s.\n' "$current_branch" >&2
+    exit 1
+fi
+
+printf '\n## Work Start Record\n\n'
+printf -- '- Issue: #%s %s\n' "$issue_number" "$issue_title"
+printf -- '- Issue status: In Progress (was %s)\n' "${issue_status:-unset}"
+printf -- '- Base branch: devel at %s, equal to origin/devel\n' "$base_commit"
+printf -- '- Feature branch: %s\n' "$branch"
+printf -- '- Initial worktree status: %s\n' "$initial_worktree"
+printf -- '- GitHub authentication verified: yes (API request succeeded)\n'

@@ -7,7 +7,19 @@
 
 ## Tooling
 
-- Run `scripts/preflight` before work that uses multiple development or GitHub tools.
+- Run `scripts/bootstrap` on a fresh checkout and whenever the environment has
+  drifted (broken `.venv`, missing Chromium or its system libraries). It is
+  idempotent and ends by running `scripts/preflight --strict`.
+- Run `scripts/preflight` before work that uses multiple development or GitHub
+  tools. Its GitHub check makes a real API request, so a stale token is
+  reported instead of passing silently. Use `--strict` when the work needs
+  GitHub, the virtual environment, or the browser; a plain run only warns.
+- Set `GH_TOKEN_FILE` to a file that holds a valid GitHub token. `scripts/preflight`
+  and `scripts/start-issue` then use it instead of any ambient `GH_TOKEN`.
+- Use `scripts/verify` to run the lint, format, type, OpenAPI, and unit steps
+  exactly as CI does. Add `--e2e` for the browser suite, or name steps
+  (`scripts/verify lint types`). It runs every requested step and summarizes
+  all failures, so one run shows every problem.
 - Use `uv run python` instead of assuming a system `python` command exists.
 - Use `uv run pytest` for tests.
 - Use `uv run ruff check .` for linting.
@@ -15,9 +27,33 @@
 - Use `uv run mypy .` for type checking.
 - Use the installed `gh` CLI from `PATH` for GitHub issues, pull requests,
   checks, and releases. Verify its location with `command -v gh` before use.
-- Verify GitHub authentication with `gh auth status` before authenticated operations.
+- Verify GitHub authentication with `scripts/preflight` before authenticated
+  operations. `gh auth status` alone is not sufficient: it can report a logged-in
+  state for credentials that the API then rejects.
 - If a documented tool is unavailable, stop and report the missing tool before trying an undocumented replacement.
 - Do not use `python`, `python3`, `gh`, or `jq` directly from `PATH` without first verifying their availability.
+
+## Long-Running Commands and Stalls
+
+A command that produces no visible output is indistinguishable from a hung one.
+Never wait on a command without a way to see progress and a bound on the wait.
+
+- Read a script before its first run and note its internal timeouts and wait
+  loops.
+- Run any command expected to take longer than two minutes in the background
+  with its output written to a log file, and poll the log every 30 to 60
+  seconds.
+- Never pipe a long-running command into `tail`, `head`, or a similar filter
+  that hides progress until the command ends.
+- Give every command an explicit timeout that is shorter than any timeout inside
+  the script it runs, for example by wrapping it in `timeout`.
+- Treat two minutes without new log output, or the first `ERROR` line or HTTP
+  401 or 403 response, as a stall. Stop and investigate instead of waiting.
+- Verify credentials and reachability with one cheap request before starting a
+  long operation that depends on them.
+- Do not retry after an authentication failure. Report it.
+- A script that waits for an outcome must recognize failure outcomes as well as
+  success and must print progress while it waits.
 
 ## Product Backlog
 
@@ -141,6 +177,10 @@ These workflow steps are required, not advisory. If a step cannot be completed,
 stop and report the blocker before changing application files.
 
 ### Before Changing Application Files
+
+`scripts/start-issue <issue-number> <short-description>` performs steps 1 to 9
+below and prints the Work Start Record. `--dry-run` previews the changes after
+running only read-only checks.
 
 1. Fetch the repository and confirm the issue exists.
 2. Move the issue to `In Progress` or the equivalent active-work status.
@@ -292,6 +332,10 @@ The workflow should:
 - Run the ordinary suite with `uv run pytest -m "not e2e"`.
 - Run a separate browser end-to-end job that installs Chromium and runs
   `uv run pytest -m e2e`, reporting logs on failure.
+- Invoke every verification step through `scripts/verify <step>` so a local run
+  and a CI run execute identical commands.
+- Run the browser end-to-end job independently of the unit-test job, and cache
+  the Playwright browser download keyed by the Playwright version.
 - Use `permissions: contents: read` unless a job requires more.
 - Cache Python dependencies where practical.
 

@@ -25,7 +25,6 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert 'id="range-help"' in document
     assert 'id="efficiency-chart"' not in document
     app = (FRONTEND / "app.js").read_text(encoding="utf-8")
-    assert "efficiency-default-marker" in app
     assert "form.hidden = efficiency" in app
     assert "Complete retained history" in app
     assert 'scenario !== "efficiency"' in app
@@ -35,6 +34,17 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
 
     styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
     assert ".dashboard-grid[hidden] { display: none; }" in styles
+
+
+def test_efficiency_summary_renders_status_from_one_source() -> None:
+    """Render each efficiency row's annotation from the structured status only."""
+    app = (FRONTEND / "app.js").read_text(encoding="utf-8")
+    styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
+
+    assert "item.calculation_status" in app
+    assert "is_default" not in app
+    assert "efficiency-default-marker" not in app
+    assert "efficiency-default-marker" not in styles
 
 
 def test_dashboard_documents_dependency_and_license_status() -> None:

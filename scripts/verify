@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Run the repository's verification steps. CI calls this script step by step, so
+# a local run and a CI run execute identical commands.
+#
+# Usage: scripts/verify [--list] [--e2e] [step...]
+#
+#   (no arguments)  run every default step: lint format types openapi unit
+#   --e2e           additionally run the browser end-to-end suite
+#   step...         run only the named steps, in the given order
+#   --list          print every step name and exit
+#
+# All requested steps run even when an earlier one fails, so one invocation
+# reports every problem. The exit status is non-zero when any step failed.
+# Each step is limited to VERIFY_STEP_TIMEOUT_SECONDS (default 900).
+set -u
+
+repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root" || exit 1
+
+all_steps=(lint format types openapi unit e2e)
+default_steps=(lint format types openapi unit)
+step_timeout="${VERIFY_STEP_TIMEOUT_SECONDS:-900}"
+
+# Print the command for a step, one argument per line.
+step_command() {
+    case "$1" in
+        lint) printf '%s\n' uv run ruff check . ;;
+        format) printf '%s\n' uv run ruff format --check . ;;
+        types) printf '%s\n' uv run mypy . ;;
+        openapi) printf '%s\n' uv run pytest tests/test_openapi.py ;;
+        unit) printf '%s\n' uv run pytest -m "not e2e" --cov --cov-report=term-missing ;;
+        e2e) printf '%s\n' uv run pytest -m e2e ;;
+        *) return 1 ;;
+    esac
+}
+
+steps=()
+include_e2e=0
+for argument in "$@"; do
+    case "$argument" in
+        --list)
+            printf '%s\n' "${all_steps[@]}"
+            exit 0
+            ;;
+        --e2e) include_e2e=1 ;;
+        -*)
+            printf 'Unknown option: %s\n' "$argument" >&2
+            exit 2
+            ;;
+        *)
+            if ! step_command "$argument" >/dev/null; then
+                printf 'Unknown step: %s (known: %s)\n' "$argument" "${all_steps[*]}" >&2
+                exit 2
+            fi
+            steps+=("$argument")
+            ;;
+    esac
+done
+
+if [ "${#steps[@]}" -eq 0 ]; then
+    steps=("${default_steps[@]}")
+fi
+if [ "$include_e2e" -eq 1 ]; then
+    steps+=(e2e)
+fi
+
+summary=()
+failed=0
+for step in "${steps[@]}"; do
+    mapfile -t command < <(step_command "$step")
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        printf '::group::%s\n' "$step"
+    fi
+    printf '==> %s: %s\n' "$step" "${command[*]}"
+
+    started=$SECONDS
+    status=0
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$step_timeout" "${command[@]}" || status=$?
+    else
+        "${command[@]}" || status=$?
+    fi
+    elapsed=$((SECONDS - started))
+
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        printf '::endgroup::\n'
+    fi
+    if [ "$status" -eq 0 ]; then
+        summary+=("PASS  $step (${elapsed}s)")
+    elif [ "$status" -eq 124 ]; then
+        summary+=("FAIL  $step (timed out after ${step_timeout}s)")
+        failed=1
+    else
+        summary+=("FAIL  $step (exit $status, ${elapsed}s)")
+        failed=1
+    fi
+done
+
+printf '\n== verification summary ==\n'
+printf '%s\n' "${summary[@]}"
+exit "$failed"
