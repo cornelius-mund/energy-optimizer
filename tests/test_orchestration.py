@@ -1419,10 +1419,22 @@ def test_configured_efficiency_orchestrator_persists_through_a_suspect_interval(
     del second_cycle
 
 
-def test_configured_efficiency_orchestrator_persists_through_total_counter_jitter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("dip_kwh", "suspect_hours"),
+    [
+        # Jitter within the tolerance is ignored and keeps every hour valid.
+        (0.001, []),
+        # A larger decrease is flagged suspect but never fails the refresh.
+        (2.0, [0, 2]),
+    ],
+)
+def test_configured_efficiency_orchestrator_persists_through_total_counter_decreases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dip_kwh: float,
+    suspect_hours: list[int],
 ) -> None:
-    """Total-counter jitter must not stop the history from being persisted.
+    """A ``total`` counter decrease must not stop the history from persisting.
 
     Regression test for issue #179: a 1 Wh decrease of a ``total`` counter
     without ``last_reset`` used to fail the whole refresh, so nothing was
@@ -1452,7 +1464,7 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_jitte
             200,
             json=home_assistant_history_payload(
                 entity_id,
-                home_assistant_jittery_total_readings(3200.0, dip_hour),
+                home_assistant_jittery_total_readings(100.0, dip_hour, dip_kwh=dip_kwh),
                 state_class="total",
             ),
         )
@@ -1540,8 +1552,11 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_jitte
     first_cycle = orchestrator.run_due(START + timedelta(hours=2), force=True)
     second_cycle = orchestrator.run_due(START + timedelta(hours=4), force=True)
 
-    assert first_cycle.provider_runs[0].status != "failed"
-    assert second_cycle.provider_runs[0].status != "failed"
+    expected_status = "suspect" if suspect_hours else "success"
+    assert first_cycle.provider_runs[0].status == (
+        "suspect" if 0 in suspect_hours else "success"
+    )
+    assert second_cycle.provider_runs[0].status == expected_status
     # The second run requests only the two hours missing after the first run.
     assert fetch_calls == [
         (START, START + timedelta(hours=2)),
@@ -1558,7 +1573,9 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_jitte
     assert persisted.start_time == START
     assert persisted.battery_energy_in_kwh == pytest.approx((1.0,) * 4, abs=1e-9)
     assert persisted.battery_energy_out_kwh == pytest.approx((1.0,) * 4, abs=1e-9)
-    assert all(item.status == "valid" for item in persisted.quality)
+    assert [
+        hour for hour, item in enumerate(persisted.quality) if item.status == "suspect"
+    ] == suspect_hours
     result = store.load(
         ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
         TypeAdapter(BatteryEfficiencyData),

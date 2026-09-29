@@ -16,7 +16,6 @@ from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
 from energy_optimizer.providers.home_assistant_energy import (
     HomeAssistantEnergyAggregator,
     HomeAssistantEnergySeries,
-    HomeAssistantError,
 )
 from home_assistant_fixtures import (
     home_assistant_configuration_factory,
@@ -190,16 +189,17 @@ def test_tolerance_is_compared_in_kwh_for_a_wh_counter() -> None:
 
 def test_tolerance_is_compared_in_kwh_for_an_mwh_counter() -> None:
     # A 0.0001 MWh dip is 0.1 kWh, above the 0.01 kWh default. Compared in the
-    # counter's own unit (0.0001 < 0.01) it would wrongly be accepted.
-    with pytest.raises(HomeAssistantError, match="decrease_tolerance_kwh"):
-        aggregate(
-            [
-                ("2026-01-01T00:00:00+00:00", "3.2800"),
-                ("2026-01-01T00:10:00+00:00", "3.2803"),
-                ("2026-01-01T00:20:00+00:00", "3.2802"),
-            ],
-            unit="MWh",
-        )
+    # counter's own unit (0.0001 < 0.01) it would wrongly be accepted as jitter.
+    series = aggregate(
+        [
+            ("2026-01-01T00:00:00+00:00", "3.2800"),
+            ("2026-01-01T00:10:00+00:00", "3.2799"),
+        ],
+        unit="MWh",
+    )
+
+    assert series.values_kw == (0.0,)
+    assert series.quality[0].reason == "counter_reset"
 
 
 def test_energy_equals_the_net_rise_above_the_peak_for_any_jitter_pattern() -> None:
@@ -231,38 +231,125 @@ def test_energy_equals_the_net_rise_above_the_peak_for_any_jitter_pattern() -> N
         assert series.quality == ()
 
 
-def test_a_decrease_larger_than_the_tolerance_names_entity_time_and_values() -> None:
-    with pytest.raises(HomeAssistantError) as error:
-        aggregate(
+def test_a_larger_decrease_does_not_fail_and_marks_the_hour_suspect(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        series = aggregate(
             [
                 ("2026-01-01T00:00:00+00:00", "10.000"),
                 ("2026-01-01T00:20:00+00:00", "10.500"),
-                ("2026-01-01T00:40:00+00:00", "10.400"),
+                ("2026-01-01T00:40:00+00:00", "9.000"),
+                ("2026-01-01T00:50:00+00:00", "9.300"),
             ]
         )
 
-    message = str(error.value)
-    assert ENTITY_ID in message
-    assert "2026-01-01T00:40:00+00:00" in message
-    assert "10.5" in message
-    assert "10.4" in message
-    assert "last_reset" in message
-    assert "decrease_tolerance_kwh" in message
+    # The decreasing step adds nothing, and growth from the new level counts.
+    assert series.values_kw == pytest.approx((0.8,), abs=1e-9)
+    assert series.quality[0].status == "suspect"
+    assert series.quality[0].reason == "counter_reset"
+    assert series.quality[0].entity_id == ENTITY_ID
+    [warning] = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=home_assistant_counter_reset" in record.getMessage()
+    ]
+    assert f"entity_id={ENTITY_ID}" in warning
+    assert "timestamp=2026-01-01T00:40:00+00:00" in warning
+    assert "previous_value=10.5" in warning
+    assert "current_value=9.0" in warning
+    assert "decrease_kwh=1.500000" in warning
+    assert "decrease_tolerance_kwh=0.01" in warning
 
 
-def test_a_slow_drift_below_the_peak_is_not_accepted_step_by_step() -> None:
+def test_a_larger_decrease_leaves_every_other_hour_intact() -> None:
+    series = aggregate(
+        [
+            ("2026-01-01T00:00:00+00:00", "10.000"),
+            ("2026-01-01T00:20:00+00:00", "10.500"),
+            ("2026-01-01T00:40:00+00:00", "9.000"),
+            ("2026-01-01T01:00:00+00:00", "9.500"),
+            ("2026-01-01T01:30:00+00:00", "10.000"),
+            ("2026-01-01T02:00:00+00:00", "10.500"),
+        ],
+        end=TWO_HOURS,
+    )
+
+    assert series.values_kw == pytest.approx((1.0, 1.0), abs=1e-9)
+    assert [item.status for item in series.quality] == ["suspect", "valid"]
+
+
+def test_a_return_to_the_peak_after_a_larger_decrease_is_not_energy() -> None:
+    series = aggregate(
+        [
+            ("2026-01-01T00:00:00+00:00", "10.000"),
+            ("2026-01-01T00:20:00+00:00", "10.500"),
+            ("2026-01-01T00:30:00+00:00", "9.000"),
+            ("2026-01-01T00:40:00+00:00", "10.500"),
+            ("2026-01-01T00:50:00+00:00", "10.700"),
+        ]
+    )
+
+    # The 1.5 kWh climb back to 10.5 is recovery, not new energy.
+    assert series.values_kw == pytest.approx((0.7,), abs=1e-9)
+    assert series.quality[0].status == "suspect"
+
+
+def test_a_larger_decrease_after_a_dip_still_treats_the_return_as_recovery() -> None:
+    series = aggregate(
+        [
+            ("2026-01-01T00:00:00+00:00", "10.000"),
+            ("2026-01-01T00:10:00+00:00", "10.500"),
+            ("2026-01-01T00:10:12+00:00", "10.499"),
+            ("2026-01-01T00:20:00+00:00", "9.000"),
+            ("2026-01-01T00:30:00+00:00", "10.500"),
+            ("2026-01-01T00:40:00+00:00", "10.700"),
+        ]
+    )
+
+    assert series.values_kw == pytest.approx((0.7,), abs=1e-9)
+
+
+def test_a_larger_decrease_that_returns_to_the_earlier_value_is_a_spike() -> None:
+    # The same transient-spike correction as for total_increasing counters.
+    series = aggregate(
+        [
+            ("2026-01-01T00:00:00+00:00", "0.0182"),
+            ("2026-01-01T00:10:38+00:00", "57.2166"),
+            ("2026-01-01T00:11:30+00:00", "0.0182"),
+            ("2026-01-01T00:30:00+00:00", "0.5"),
+        ]
+    )
+
+    assert series.values_kw == pytest.approx((0.4818,), abs=1e-9)
+    assert series.quality[0].reason == "transient_counter_spike"
+
+
+def test_a_slow_drift_below_the_peak_is_not_accepted_step_by_step(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # Each step is within the tolerance, but the counter ends 0.015 kWh below
-    # its peak, so the accumulated decrease is not jitter.
-    with pytest.raises(HomeAssistantError, match=r"2026-01-01T00:30:00\+00:00"):
-        aggregate(
+    # its peak, so the accumulated decrease is a reset and not jitter.
+    with caplog.at_level(logging.WARNING):
+        series = aggregate(
             [
                 ("2026-01-01T00:00:00+00:00", "10.000"),
                 ("2026-01-01T00:10:00+00:00", "10.500"),
                 ("2026-01-01T00:15:00+00:00", "10.495"),
                 ("2026-01-01T00:20:00+00:00", "10.490"),
                 ("2026-01-01T00:30:00+00:00", "10.485"),
+                ("2026-01-01T00:50:00+00:00", "11.000"),
             ]
         )
+
+    assert series.values_kw == pytest.approx((0.5 + 0.515,), abs=1e-9)
+    assert series.quality[0].reason == "counter_reset"
+    [warning] = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=home_assistant_counter_reset" in record.getMessage()
+    ]
+    assert "timestamp=2026-01-01T00:30:00+00:00" in warning
 
 
 def test_a_decrease_exactly_at_the_tolerance_is_accepted() -> None:
@@ -278,28 +365,21 @@ def test_a_decrease_exactly_at_the_tolerance_is_accepted() -> None:
     assert series.values_kw == pytest.approx((0.294,), abs=1e-9)
 
 
-def test_a_smaller_configured_tolerance_rejects_the_same_dip() -> None:
-    with pytest.raises(HomeAssistantError, match="decrease_tolerance_kwh"):
-        aggregate(
-            [
-                ("2026-01-01T00:00:00+00:00", "3280.000"),
-                ("2026-01-01T00:20:00+00:00", "3280.294"),
-                ("2026-01-01T00:40:00+00:00", "3280.293"),
-            ],
-            decrease_tolerance_kwh=0.0005,
-        )
+@pytest.mark.parametrize("tolerance", [0.0005, 0])
+def test_a_smaller_configured_tolerance_flags_the_same_dip_as_a_reset(
+    tolerance: float,
+) -> None:
+    series = aggregate(
+        [
+            ("2026-01-01T00:00:00+00:00", "3280.294"),
+            ("2026-01-01T00:20:00+00:00", "3280.293"),
+        ],
+        decrease_tolerance_kwh=tolerance,
+    )
 
-
-def test_a_zero_tolerance_rejects_any_decrease() -> None:
-    with pytest.raises(HomeAssistantError, match="decreased"):
-        aggregate(
-            [
-                ("2026-01-01T00:00:00+00:00", "3280.000"),
-                ("2026-01-01T00:20:00+00:00", "3280.294"),
-                ("2026-01-01T00:40:00+00:00", "3280.293"),
-            ],
-            decrease_tolerance_kwh=0,
-        )
+    assert series.values_kw == (0.0,)
+    assert series.quality[0].status == "suspect"
+    assert series.quality[0].reason == "counter_reset"
 
 
 def test_a_larger_configured_tolerance_accepts_a_bigger_dip() -> None:

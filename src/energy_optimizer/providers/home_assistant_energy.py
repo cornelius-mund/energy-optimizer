@@ -678,8 +678,27 @@ class HomeAssistantEnergyAggregator:
         values: list[float],
         quality: list[IntervalQuality],
     ) -> float:
-        """Apply reset, spike, and recovery transitions to one observation."""
+        """Apply reset, spike, jitter, and recovery transitions to one observation.
+
+        No transition raises: a decrease never fails the import. Home Assistant
+        marks a genuine reset of a ``total`` counter by changing ``last_reset``.
+        A decrease without that marker is measurement jitter when the counter
+        stays within ``decrease_tolerance_kwh`` of the highest value it reached:
+        the step contributes no energy and the climb back to that peak is not
+        counted again. Measuring against the peak rather than the previous
+        sample keeps a slow downward drift from being accepted step by step. A
+        larger decrease, like any decrease of a ``total_increasing`` counter,
+        is treated as a reset or a transient spike and marks the interval
+        suspect.
+        """
         previous_value = state.previous_value
+        peak = previous_value if state.jitter_peak is None else state.jitter_peak
+        decrease_kwh = (peak - value) * _KWH_PER_UNIT[entity.unit]
+        tolerated_decrease = (
+            entity.state_class == "total"
+            and value < previous_value
+            and decrease_kwh <= entity.decrease_tolerance_kwh + _TOLERANCE_ROUNDING_KWH
+        )
         if reset != state.previous_reset:
             delta = 0.0
             state.jitter_peak = None
@@ -700,8 +719,13 @@ class HomeAssistantEnergyAggregator:
                 previous_value,
                 value,
             )
-        elif value < previous_value and entity.state_class == "total_increasing":
+        elif tolerated_decrease:
             delta = 0.0
+            state.jitter_peak = peak
+            state.tolerated_decreases.append((timestamp, decrease_kwh))
+        elif value < previous_value:
+            delta = 0.0
+            state.jitter_peak = None
             transient_spike = (
                 state.previous_delta_kwh > 0
                 and state.previous_delta_hour is not None
@@ -754,15 +778,22 @@ class HomeAssistantEnergyAggregator:
                     entity.entity_id,
                     "counter_reset",
                 )
+                tolerance_detail = (
+                    f" decrease_kwh={decrease_kwh:.6f} "
+                    f"decrease_tolerance_kwh={entity.decrease_tolerance_kwh}"
+                    if entity.state_class == "total"
+                    else ""
+                )
                 logger.warning(
                     "event=home_assistant_counter_reset "
                     "component=home_assistant operation=normalize entity_id=%s "
                     "timestamp=%s previous_value=%s current_value=%s "
-                    "reason=counter_decreased",
+                    "reason=counter_decreased%s",
                     entity.entity_id,
                     timestamp.isoformat(),
                     previous_value,
                     value,
+                    tolerance_detail,
                 )
         elif value >= previous_value:
             if state.reset_baseline is not None and math.isclose(
@@ -797,49 +828,7 @@ class HomeAssistantEnergyAggregator:
             else:
                 delta = value - previous_value
             state.reset_baseline = None
-        elif entity.state_class == "total":
-            delta = self._tolerated_decrease(
-                state, timestamp, value, previous_value, entity
-            )
         return delta
-
-    @staticmethod
-    def _tolerated_decrease(
-        state: _CounterState,
-        timestamp: datetime,
-        value: float,
-        previous_value: float,
-        entity: HomeAssistantEnergyEntityConfiguration,
-    ) -> float:
-        """Treat a small decrease of a ``total`` counter as measurement jitter.
-
-        Home Assistant marks a genuine reset of a ``total`` counter by changing
-        ``last_reset``. A decrease without that marker is accepted only when the
-        counter stays within ``decrease_tolerance_kwh`` of the highest value it
-        reached, which ordinary rounding of a chatty sensor produces. The step
-        contributes no energy and the recovery up to the earlier peak is not
-        counted again. Measuring against the peak rather than the previous
-        sample keeps a slow downward drift from being accepted step by step.
-        """
-        peak = state.jitter_peak if state.jitter_peak is not None else previous_value
-        decrease_kwh = (peak - value) * _KWH_PER_UNIT[entity.unit]
-        if decrease_kwh > entity.decrease_tolerance_kwh + _TOLERANCE_ROUNDING_KWH:
-            earlier_peak = (
-                f" (after reaching {peak} {entity.unit})"
-                if peak != previous_value
-                else ""
-            )
-            raise HomeAssistantError(
-                f"Home Assistant total entity {entity.entity_id} decreased from "
-                f"{previous_value} to {value} {entity.unit} at "
-                f"{timestamp.isoformat()} without a changed last_reset "
-                f"timestamp{earlier_peak}; the decrease of {decrease_kwh:.6f} kWh "
-                f"exceeds decrease_tolerance_kwh of {entity.decrease_tolerance_kwh} "
-                "kWh"
-            )
-        state.jitter_peak = peak
-        state.tolerated_decreases.append((timestamp, decrease_kwh))
-        return 0.0
 
     @staticmethod
     def _log_tolerated_decreases(

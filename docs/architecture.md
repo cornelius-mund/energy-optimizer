@@ -164,9 +164,12 @@ reached. The step contributes no energy, the aggregator remembers that peak and
 counts energy again only once the counter rises above it, and the interval keeps
 its valid quality, because a suspect interval would block optimization. Because
 the peak, not the previous sample, is the reference, accumulated drift beyond
-the tolerance is rejected. A larger decrease still fails the fetch with the
-entity, timestamp, previous value, current value, and tolerance, instead of
-being guessed at. The reference is the last observation at or before the start
+the tolerance is not accepted as jitter. A single value never fails the fetch:
+a larger decrease is handled like a `total_increasing` decrease, contributing no
+energy, treating a return to the earlier peak as recovery, retracting a rise
+that immediately returns as a transient spike, and marking the interval suspect
+with a warning that names the entity, timestamp, previous value, current value,
+and tolerance. The reference is the last observation at or before the start
 of a requested period, so a dip that straddles that start can count at most one
 tolerance's worth of energy once. A changed `last_reset`, `total_increasing`
 counters, and unknown or unavailable samples are handled as described above.

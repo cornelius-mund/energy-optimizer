@@ -444,6 +444,61 @@ def test_importer_tolerates_one_watt_hour_dips_in_total_counters() -> None:
     assert all(item.status == "valid" for item in data.quality)
 
 
+def test_importer_flags_a_large_total_counter_decrease_without_failing() -> None:
+    """A single decreasing value never fails the fetch; it flags its hour."""
+    configuration = importer_configuration("total")
+    end = START + timedelta(hours=4)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id == "sensor.soc":
+            readings = [
+                (f"2026-01-01T0{hour}:00:00+00:00", str(value))
+                for hour, value in enumerate((50, 60, 70, 80, 90))
+            ]
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(
+                    entity_id, readings, unit="%", state_class="measurement"
+                ),
+            )
+        if entity_id == "sensor.battery_in":
+            # 12 -> 9 kWh at hour 3 without a matching last_reset change.
+            readings = [
+                ("2026-01-01T00:00:00+00:00", "10"),
+                ("2026-01-01T01:00:00+00:00", "11"),
+                ("2026-01-01T02:00:00+00:00", "12"),
+                ("2026-01-01T03:00:00+00:00", "9"),
+                ("2026-01-01T04:00:00+00:00", "10"),
+            ]
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(
+                    entity_id, readings, state_class="total"
+                ),
+            )
+        return httpx.Response(
+            200, json=home_assistant_history_payload(entity_id, state_class="total")
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration, client)
+    try:
+        data = importer.fetch(START, end, now=end)
+    finally:
+        client.close()
+
+    assert data.battery_energy_in_kwh == pytest.approx((1.0, 1.0, 0.0, 1.0))
+    assert [item.status for item in data.quality] == [
+        "valid",
+        "valid",
+        "suspect",
+        "valid",
+    ]
+    assert data.quality[2].reason == "counter_reset"
+    assert data.quality[2].entity_id == "sensor.battery_in"
+
+
 def test_importer_reports_home_assistant_history_failure() -> None:
     configuration = importer_configuration()
     client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(503)))
