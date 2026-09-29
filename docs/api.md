@@ -196,8 +196,12 @@ than stored. This is an ordinary condition, not invalid data: a negative net
 value for one of these three legs (`battery`, `inverter_charge`,
 `inverter_discharge`) is clamped to zero for that hour instead of failing the
 provider refresh. Household load and grid flow are unaffected by this and
-continue to reject any negative combined value outright, since those totals
-are not directional net expressions.
+continue to reject a negative combined value, since those totals are not
+directional net expressions. The only exception is an hour that a contributing
+entity has already flagged `suspect` (for example after a counter reset): that
+hour is clamped to zero, keeps its `suspect` quality in the persisted record and
+the historic API responses, and no longer fails the refresh. The failure
+message names a rejected hour by its UTC timestamp.
 
 The state-of-charge validation checks physical plausibility, not round-trip
 loss: during an hour with only charging (or only discharging) energy measured,
