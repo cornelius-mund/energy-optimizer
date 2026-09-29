@@ -440,6 +440,21 @@ Tests should follow a test-driven development pattern:
 
 See [`AGENTS.md`](AGENTS.md) for backlog, issue, and engineering process guidelines.
 
+### Setting Up and Verifying a Checkout
+
+```bash
+scripts/bootstrap      # locked dependencies, Chromium, system libraries, then preflight
+scripts/preflight      # check tools, GitHub credentials, the virtual environment, Chromium
+scripts/verify         # lint, format, types, OpenAPI, and unit tests, exactly as CI runs them
+scripts/verify --e2e   # the same plus the browser end-to-end suite
+scripts/verify lint types   # or only the named steps
+```
+
+`scripts/verify` runs every requested step and prints a summary, so one run
+shows all failures. CI calls the same script one step at a time. To start work
+on an issue, run `scripts/start-issue <issue-number> <short-description>`; add
+`--dry-run` to preview it.
+
 ## Running the Service
 
 Install [`uv`](https://docs.astral.sh/uv/getting-started/installation/), then
@@ -487,7 +502,8 @@ uv run pytest tests/test_openapi.py
 
 The dashboard E2E suite starts the real service entry point with an isolated
 temporary data store and exercises the rendered dashboard in Chromium. Install
-the browser once in the development environment, then run:
+the browser once in the development environment (`scripts/bootstrap` also
+installs the system libraries Chromium needs), then run:
 
 ```bash
 uv run playwright install chromium
