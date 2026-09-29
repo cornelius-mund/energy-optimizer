@@ -1,6 +1,8 @@
 """Tests for durable normalized provider-data storage."""
 
 import json
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -116,6 +118,111 @@ def test_store_recovers_primary_after_restart(tmp_path: Path) -> None:
     current = restarted_store.load(KEY, ADAPTER)
     assert current is not None
     assert current.load_kw == (1.2, 1.0)
+
+
+def test_store_logs_ndjson_load_timing_at_debug_without_payload(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+
+    with caplog.at_level(logging.DEBUG, logger="energy_optimizer"):
+        loaded = store.load(KEY, ADAPTER)
+
+    assert loaded is not None
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=persistence_load_started" in messages
+    assert "event=persistence_ndjson_read_started" in messages
+    assert "event=persistence_ndjson_parsed" in messages
+    assert "event=persistence_load_completed" in messages
+    assert "format=ndjson" in messages
+    assert "status=restored" in messages
+    assert "record_count=2" in messages
+    assert "retained_count=2" in messages
+    assert "file_size_bytes=" in messages
+    assert re.search(r"duration_seconds=\d+\.\d{3}\b", messages)
+    assert "load_kw" not in messages
+    assert "1.0" not in messages
+
+
+def test_routine_household_load_reads_stay_out_of_info_output(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        assert store.load(KEY, ADAPTER) is None
+        store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+        store.load(KEY, ADAPTER)
+        store.load_household_load_range(KEY, start, start + timedelta(hours=2))
+
+    events = [
+        record.getMessage().split(" ", 1)[0]
+        for record in caplog.records
+        if record.levelno >= logging.INFO
+    ]
+    assert events == ["event=persistence_succeeded"]
+
+
+def test_store_logs_invalid_primary_and_backup_recovery_with_counts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, _ = paths(tmp_path)
+    primary.write_text("invalid\n", encoding="utf-8")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        recovered = store.load(KEY, ADAPTER)
+
+    assert recovered is not None
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 2
+    invalid, recovery = warnings
+    assert invalid.startswith("event=persistence_ndjson_invalid")
+    assert f"path={primary.name}" in invalid
+    assert "file_size_bytes=8" in invalid
+    assert str(tmp_path) not in invalid
+    assert recovery.startswith("event=persistence_recovered")
+    assert "source=backup" in recovery
+    assert "record_count=2" in recovery
+    assert re.search(r"duration_seconds=\d+\.\d{3}\b", recovery)
+
+
+def test_store_logs_legacy_migration_with_count_and_duration(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    primary, backup = legacy_paths(tmp_path)
+    tmp_path.mkdir(exist_ok=True)
+    legacy = TypeAdapter(HouseholdLoadData).dump_json(
+        household_load_data(start, [2.0, 3.0])
+    )
+    primary.write_bytes(legacy + b"\n")
+    backup.write_bytes(legacy + b"\n")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+    migration = [
+        record.getMessage()
+        for record in caplog.records
+        if "persistence_migration" in record.getMessage()
+    ]
+    assert [message.split(" ", 1)[0] for message in migration] == [
+        "event=persistence_migration_started",
+        "event=persistence_migration_completed",
+    ]
+    assert "record_count=2" in migration[1]
+    assert re.search(r"duration_seconds=\d+\.\d{3}\b", migration[1])
+    assert "load_kw" not in "\n".join(record.getMessage() for record in caplog.records)
 
 
 def test_store_recovers_invalid_primary_from_backup(tmp_path: Path) -> None:
