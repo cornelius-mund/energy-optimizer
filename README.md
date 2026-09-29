@@ -109,6 +109,26 @@ The enclosing history aggregate emits one `home_assistant_history_aggregate`
 the aggregate fails. This keeps normal logs concise while retaining per-chunk
 diagnostics when debug logging is enabled.
 
+Startup progress is logged at `INFO` so a container that never becomes ready can
+be diagnosed from its logs: the last startup event that appears is the last phase
+that completed. `process_logging_bootstrapped` is emitted before Uvicorn starts.
+The `service_*` events then mark the application lifespan, logging configuration,
+configuration loading (file name only), persistence-store creation, orchestrator
+construction, orchestration task start, and `service_started`, each with its
+elapsed time where a phase can be slow. A failed startup ends with
+`service_startup_failed` instead. While the orchestrator restores persisted data,
+`orchestration_restore_started` and `orchestration_restore_completed` name the
+logical source, its outcome (`restored` or `empty`), and the duration, and
+`orchestration_restore_failed` reports the error type and duration.
+Household-load persistence reports one-time and abnormal conditions at `INFO` or
+`WARNING`: `persistence_migration_started` and `persistence_migration_completed`
+for a legacy JSON migration, `persistence_ndjson_invalid` for a damaged file, and
+`persistence_recovered` for backup recovery, each with record counts or file
+size and duration where applicable. Routine reads happen on every refresh and API
+request, so their `persistence_load_completed` and `persistence_ndjson_*` detail,
+including record counts, file size, and duration, is available at `DEBUG`. None of
+these events log stored values or provider tokens.
+
 Configuration is expected to contain parameters such as:
 
 - Time resolution

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Callable, Protocol
 
 from pydantic import TypeAdapter, ValidationError
@@ -159,6 +160,7 @@ class HouseholdLoadStore:
 
     def load_history(self, key: ProviderDataKeyLike) -> HouseholdLoadHistory | None:
         """Read NDJSON, recover its backup, or migrate legacy JSON."""
+        started_at = perf_counter()
         primary_path, backup_path = self._paths(key)
         primary, primary_exists = self._read_household_file(primary_path)
         if primary is not None:
@@ -168,10 +170,13 @@ class HouseholdLoadStore:
         if backup is not None:
             logger.warning(
                 "event=persistence_recovered component=storage operation=load "
-                "data_type=%s provider=%s entity_id=%s source=backup",
+                "data_type=%s provider=%s entity_id=%s source=backup "
+                "record_count=%s duration_seconds=%.3f",
                 key.data_type,
                 key.provider,
                 key.entity_id,
+                backup.record_count,
+                perf_counter() - started_at,
             )
             try:
                 self.directory.mkdir(parents=True, exist_ok=True)
@@ -219,6 +224,12 @@ class HouseholdLoadStore:
         path: Path,
     ) -> tuple[HouseholdLoadHistory | None, bool]:
         """Read one NDJSON file, tolerating only a truncated final line."""
+        read_started_at = perf_counter()
+        logger.debug(
+            "event=persistence_ndjson_read_started component=storage operation=load "
+            "path=%s",
+            path.name,
+        )
         try:
             payload = path.read_bytes()
         except FileNotFoundError:
@@ -229,16 +240,48 @@ class HouseholdLoadStore:
             ) from error
 
         try:
-            return parse_household_history(payload, path), True
-        except ProviderDataStoreError:
+            history = parse_household_history(payload, path)
+        except ProviderDataStoreError as error:
+            logger.warning(
+                "event=persistence_ndjson_invalid component=storage operation=load "
+                "path=%s error_type=%s file_size_bytes=%s duration_seconds=%.3f",
+                path.name,
+                error.__class__.__name__,
+                len(payload),
+                perf_counter() - read_started_at,
+            )
             return None, True
+        logger.debug(
+            "event=persistence_ndjson_parsed component=storage operation=load "
+            "path=%s record_count=%s retained_count=%s "
+            "ignored_incomplete_final_line=%s file_size_bytes=%s "
+            "duration_seconds=%.3f",
+            path.name,
+            history.record_count,
+            len(history.model.load_kw),
+            history.ignored_incomplete_final_line,
+            len(payload),
+            perf_counter() - read_started_at,
+        )
+        return history, True
 
     def _migrate_legacy_household_load(
         self,
         key: ProviderDataKeyLike,
     ) -> HouseholdLoadHistory | None:
         """Migrate the old monolithic JSON primary and backup files."""
+        migration_started_at = perf_counter()
         legacy_primary_path, legacy_backup_path = self._legacy_paths(key)
+        # A store without any data reaches this method on every read, so only a
+        # real migration is announced; otherwise INFO output would repeat.
+        if legacy_primary_path.exists() or legacy_backup_path.exists():
+            logger.info(
+                "event=persistence_migration_started component=storage "
+                "operation=migrate data_type=%s provider=%s entity_id=%s",
+                key.data_type,
+                key.provider,
+                key.entity_id,
+            )
         legacy_primary, primary_exists = self._read_legacy_household_file(
             legacy_primary_path
         )
@@ -274,10 +317,21 @@ class HouseholdLoadStore:
                 f"could not migrate normalized provider data for {key.data_type}/"
                 f"{key.provider}/{key.entity_id or 'default'}: {error}"
             ) from error
-        return HouseholdLoadHistory(
+        history = HouseholdLoadHistory(
             model=current,
             record_count=len(household_load_points(current)),
         )
+        logger.info(
+            "event=persistence_migration_completed component=storage "
+            "operation=migrate data_type=%s provider=%s entity_id=%s "
+            "record_count=%s duration_seconds=%.3f",
+            key.data_type,
+            key.provider,
+            key.entity_id,
+            history.record_count,
+            perf_counter() - migration_started_at,
+        )
+        return history
 
     @staticmethod
     def _read_legacy_household_file(

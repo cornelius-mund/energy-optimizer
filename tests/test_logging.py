@@ -1,11 +1,13 @@
 """Tests for operational logging configuration and safe log context."""
 
+import asyncio
 import logging
 import re
 import sys
 from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
+from typing import Callable
 
 import httpx
 import pytest
@@ -15,6 +17,7 @@ from pytest import LogCaptureFixture, MonkeyPatch
 
 from energy_optimizer.api import app
 from energy_optimizer.config import (
+    Configuration,
     ConfigurationError,
     DataSourceScheduleConfiguration,
     HomeAssistantConfiguration,
@@ -26,7 +29,11 @@ from energy_optimizer.logging_config import (
     configure_logging,
     resolve_log_level,
 )
-from energy_optimizer.orchestration import ProviderOrchestrator, ProviderRegistration
+from energy_optimizer.orchestration import (
+    ProviderOrchestrator,
+    ProviderRegistration,
+    build_configured_orchestrator,
+)
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_energy import HomeAssistantError
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
@@ -359,6 +366,213 @@ def test_api_request_log_contains_request_context_and_not_request_body(
     assert "event=service_started" in messages
     assert "event=service_stopping" in messages
     assert "event=service_stopped" in messages
+
+
+def _event_names(caplog: LogCaptureFixture) -> list[str]:
+    """Return the event name of every structured record in emission order."""
+    return [
+        message.split(" ", 1)[0].removeprefix("event=")
+        for message in (record.getMessage() for record in caplog.records)
+        if message.startswith("event=")
+    ]
+
+
+def test_module_entrypoint_logs_bootstrap_completion(
+    monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    import energy_optimizer.__main__ as entrypoint
+
+    monkeypatch.setattr(entrypoint, "bootstrap_logging", lambda: logging.INFO)
+    monkeypatch.setattr("uvicorn.run", lambda *_, **__: None)
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        entrypoint.main()
+
+    assert _event_names(caplog) == ["process_logging_bootstrapped"]
+
+
+def test_api_startup_logs_each_lifecycle_phase_in_order(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    class StubOrchestrator:
+        async def run_forever(self, stop_event: asyncio.Event) -> None:
+            await stop_event.wait()
+
+    configuration = tmp_path / "config.yaml"
+    configuration.write_text(MINIMAL_CONFIGURATION, encoding="utf-8")
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
+    monkeypatch.setattr(
+        "energy_optimizer.api.lifecycle.build_configured_orchestrator",
+        lambda _configuration, _store: StubOrchestrator(),
+    )
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
+
+    expected_events = [
+        "service_lifespan_entered",
+        "service_logging_configured",
+        "service_starting",
+        "service_configuration_load_started",
+        "service_configuration_loaded",
+        "service_persistence_store_initializing",
+        "service_persistence_store_initialized",
+        "service_orchestrator_build_started",
+        "service_orchestrator_built",
+        "service_orchestration_task_starting",
+        "service_orchestration_task_started",
+        "service_started",
+    ]
+    events = _event_names(caplog)
+    positions = [events.index(event) for event in expected_events]
+    assert positions == sorted(positions)
+    messages = [record.getMessage() for record in caplog.records]
+    load_started = next(
+        message
+        for message in messages
+        if message.startswith("event=service_configuration_load_started")
+    )
+    assert "path=config.yaml" in load_started
+    assert str(tmp_path) not in load_started
+    started = next(
+        message for message in messages if message.startswith("event=service_started")
+    )
+    assert re.search(r"duration_seconds=\d+\.\d{3}\b", started)
+
+
+def test_failed_startup_log_shows_the_last_completed_phase(
+    tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(tmp_path / "missing.yaml"))
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer"):
+        with pytest.raises(ConfigurationError):
+            with TestClient(app):
+                pass
+
+    events = _event_names(caplog)
+    assert "service_logging_configured" in events
+    assert "service_configuration_load_started" in events
+    assert "service_configuration_loaded" not in events
+    assert "service_started" not in events
+    assert events[-1] == "service_startup_failed"
+
+
+def _restore_registration(
+    name: str, load: Callable[[], object | None]
+) -> ProviderRegistration:
+    return ProviderRegistration(
+        name=name,
+        data_type=name.replace("_", "-"),
+        adapter=TypeAdapter(HouseholdLoadData),
+        fetch=lambda _now, _schedule: None,
+        is_fresh=lambda _data, _now: True,
+        load=load,
+    )
+
+
+def test_orchestrator_restore_logs_outcome_and_duration_per_source(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    restored = HouseholdLoadData(
+        schema_version="1",
+        start_time=start,
+        interval_minutes=60,
+        load_kw=(1.25,),
+        unit="kW",
+        source=SourceMetadata(provider="test-provider", entity_id="test-load"),
+        retrieved_at=start,
+        latest_observation_at=start,
+    )
+
+    def unreadable() -> object:
+        raise RuntimeError("storage unreadable")
+
+    schedule = DataSourceScheduleConfiguration(interval_seconds=60)
+    configuration = OrchestrationConfiguration(
+        enabled=True,
+        sources={
+            "household_load": schedule,
+            "grid_flow": schedule,
+            "battery": schedule,
+        },
+    )
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
+        ProviderOrchestrator(
+            configuration,
+            [
+                _restore_registration("household_load", lambda: restored),
+                _restore_registration("grid_flow", lambda: None),
+                _restore_registration("battery", unreadable),
+            ],
+            ProviderDataStore(tmp_path),
+        )
+
+    by_source: dict[str, list[str]] = {}
+    for record in caplog.records:
+        message = record.getMessage()
+        match = re.search(r"event=(orchestration_restore_\w+).* source=(\w+)", message)
+        if match:
+            by_source.setdefault(match.group(2), []).append(message)
+            assert re.search(r"duration_seconds=\d+\.\d{3}\b", message) or (
+                match.group(1) == "orchestration_restore_started"
+            )
+    assert [m.split(" ", 1)[0] for m in by_source["household_load"]] == [
+        "event=orchestration_restore_started",
+        "event=orchestration_restore_completed",
+    ]
+    assert "status=restored" in by_source["household_load"][1]
+    assert "status=empty" in by_source["grid_flow"][1]
+    assert by_source["battery"][1].startswith("event=orchestration_restore_failed")
+    assert "error_type=RuntimeError" in by_source["battery"][1]
+    assert "1.25" not in "\n".join(record.getMessage() for record in caplog.records)
+
+
+def test_configured_household_load_restore_logs_logical_source_without_token(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    configuration = Configuration.model_validate(
+        {
+            "time_resolution_minutes": 60,
+            "grid": {"maximum_import_kw": 10, "maximum_export_kw": 10},
+            "solver": {"name": "highs", "time_limit_seconds": 60},
+            "home_assistant": {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "secret-provider-token",
+                "household_load_entities": [
+                    {
+                        "entity_id": "sensor.household_energy",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                        "operation": "add",
+                    }
+                ],
+                "timeout_seconds": 5,
+            },
+            "persistence": {"directory": str(tmp_path)},
+            "orchestration": {
+                "enabled": True,
+                "sources": {"household_load": {"interval_seconds": 300}},
+            },
+        }
+    )
+    configure_logging("INFO")
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
+        build_configured_orchestrator(configuration, ProviderDataStore(tmp_path))
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "event=orchestration_restore_started" in messages
+    assert "event=orchestration_restore_completed" in messages
+    assert "source=household_load" in messages
+    assert "status=empty" in messages
+    assert "secret-provider-token" not in messages
 
 
 def test_api_failure_log_uses_error_level_without_payload(

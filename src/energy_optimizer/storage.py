@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import TypeVar, cast
 from uuid import uuid4
 
@@ -237,7 +238,22 @@ class ProviderDataStore:
             key.entity_id,
         )
         if key.data_type == "household-load":
+            load_started_at = perf_counter()
             history = self._load_household_history(key)
+            # Household-load history is read on every refresh and API request, so
+            # its timing detail stays at DEBUG to keep INFO output bounded.
+            logger.debug(
+                "event=persistence_load_completed component=storage operation=load "
+                "data_type=%s provider=%s entity_id=%s format=ndjson status=%s "
+                "record_count=%s retained_count=%s duration_seconds=%.3f",
+                key.data_type,
+                key.provider,
+                key.entity_id,
+                "restored" if history is not None else "empty",
+                history.record_count if history is not None else 0,
+                len(history.model.load_kw) if history is not None else 0,
+                perf_counter() - load_started_at,
+            )
             return cast(ModelT | None, history.model if history is not None else None)
 
         primary_path, backup_path = self._paths(key)
