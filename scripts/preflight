@@ -4,8 +4,8 @@
 # Usage: scripts/preflight [--strict]
 #
 # Required tools (uv, gh, curl, python) fail the check when missing. Environment
-# checks (GitHub credentials, virtual environment, browser) only warn by
-# default so read-only work is not blocked; --strict turns warnings into
+# checks (GitHub credentials, virtual environment, browser, file linters) only
+# warn by default so read-only work is not blocked; --strict turns warnings into
 # failures. Set GH_TOKEN_FILE to a file containing a GitHub token to override a
 # stale GH_TOKEN from the ambient environment.
 #
@@ -120,6 +120,21 @@ with sync_playwright() as playwright:
             "cannot launch (browser or system libraries missing); run scripts/bootstrap"
     fi
 fi
+
+# The file linters run by scripts/verify are pinned in pyproject.toml and
+# installed into the virtual environment.
+for linter in actionlint hadolint yamllint shfmt shellcheck; do
+    linter_path=".venv/bin/$linter"
+    if [ ! -x "$linter_path" ]; then
+        environment_problem "$linter" \
+            "$linter is not installed; run scripts/bootstrap (or uv sync --locked --extra dev)"
+    elif ! bounded 20 "$linter_path" --version >/dev/null 2>&1; then
+        environment_problem "$linter" \
+            "$linter is installed but does not run; run scripts/bootstrap"
+    else
+        printf 'PASS %-12s %s\n' "$linter" "$linter_path"
+    fi
+done
 
 if [ "$failed" -eq 0 ]; then
     printf 'Preflight passed.\n'

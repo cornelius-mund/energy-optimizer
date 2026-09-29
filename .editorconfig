@@ -1,0 +1,11 @@
+# Formatting settings for the shell scripts. shfmt reads this file when it runs
+# without formatting flags, so scripts/verify shell and editors share one style.
+root = true
+
+# The scripts have no file extension, so the section matches the directory.
+[scripts/*]
+indent_style = space
+indent_size = 4
+# Indent case branches one level below "case", as the scripts already do
+# (shfmt -ci).
+switch_case_indent = true

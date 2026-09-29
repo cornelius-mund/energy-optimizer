@@ -454,17 +454,51 @@ See [`AGENTS.md`](AGENTS.md) for backlog, issue, and engineering process guideli
 ### Setting Up and Verifying a Checkout
 
 ```bash
-scripts/bootstrap      # locked dependencies, Chromium, system libraries, then preflight
-scripts/preflight      # check tools, GitHub credentials, the virtual environment, Chromium
-scripts/verify         # lint, format, types, OpenAPI, and unit tests, exactly as CI runs them
+scripts/bootstrap      # locked dependencies, file linters, Chromium, system libraries, then preflight
+scripts/preflight      # check tools, GitHub credentials, the virtual environment, Chromium, file linters
+scripts/verify         # lint, format, types, OpenAPI, unit tests, and file linters, exactly as CI runs them
 scripts/verify --e2e   # the same plus the browser end-to-end suite
 scripts/verify lint types   # or only the named steps
+scripts/verify workflows dockerfile yaml shell   # only the file linters
 ```
 
 `scripts/verify` runs every requested step and prints a summary, so one run
 shows all failures. CI calls the same script one step at a time. To start work
 on an issue, run `scripts/start-issue <issue-number> <short-description>`; add
 `--dry-run` to preview it.
+
+### File Linters
+
+Besides the Python checks, `scripts/verify` lints the files that are not Python:
+
+| Step | Tool | Checks |
+| --- | --- | --- |
+| `workflows` | `actionlint` | GitHub Actions workflows, including the shell in `run:` blocks |
+| `dockerfile` | `hadolint` | `Dockerfile` |
+| `yaml` | `yamllint --strict` | every `*.yml` and `*.yaml` file, and `.yamllint` |
+| `shell` | `shellcheck` and `shfmt -d` | the scripts in `scripts/` |
+
+Each step fails on any finding, including warnings and info-level findings, and
+CI runs each one through `scripts/verify <step>`. The configuration is checked
+in at the repository root: `.yamllint`, `.hadolint.yaml`, and `.editorconfig`,
+which sets the indentation `shfmt` enforces. Every disabled rule and excluded
+file carries a comment stating why. To suppress a finding inline, put the reason
+in a comment on the line above the `# shellcheck disable=` or
+`# hadolint ignore=` directive. Shell scripts live in `scripts/`, the only
+directory the `shell` step checks.
+
+The tools are pinned to exact versions in the `dev` extra of `pyproject.toml`
+and locked in `uv.lock`, so `scripts/bootstrap` (or `uv sync --locked --extra
+dev`) installs the same versions locally and in CI. The packages wrapping a
+native tool provide the upstream release binary and verify its SHA-256
+checksum. The first three components of a wrapper's version are the upstream
+version, for example `actionlint-py` 1.7.12.25 provides `actionlint` 1.7.12.
+`actionlint-py` and `shfmt-py` have no prebuilt wheels: installing them builds a source package that
+downloads the binary from GitHub, so the first install needs access to
+`github.com`. `scripts/preflight` names any linter that is missing and says how
+to install it, as a warning normally and as a failure with `--strict`. To
+update a tool, change its pin in `pyproject.toml`, run `uv lock`, and run
+`scripts/verify`.
 
 ## Running the Service
 

@@ -4,6 +4,9 @@ set -euo pipefail
 image="energy-optimizer:smoke"
 container="energy-optimizer-smoke-${RANDOM}"
 
+# cleanup runs through the EXIT trap below. shellcheck 0.11.0 misses that when
+# every path of the script ends in an explicit exit.
+# shellcheck disable=SC2329
 cleanup() {
     docker rm --force "$container" >/dev/null 2>&1 || true
 }

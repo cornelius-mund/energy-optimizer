@@ -1,10 +1,15 @@
 #!/bin/sh
 # Prepare a fresh checkout or a drifted machine for development and testing.
 #
-# Installs the locked project and development dependencies, downloads the
-# Playwright Chromium build, installs the system libraries Chromium needs, and
-# then runs scripts/preflight --strict so the result is verified rather than
-# assumed. Safe to run repeatedly.
+# Installs the locked project and development dependencies, including the
+# pinned file linters (actionlint, hadolint, yamllint, shfmt, shellcheck),
+# downloads the Playwright Chromium build, installs the system libraries
+# Chromium needs, and then runs scripts/preflight --strict so the result is
+# verified rather than assumed. Safe to run repeatedly.
+#
+# Two of the linters (actionlint and shfmt) are built from source packages that
+# download their upstream binary from GitHub and verify its SHA-256 checksum,
+# so the first run needs access to github.com.
 set -eu
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -15,7 +20,7 @@ if ! command -v uv >/dev/null 2>&1; then
     exit 1
 fi
 
-printf '==> Installing locked dependencies\n'
+printf '==> Installing locked dependencies and file linters\n'
 uv sync --locked --extra dev
 
 printf '==> Installing Chromium\n'

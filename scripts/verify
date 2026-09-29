@@ -5,30 +5,60 @@
 # Usage: scripts/verify [--list] [--e2e] [step...]
 #
 #   (no arguments)  run every default step: lint format types openapi unit
+#                   workflows dockerfile yaml shell
 #   --e2e           additionally run the browser end-to-end suite
 #   step...         run only the named steps, in the given order
 #   --list          print every step name and exit
 #
 # All requested steps run even when an earlier one fails, so one invocation
 # reports every problem. The exit status is non-zero when any step failed.
-# Each step is limited to VERIFY_STEP_TIMEOUT_SECONDS (default 900).
+# Each command is limited to VERIFY_STEP_TIMEOUT_SECONDS (default 900).
+#
+# The file linters (workflows, dockerfile, yaml, shell) are pinned in
+# pyproject.toml, installed by scripts/bootstrap, and read the configuration
+# checked in at the repository root: .yamllint, .hadolint.yaml, .editorconfig.
 set -u
 
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root" || exit 1
 
-all_steps=(lint format types openapi unit e2e)
-default_steps=(lint format types openapi unit)
+all_steps=(lint format types openapi unit workflows dockerfile yaml shell e2e)
+default_steps=(lint format types openapi unit workflows dockerfile yaml shell)
 step_timeout="${VERIFY_STEP_TIMEOUT_SECONDS:-900}"
 
-# Print the command for a step, one argument per line.
-step_command() {
+# Print the tracked and untracked-but-not-ignored files matching the given
+# pathspecs, so a new file is checked before it is added to git. Files deleted
+# from the working tree are skipped.
+repository_files() {
+    local file
+    while IFS= read -r file; do
+        if [ -f "$file" ]; then
+            printf '%s\n' "$file"
+        fi
+    done < <(git ls-files --cached --others --exclude-standard -- "$@")
+}
+
+# Print the commands of a step, one argument per line. A step that runs several
+# tools separates their commands with a blank line, and all of them run.
+# Shell scripts live in scripts/ only; tests/test_tooling.py enforces that.
+step_commands() {
     case "$1" in
         lint) printf '%s\n' uv run ruff check . ;;
         format) printf '%s\n' uv run ruff format --check . ;;
         types) printf '%s\n' uv run mypy . ;;
         openapi) printf '%s\n' uv run pytest tests/test_openapi.py ;;
         unit) printf '%s\n' uv run pytest -m "not e2e" --cov --cov-report=term-missing ;;
+        workflows) printf '%s\n' uv run actionlint ;;
+        dockerfile) printf '%s\n' uv run hadolint --config .hadolint.yaml Dockerfile ;;
+        yaml)
+            printf '%s\n' uv run yamllint --strict --config-file .yamllint
+            repository_files '*.yml' '*.yaml' .yamllint
+            ;;
+        shell)
+            printf '%s\n' uv run shellcheck scripts/*
+            printf '\n'
+            printf '%s\n' uv run shfmt -d scripts/*
+            ;;
         e2e) printf '%s\n' uv run pytest -m e2e ;;
         *) return 1 ;;
     esac
@@ -48,7 +78,7 @@ for argument in "$@"; do
             exit 2
             ;;
         *)
-            if ! step_command "$argument" >/dev/null; then
+            if ! step_commands "$argument" >/dev/null; then
                 printf 'Unknown step: %s (known: %s)\n' "$argument" "${all_steps[*]}" >&2
                 exit 2
             fi
@@ -64,22 +94,44 @@ if [ "$include_e2e" -eq 1 ]; then
     steps+=(e2e)
 fi
 
+# Run one command with the step time limit when timeout is available.
+run_command() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$step_timeout" "$@"
+    else
+        "$@"
+    fi
+}
+
 summary=()
 failed=0
 for step in "${steps[@]}"; do
-    mapfile -t command < <(step_command "$step")
+    mapfile -t lines < <(step_commands "$step")
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
         printf '::group::%s\n' "$step"
     fi
-    printf '==> %s: %s\n' "$step" "${command[*]}"
 
     started=$SECONDS
     status=0
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$step_timeout" "${command[@]}" || status=$?
-    else
-        "${command[@]}" || status=$?
-    fi
+    command=()
+    # The trailing empty line ends the last command.
+    for line in "${lines[@]}" ''; do
+        if [ -n "$line" ]; then
+            command+=("$line")
+            continue
+        fi
+        if [ "${#command[@]}" -eq 0 ]; then
+            continue
+        fi
+        printf '==> %s: %s\n' "$step" "${command[*]}"
+        command_status=0
+        run_command "${command[@]}" || command_status=$?
+        # A timeout stays visible even when a later command fails differently.
+        if [ "$command_status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            status=$command_status
+        fi
+        command=()
+    done
     elapsed=$((SECONDS - started))
 
     if [ -n "${GITHUB_ACTIONS:-}" ]; then

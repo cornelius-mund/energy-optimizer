@@ -1,0 +1,34 @@
+# yamllint configuration for scripts/verify yaml, which runs with --strict so
+# that warning-level findings fail the step as well as errors.
+extends: default
+
+rules:
+  # No file in this repository starts with a "---" document marker; every one
+  # is a single-document file.
+  document-start: disable
+
+  # GitHub Actions requires the workflow trigger key to be spelled "on", which
+  # YAML 1.1 reads as a boolean. Keys are exempt; boolean-like values such as
+  # "yes" and "no" are still reported.
+  truthy:
+    check-keys: false
+
+  # Above the longest hand-written line (110 characters, in the commented-out
+  # example blocks of config.example.yaml, which users copy and uncomment) and
+  # the generated OpenAPI descriptions (90), so no file needs to be wrapped.
+  line-length:
+    max: 120
+
+  # The generated OpenAPI document is written by PyYAML, which does not indent
+  # block sequences under their key. Both styles are valid YAML; consistency
+  # within a file is what this rule enforces here.
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+
+  # config.example.yaml keeps optional blocks as commented-out keys, indented
+  # where they sit once uncommented. The rule cannot tell that from a
+  # misindented comment.
+  comments-indentation:
+    ignore: |
+      /config.example.yaml
