@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from time import perf_counter
 from typing import Any
@@ -29,6 +29,10 @@ from energy_optimizer.providers.normalization import is_fresh as check_freshness
 logger = logging.getLogger(__name__)
 
 HOME_ASSISTANT_HISTORY_CHUNK = timedelta(days=7)
+_KWH_PER_UNIT = {"Wh": 0.001, "kWh": 1.0, "MWh": 1000.0}
+# A tolerance written as a decimal (0.001 kWh) must accept the same decrease
+# computed from two decimal counter readings, which differs by float rounding.
+_TOLERANCE_ROUNDING_KWH = 1e-9
 
 
 class HomeAssistantError(RuntimeError):
@@ -56,6 +60,11 @@ class _CounterState:
     previous_delta_hour: int | None = None
     previous_delta_timestamp: datetime | None = None
     previous_delta_start_value: float | None = None
+    # Highest value reached before a tolerated decrease of a ``total`` counter.
+    # While set, energy is counted only once the counter rises above it, so a
+    # counter that climbs back after jitter is not counted twice.
+    jitter_peak: float | None = None
+    tolerated_decreases: list[tuple[datetime, float]] = field(default_factory=list)
 
     def record(
         self,
@@ -560,7 +569,7 @@ class HomeAssistantEnergyAggregator:
     ) -> HomeAssistantEnergySeries:
         start = self._as_utc(start_time)
         end = self._as_utc(end_time)
-        factor = {"Wh": 0.001, "kWh": 1.0, "MWh": 1000.0}[entity.unit]
+        factor = _KWH_PER_UNIT[entity.unit]
         timestamps = [timestamp for timestamp, _, _ in parsed]
         if len(timestamps) != len(set(timestamps)):
             raise HomeAssistantError(
@@ -645,6 +654,8 @@ class HomeAssistantEnergyAggregator:
                 accepted_delta_kwh = 0.0
             state.record(timestamp, value, reset, accepted_delta_kwh, hour)
             latest_observation = timestamp
+        if state.tolerated_decreases:
+            self._log_tolerated_decreases(entity, state.tolerated_decreases)
         return HomeAssistantEnergySeries(
             start_time=effective_start,
             values_kw=tuple(values),
@@ -671,6 +682,7 @@ class HomeAssistantEnergyAggregator:
         previous_value = state.previous_value
         if reset != state.previous_reset:
             delta = 0.0
+            state.jitter_peak = None
             state.reset_baseline = previous_value
             self._mark_quality(
                 quality,
@@ -757,6 +769,7 @@ class HomeAssistantEnergyAggregator:
                 value, state.reset_baseline, rel_tol=0.01, abs_tol=0.001
             ):
                 delta = 0.0
+                state.jitter_peak = None
                 self._mark_quality(
                     quality,
                     timestamp,
@@ -775,15 +788,76 @@ class HomeAssistantEnergyAggregator:
                     value,
                     state.reset_baseline,
                 )
+            elif state.jitter_peak is not None:
+                # The counter climbs back after a tolerated decrease. Energy up
+                # to the earlier peak was already counted.
+                delta = max(0.0, value - state.jitter_peak)
+                if value >= state.jitter_peak:
+                    state.jitter_peak = None
             else:
                 delta = value - previous_value
             state.reset_baseline = None
         elif entity.state_class == "total":
-            raise HomeAssistantError(
-                f"Home Assistant total entity {entity.entity_id} decreased "
-                "without a changed last_reset timestamp"
+            delta = self._tolerated_decrease(
+                state, timestamp, value, previous_value, entity
             )
         return delta
+
+    @staticmethod
+    def _tolerated_decrease(
+        state: _CounterState,
+        timestamp: datetime,
+        value: float,
+        previous_value: float,
+        entity: HomeAssistantEnergyEntityConfiguration,
+    ) -> float:
+        """Treat a small decrease of a ``total`` counter as measurement jitter.
+
+        Home Assistant marks a genuine reset of a ``total`` counter by changing
+        ``last_reset``. A decrease without that marker is accepted only when the
+        counter stays within ``decrease_tolerance_kwh`` of the highest value it
+        reached, which ordinary rounding of a chatty sensor produces. The step
+        contributes no energy and the recovery up to the earlier peak is not
+        counted again. Measuring against the peak rather than the previous
+        sample keeps a slow downward drift from being accepted step by step.
+        """
+        peak = state.jitter_peak if state.jitter_peak is not None else previous_value
+        decrease_kwh = (peak - value) * _KWH_PER_UNIT[entity.unit]
+        if decrease_kwh > entity.decrease_tolerance_kwh + _TOLERANCE_ROUNDING_KWH:
+            earlier_peak = (
+                f" (after reaching {peak} {entity.unit})"
+                if peak != previous_value
+                else ""
+            )
+            raise HomeAssistantError(
+                f"Home Assistant total entity {entity.entity_id} decreased from "
+                f"{previous_value} to {value} {entity.unit} at "
+                f"{timestamp.isoformat()} without a changed last_reset "
+                f"timestamp{earlier_peak}; the decrease of {decrease_kwh:.6f} kWh "
+                f"exceeds decrease_tolerance_kwh of {entity.decrease_tolerance_kwh} "
+                "kWh"
+            )
+        state.jitter_peak = peak
+        state.tolerated_decreases.append((timestamp, decrease_kwh))
+        return 0.0
+
+    @staticmethod
+    def _log_tolerated_decreases(
+        entity: HomeAssistantEnergyEntityConfiguration,
+        tolerated_decreases: list[tuple[datetime, float]],
+    ) -> None:
+        """Summarize the jitter ignored for one entity in a single log line."""
+        logger.info(
+            "event=home_assistant_counter_jitter_tolerated "
+            "component=home_assistant operation=normalize entity_id=%s "
+            "decrease_count=%s first_timestamp=%s largest_decrease_kwh=%.6f "
+            "decrease_tolerance_kwh=%s",
+            entity.entity_id,
+            len(tolerated_decreases),
+            tolerated_decreases[0][0].isoformat(),
+            max(decrease for _, decrease in tolerated_decreases),
+            entity.decrease_tolerance_kwh,
+        )
 
     @staticmethod
     def _mark_quality(

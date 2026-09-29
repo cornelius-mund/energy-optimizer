@@ -407,3 +407,62 @@ def test_fetch_rejects_instantaneous_power_channel() -> None:
             provider.fetch(START, END, now=NOW)
     finally:
         client.close()
+
+
+def test_grid_flow_tolerates_total_counter_dips_without_last_reset() -> None:
+    """Regression test for issue #179 on the grid import and export legs."""
+    responses = {
+        ENTITY_ID: history_payload(
+            ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "100.000"),
+                ("2026-01-01T00:30:00+00:00", "100.500"),
+                ("2026-01-01T00:30:12+00:00", "100.499"),
+                ("2026-01-01T00:30:24+00:00", "100.500"),
+                ("2026-01-01T01:00:00+00:00", "101.000"),
+            ],
+            state_class="total",
+        ),
+        EXPORT_ENTITY_ID: history_payload(
+            EXPORT_ENTITY_ID,
+            [
+                ("2026-01-01T00:00:00+00:00", "50.000"),
+                ("2026-01-01T00:30:00+00:00", "50.250"),
+                ("2026-01-01T00:30:12+00:00", "50.249"),
+                ("2026-01-01T00:30:24+00:00", "50.250"),
+                ("2026-01-01T01:00:00+00:00", "50.500"),
+            ],
+            state_class="total",
+        ),
+    }
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json=responses[request.url.params["filter_entity_id"]]
+            )
+        ),
+        grid_import_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+        grid_export_entities=[
+            {
+                "entity_id": EXPORT_ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.import_kw == pytest.approx((1.0,), abs=1e-9)
+    assert data.export_kw == pytest.approx((0.5,), abs=1e-9)
+    assert data.quality == ()

@@ -29,6 +29,9 @@ from energy_optimizer.orchestration import (
     build_configured_orchestrator,
 )
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    HomeAssistantBatteryEfficiencyImporter,
+)
 from energy_optimizer.providers.interfaces import (
     BatteryData,
     BatteryEfficiencyData,
@@ -43,6 +46,7 @@ from energy_optimizer.providers.interfaces import (
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 from home_assistant_fixtures import (
     home_assistant_history_payload,
+    home_assistant_jittery_total_readings,
     home_assistant_suspect_negative_hour_readings,
 )
 
@@ -1413,6 +1417,153 @@ def test_configured_efficiency_orchestrator_persists_through_a_suspect_interval(
     assert any(item.status == "suspect" for item in result.quality)
 
     del second_cycle
+
+
+def test_configured_efficiency_orchestrator_persists_through_total_counter_jitter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Total-counter jitter must not stop the history from being persisted.
+
+    Regression test for issue #179: a 1 Wh decrease of a ``total`` counter
+    without ``last_reset`` used to fail the whole refresh, so nothing was
+    persisted and every run requested the complete history again. The real
+    importer and aggregator run here against a mocked Home Assistant.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id == "sensor.soc":
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(
+                    entity_id,
+                    [
+                        (f"2026-01-01T{hour:02d}:00:00+00:00", str(50 + 10 * hour))
+                        for hour in range(5)
+                    ],
+                    unit="%",
+                    state_class="measurement",
+                ),
+            )
+        # The charging counter dips in the first requested hour and the
+        # discharging counter in the third, so both fetches meet jitter.
+        dip_hour = 0 if entity_id == "sensor.charging_battery_energy" else 2
+        return httpx.Response(
+            200,
+            json=home_assistant_history_payload(
+                entity_id,
+                home_assistant_jittery_total_readings(3200.0, dip_hour),
+                state_class="total",
+            ),
+        )
+
+    fetch_calls: list[tuple[datetime, datetime]] = []
+
+    class RecordingEfficiencyImporter(HomeAssistantBatteryEfficiencyImporter):
+        def __init__(self, configuration: HomeAssistantConfiguration) -> None:
+            super().__init__(
+                configuration, httpx.Client(transport=httpx.MockTransport(handler))
+            )
+
+        def fetch(
+            self,
+            start_time: datetime,
+            end_time: datetime,
+            *,
+            now: datetime | None = None,
+        ) -> BatteryEfficiencyHistoryData:
+            fetch_calls.append((start_time, end_time))
+            return super().fetch(start_time, end_time, now=now)
+
+    monkeypatch.setattr(
+        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
+        RecordingEfficiencyImporter,
+    )
+    leg = {
+        "energy_in": [
+            {
+                "entity_id": "sensor.charging_battery_energy",
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+        "energy_out": [
+            {
+                "entity_id": "sensor.discharging_battery_energy",
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    }
+    runtime_configuration = Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        home_assistant=HomeAssistantConfiguration.model_validate(
+            {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "timeout_seconds": 5,
+                "battery": {
+                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                    "capacity": 10,
+                    "minimum_soc": 1,
+                    "maximum_soc": 10,
+                    "maximum_charge": 4,
+                    "maximum_discharge": 4,
+                    "efficiency_calculation": {
+                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                        "history_start": START.isoformat(),
+                        "battery": leg,
+                        "inverter_charge": leg,
+                        "inverter_discharge": leg,
+                    },
+                },
+            }
+        ),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "battery_efficiency": DataSourceScheduleConfiguration(
+                    interval_seconds=3600
+                )
+            },
+        ),
+    )
+    store = ProviderDataStore(tmp_path)
+    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    assert orchestrator is not None
+
+    first_cycle = orchestrator.run_due(START + timedelta(hours=2), force=True)
+    second_cycle = orchestrator.run_due(START + timedelta(hours=4), force=True)
+
+    assert first_cycle.provider_runs[0].status != "failed"
+    assert second_cycle.provider_runs[0].status != "failed"
+    # The second run requests only the two hours missing after the first run.
+    assert fetch_calls == [
+        (START, START + timedelta(hours=2)),
+        (START + timedelta(hours=2), START + timedelta(hours=4)),
+    ]
+
+    history_key = ProviderDataKey(
+        "battery-efficiency-history",
+        "home-assistant",
+        "battery_efficiency_history",
+    )
+    persisted = store.load(history_key, TypeAdapter(BatteryEfficiencyHistoryData))
+    assert persisted is not None
+    assert persisted.start_time == START
+    assert persisted.battery_energy_in_kwh == pytest.approx((1.0,) * 4, abs=1e-9)
+    assert persisted.battery_energy_out_kwh == pytest.approx((1.0,) * 4, abs=1e-9)
+    assert all(item.status == "valid" for item in persisted.quality)
+    result = store.load(
+        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
+        TypeAdapter(BatteryEfficiencyData),
+    )
+    assert result is not None
 
 
 def test_configured_forecast_solar_orchestrator_rejects_fast_polling(

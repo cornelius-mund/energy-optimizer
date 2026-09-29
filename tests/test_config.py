@@ -135,6 +135,89 @@ def test_load_configuration_rejects_non_positive_entity_physical_limit(
         load_configuration(path)
 
 
+def household_entity_configuration(tmp_path: Path, entity_lines: str) -> Path:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            CONFIG_MARKER,
+            "  household_load_entities:\n"
+            "    - entity_id: sensor.household_energy\n"
+            f"{entity_lines}"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_total_entity_decrease_tolerance_defaults_to_ten_watt_hours(
+    tmp_path: Path,
+) -> None:
+    path = household_entity_configuration(tmp_path, "      state_class: total\n")
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    entities = configuration.home_assistant.household_load_entities
+    assert entities is not None
+    assert entities[0].decrease_tolerance_kwh == 0.01
+
+
+@pytest.mark.parametrize("tolerance", ["0.001", "0", "0.5"])
+def test_total_entity_accepts_a_configured_decrease_tolerance(
+    tmp_path: Path, tolerance: str
+) -> None:
+    path = household_entity_configuration(
+        tmp_path,
+        f"      state_class: total\n      decrease_tolerance_kwh: {tolerance}\n",
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+    entities = configuration.home_assistant.household_load_entities
+    assert entities is not None
+    assert entities[0].decrease_tolerance_kwh == float(tolerance)
+
+
+@pytest.mark.parametrize("tolerance", ["-0.001", ".nan", ".inf"])
+def test_total_entity_rejects_an_invalid_decrease_tolerance(
+    tmp_path: Path, tolerance: str
+) -> None:
+    path = household_entity_configuration(
+        tmp_path,
+        f"      state_class: total\n      decrease_tolerance_kwh: {tolerance}\n",
+    )
+
+    with pytest.raises(ConfigurationError, match="decrease_tolerance_kwh"):
+        load_configuration(path)
+
+
+def test_total_increasing_entity_rejects_a_decrease_tolerance(
+    tmp_path: Path,
+) -> None:
+    path = household_entity_configuration(
+        tmp_path,
+        "      state_class: total_increasing\n      decrease_tolerance_kwh: 0.01\n",
+    )
+
+    with pytest.raises(ConfigurationError, match="only.*state_class: total"):
+        load_configuration(path)
+
+
+def test_total_increasing_entity_still_loads_without_a_decrease_tolerance(
+    tmp_path: Path,
+) -> None:
+    path = household_entity_configuration(
+        tmp_path, "      state_class: total_increasing\n"
+    )
+
+    configuration = load_configuration(path)
+
+    assert configuration.home_assistant is not None
+
+
 def test_load_configuration_returns_grid_flow_entity_mappings(
     tmp_path: Path,
 ) -> None:

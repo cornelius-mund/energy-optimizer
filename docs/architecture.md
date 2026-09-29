@@ -157,6 +157,19 @@ For `total_increasing` counters, an increase followed by a return close to the
 pre-increase value is treated as a transient counter spike: the earlier delta is
 retracted, both observations are marked suspect, and no fabricated energy is
 retained.
+A `total` counter that decreases without a changed `last_reset` is treated as
+measurement jitter when it stays within the per-entity `decrease_tolerance_kwh`
+(default 0.01 kWh, compared after unit conversion) of the highest value it has
+reached. The step contributes no energy, the aggregator remembers that peak and
+counts energy again only once the counter rises above it, and the interval keeps
+its valid quality, because a suspect interval would block optimization. Because
+the peak, not the previous sample, is the reference, accumulated drift beyond
+the tolerance is rejected. A larger decrease still fails the fetch with the
+entity, timestamp, previous value, current value, and tolerance, instead of
+being guessed at. The reference is the last observation at or before the start
+of a requested period, so a dip that straddles that start can count at most one
+tolerance's worth of energy once. A changed `last_reset`, `total_increasing`
+counters, and unknown or unavailable samples are handled as described above.
 Individual chunk request outcomes are debug-level diagnostics. The shared
 aggregator emits one structured success summary at info level or one failure
 summary at warning level after the complete entity set has been processed.

@@ -102,6 +102,29 @@ def home_assistant_history_payload(
 Readings = list[tuple[str, str]]
 
 
+def home_assistant_jittery_total_readings(
+    base: float, dip_hour: int, hours: int = 4
+) -> Readings:
+    """Return hourly ``total`` counter readings that rise 1 kWh per hour.
+
+    Hour ``dip_hour`` additionally holds three samples in which the counter dips
+    by 1 Wh and recovers at the next sample, the jitter observed on a real
+    installation (3280.294 to 3280.293 kWh without ``last_reset``). Every
+    other step is non-decreasing, so each hour's energy is exactly 1 kWh and a
+    recovered dip that is counted twice shows up as 1.001 kWh.
+    """
+    readings: Readings = []
+    for hour in range(hours + 1):
+        readings.append((f"2026-01-01T{hour:02d}:00:00+00:00", f"{base + hour:.3f}"))
+        if hour == dip_hour:
+            readings += [
+                (f"2026-01-01T{hour:02d}:30:00+00:00", f"{base + hour + 0.5:.3f}"),
+                (f"2026-01-01T{hour:02d}:30:12+00:00", f"{base + hour + 0.499:.3f}"),
+                (f"2026-01-01T{hour:02d}:30:24+00:00", f"{base + hour + 0.5:.3f}"),
+            ]
+    return readings
+
+
 def _three_hour_readings(first_hour: Readings, later_hours: list[str]) -> Readings:
     """Join custom first-hour readings with one reading at each later hour mark."""
     return [

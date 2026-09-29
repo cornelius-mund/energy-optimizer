@@ -920,6 +920,39 @@ def test_total_rejects_a_decrease_without_last_reset_change() -> None:
         client.close()
 
 
+def test_household_load_tolerates_a_total_counter_dip_without_last_reset() -> None:
+    """Regression test for issue #179 on the household-load leg."""
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "3280.000"),
+        ("2026-01-01T00:20:00+00:00", "3280.294"),
+        ("2026-01-01T00:20:12+00:00", "3280.293"),
+        ("2026-01-01T00:20:24+00:00", "3280.294"),
+        ("2026-01-01T01:00:00+00:00", "3280.600"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, json=history_payload(readings=readings, state_class="total")
+            )
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == pytest.approx((0.6,), abs=1e-9)
+    assert data.quality == ()
+
+
 def test_fetch_rejects_negative_combined_load() -> None:
     responses = {
         ENTITY_ID: history_payload(),

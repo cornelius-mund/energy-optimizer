@@ -90,6 +90,10 @@ home_assistant:
       unit: kWh
       operation: subtract
       maximum_interval_energy_kwh: 11
+      # Largest decrease below the counter's highest value that is treated as
+      # measurement jitter (default: 0.01 kWh). Only for state_class: total
+      # entities without a changed last_reset; a larger decrease fails the import.
+      decrease_tolerance_kwh: 0.01
   grid_import_entities:
     - entity_id: sensor.grid_import_energy
       state_class: total_increasing
