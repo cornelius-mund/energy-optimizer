@@ -47,6 +47,16 @@ def test_efficiency_summary_renders_status_from_one_source() -> None:
     assert "efficiency-default-marker" not in styles
 
 
+def test_efficiency_metrics_format_energy_to_two_decimals() -> None:
+    """Format energy metrics by unit rather than rendering the raw number."""
+    app = (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    assert "kWh: (value) => value.toFixed(2)" in app
+    assert "cycles: (value) => String(Math.round(value))" in app
+    assert "formatMetricValue(metric)" in app
+    assert "`${metric.value} ${metric.unit}`" not in app
+
+
 def test_dashboard_documents_dependency_and_license_status() -> None:
     """Document the intentionally dependency-free frontend."""
     notices = (FRONTEND / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
