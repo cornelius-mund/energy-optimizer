@@ -7,12 +7,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
 from energy_optimizer.api import app, historic
 from energy_optimizer.api.schemas import DashboardSeries, SourceMetadata
+from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    HomeAssistantBatteryEfficiencyImporter,
+)
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyHistoryData,
     ElectricityPriceData,
@@ -28,6 +33,10 @@ from energy_optimizer.storage import (
     ProviderDataKey,
     ProviderDataStore,
     ProviderDataStoreError,
+)
+from home_assistant_fixtures import (
+    home_assistant_history_payload,
+    home_assistant_jittery_total_readings,
 )
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -495,6 +504,99 @@ def test_unconfigured_and_unseeded_assets_do_not_invalidate_configured_ones(
     assert availability(body)["battery"]["reason"] == (
         "no Home Assistant battery is configured"
     )
+
+
+def test_battery_history_imported_from_jittery_total_counters_is_served(
+    environment: Environment,
+) -> None:
+    """Regression test for issue #179, criterion 7, end to end.
+
+    The battery history is produced by the real importer from ``total`` counters
+    that dip by 1 Wh without ``last_reset``. Before the fix that import failed,
+    nothing was persisted, and the dashboard reported the battery as
+    unavailable.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        entity_id = request.url.params["filter_entity_id"]
+        if entity_id == "sensor.battery_soc":
+            return httpx.Response(
+                200,
+                json=home_assistant_history_payload(
+                    entity_id,
+                    [
+                        (f"2026-01-01T{hour:02d}:00:00+00:00", str(20 + 10 * hour))
+                        for hour in range(5)
+                    ],
+                    unit="%",
+                    state_class="measurement",
+                ),
+            )
+        return httpx.Response(
+            200,
+            json=home_assistant_history_payload(
+                entity_id,
+                home_assistant_jittery_total_readings(3200.0, 1),
+                state_class="total",
+            ),
+        )
+
+    leg = {
+        "energy_in": [
+            {
+                "entity_id": "sensor.charging_battery_energy",
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+        "energy_out": [
+            {
+                "entity_id": "sensor.discharging_battery_energy",
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    }
+    configuration = HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "test-token",
+            "timeout_seconds": 5,
+            "battery": {
+                "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
+                "capacity": 10,
+                "minimum_soc": 5,
+                "maximum_soc": 100,
+                "maximum_charge": 4,
+                "maximum_discharge": 4,
+                "efficiency_calculation": {
+                    "state_of_charge": {
+                        "entity_id": "sensor.battery_soc",
+                        "unit": "%",
+                    },
+                    "battery": leg,
+                    "inverter_charge": leg,
+                    "inverter_discharge": leg,
+                },
+            },
+        }
+    )
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        history = HomeAssistantBatteryEfficiencyImporter(configuration, client).fetch(
+            START, START + timedelta(hours=4), now=START
+        )
+    finally:
+        client.close()
+    seed_battery(environment.store, history)
+
+    body = environment.get_actual()
+
+    assert availability(body)["battery"]["status"] == "available"
+    values = by_id(body)["battery_state_of_charge_actual"]["values"]
+    assert values == pytest.approx([20.0, 30.0, 40.0, 50.0])
 
 
 def test_battery_without_efficiency_calculation_explains_missing_state_history(

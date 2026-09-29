@@ -60,6 +60,22 @@ class HomeAssistantEnergyEntityConfiguration(BaseModel):
     unit: Literal["Wh", "kWh", "MWh"]
     operation: Literal["add", "subtract"]
     maximum_interval_energy_kwh: float = Field(default=100, gt=0)
+    decrease_tolerance_kwh: float = Field(default=0.01, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def reject_tolerance_for_total_increasing(
+        self,
+    ) -> "HomeAssistantEnergyEntityConfiguration":
+        """Accept a decrease tolerance only where a decrease is not a reset."""
+        if (
+            self.state_class == "total_increasing"
+            and "decrease_tolerance_kwh" in self.model_fields_set
+        ):
+            raise ValueError(
+                "decrease_tolerance_kwh applies only to state_class: total; a "
+                "decrease of a total_increasing counter starts a new meter cycle"
+            )
+        return self
 
 
 class HomeAssistantBatteryEntityConfiguration(BaseModel):

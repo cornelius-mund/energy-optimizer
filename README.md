@@ -346,16 +346,28 @@ entities, and request timeout in `config.yaml`. An optional
 invalidate historical data. No interpolation is performed: the latest observed
 counter value is carried forward until the next observation. For
 `total_increasing`, a decrease starts a new meter cycle and establishes the new
-value as a zero-contribution baseline. For `total`, a decrease is accepted only
-when Home Assistant's `last_reset` timestamp changes, and that reset reading
-also establishes a zero-contribution baseline. A subsequent value that returns
-close to the pre-reset counter is treated as recovery rather than energy. Every
+value as a zero-contribution baseline. For `total`, a changed `last_reset`
+timestamp marks a reset, and that reset reading also establishes a
+zero-contribution baseline. A `total` decrease without a
+changed `last_reset` is measurement jitter, such as a 1 Wh rounding step of a
+chatty sensor, when the counter stays within `decrease_tolerance_kwh` (default
+`0.01` kWh) of the highest value it reached. The step contributes no energy and
+no negative energy, the counter climbing back to that value is not counted a
+second time, and the hour is not marked `suspect`. A larger `total` decrease
+without a changed `last_reset` never fails the import. It is handled like a
+`total_increasing` decrease: it contributes no energy, the affected hourly
+interval is marked `suspect` with reason `counter_reset`, and a
+`home_assistant_counter_reset` warning names the entity, the timestamp, the
+previous and current values, the decrease, and the tolerance.
+A subsequent value that returns close to the pre-reset counter is treated as
+recovery rather than energy. Every
 other observed increase within an hour is summed, so valid energy after a reset
 is retained without turning the post-reset absolute counter value into fabricated
 energy. Reset transitions and recovery decisions are logged with the entity and
 observed values and mark the affected hourly interval as `suspect`; suspect
 intervals are exposed with a reason and source entity and block optimization.
-If a `total_increasing` counter rises and the next valid observation returns close
+If a `total_increasing` counter, or a `total` counter that decreases by more than
+its tolerance, rises and the next valid observation returns close
 to the value before that rise, the earlier increase is retracted as a transient
 counter spike. Both observations contribute zero for the correction and the
 affected interval is marked `suspect`.
@@ -368,7 +380,7 @@ the complete aggregate, as do malformed, non-finite, incompatible, or failed
 entity responses. The token is a secret and must not be committed to source
 control. The importer raises actionable errors for authentication failures,
 missing history, malformed or non-numeric values, unsupported power units,
-invalid state classes, unmarked total resets, and request failures.
+invalid state classes, and request failures.
 
 Each cumulative-energy entity may also define
 `maximum_interval_energy_kwh`. The default is `100` kWh. The importer compares
@@ -378,6 +390,19 @@ reason `physical_limit_exceeded`, and logged with the entity, timestamp, observe
 delta, and configured limit. Equality is accepted. The limit is per source
 entity and is not applied to other mappings; override it with the meter or
 inverter's credible maximum hourly energy.
+
+A `total` entity may also define `decrease_tolerance_kwh`, the largest decrease
+below the counter's highest value that is treated as measurement jitter instead
+of an unmarked reset. The default is `0.01` kWh (10 Wh), and `0` treats every
+decrease as a reset. The importer converts the decrease to kWh before comparing it,
+so the setting is independent of the entity's `unit`, and it measures every
+decrease against the highest value reached, so a slow downward drift is not
+accepted one small step at a time. The importer logs one
+`home_assistant_counter_jitter_tolerated` message per entity and fetch with the
+number of tolerated decreases, the first timestamp, and the largest decrease.
+The setting applies to every mapping that uses `state_class: total`: household
+load, grid import and export, and every measured battery-efficiency leg. It is
+rejected for `total_increasing`, where a decrease starts a new meter cycle.
 
 After signed aggregation, a negative combined household-load or grid-flow hour
 normally fails the fetch with an error that names the hour by its UTC timestamp,

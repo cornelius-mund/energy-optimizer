@@ -887,11 +887,13 @@ def test_physical_limit_accepts_exact_boundary() -> None:
     assert data.quality == ()
 
 
-def test_total_rejects_a_decrease_without_last_reset_change() -> None:
+def test_total_decrease_without_last_reset_change_marks_the_hour_suspect() -> None:
+    """A large unmarked decrease never fails the fetch; it flags the interval."""
     readings = [
         ("2026-01-01T00:00:00+00:00", "10"),
         ("2026-01-01T00:20:00+00:00", "10.5"),
         ("2026-01-01T00:40:00+00:00", "0.25"),
+        ("2026-01-01T00:50:00+00:00", "0.75"),
     ]
     provider, client = importer(
         httpx.MockTransport(
@@ -900,7 +902,7 @@ def test_total_rejects_a_decrease_without_last_reset_change() -> None:
                 json=history_payload(
                     readings=readings,
                     state_class="total",
-                    last_resets=[None, None, None],
+                    last_resets=[None, None, None, None],
                 ),
             )
         ),
@@ -914,10 +916,48 @@ def test_total_rejects_a_decrease_without_last_reset_change() -> None:
         ],
     )
     try:
-        with pytest.raises(HomeAssistantError, match="last_reset"):
-            provider.fetch(START, START + timedelta(hours=1), now=NOW)
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
     finally:
         client.close()
+
+    # The decreasing step contributes nothing; growth from the new level counts.
+    assert data.load_kw == pytest.approx((1.0,), abs=1e-9)
+    assert data.quality[0].status == "suspect"
+    assert data.quality[0].reason == "counter_reset"
+    assert data.quality[0].entity_id == ENTITY_ID
+
+
+def test_household_load_tolerates_a_total_counter_dip_without_last_reset() -> None:
+    """Regression test for issue #179 on the household-load leg."""
+    readings = [
+        ("2026-01-01T00:00:00+00:00", "3280.000"),
+        ("2026-01-01T00:20:00+00:00", "3280.294"),
+        ("2026-01-01T00:20:12+00:00", "3280.293"),
+        ("2026-01-01T00:20:24+00:00", "3280.294"),
+        ("2026-01-01T01:00:00+00:00", "3280.600"),
+    ]
+    provider, client = importer(
+        httpx.MockTransport(
+            lambda _: httpx.Response(
+                200, json=history_payload(readings=readings, state_class="total")
+            )
+        ),
+        household_load_entities=[
+            {
+                "entity_id": ENTITY_ID,
+                "state_class": "total",
+                "unit": "kWh",
+                "operation": "add",
+            }
+        ],
+    )
+    try:
+        data = provider.fetch(START, START + timedelta(hours=1), now=NOW)
+    finally:
+        client.close()
+
+    assert data.load_kw == pytest.approx((0.6,), abs=1e-9)
+    assert data.quality == ()
 
 
 def test_fetch_rejects_negative_combined_load() -> None:
