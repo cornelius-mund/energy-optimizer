@@ -7,12 +7,20 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md ./
+# Third-party dependencies get their own layer, keyed only on pyproject.toml, so
+# a source or frontend change reuses it instead of reinstalling every package.
+COPY pyproject.toml ./
+RUN python -c "import tomllib; print(*tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies'], sep=chr(10))" \
+        > /tmp/requirements.txt \
+    && pip install --no-cache-dir --requirement /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
+COPY README.md ./
 COPY src ./src
 COPY frontend ./frontend
 COPY config.example.yaml ./config.yaml
 
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir --no-deps . \
     && useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/data/provider-data \
     && chown -R appuser:appuser /app
