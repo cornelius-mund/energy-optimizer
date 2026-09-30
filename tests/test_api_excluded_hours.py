@@ -72,7 +72,9 @@ def test_every_source_is_listed_in_hour_order_with_its_causes(
         ("2026-01-01T03:00:00Z", "household_load"),
     ]
     counts = {"household_load": 2, "grid_flow": 1, "battery_efficiency": 1}
-    assert body["sources"] == [
+    assert [
+        item for item in body["sources"] if item["source"] != "pv_generation_history"
+    ] == [
         {
             "source": source,
             "status": "available",
@@ -135,7 +137,7 @@ def test_hours_the_provider_no_longer_holds_are_listed_as_history_unavailable(
         ("2026-01-01T02:00:00Z", "grid_flow"),
         ("2026-01-01T02:00:00Z", "battery_efficiency"),
     ]
-    assert [source["excluded_hour_count"] for source in body["sources"]] == [2, 2, 2]
+    assert [source["excluded_hour_count"] for source in body["sources"]] == [2, 2, 0, 2]
     assert body["summary"] == [
         {"source": source, "reason": "history_unavailable", "excluded_hour_count": 2}
         for source in ("household_load", "grid_flow", "battery_efficiency")
@@ -255,6 +257,11 @@ def test_unconfigured_sources_and_sources_without_history_are_named(
             "no Home Assistant grid import and export entities are configured",
         ),
         (
+            "pv_generation_history",
+            "not_configured",
+            "no Home Assistant PV-generation entities are configured",
+        ),
+        (
             "battery_efficiency",
             "not_configured",
             "battery efficiency history is retained only when "
@@ -271,6 +278,7 @@ def test_configured_sources_without_persisted_history_are_unavailable(
     assert [(item["source"], item["status"]) for item in body["sources"]] == [
         ("household_load", "unavailable"),
         ("grid_flow", "unavailable"),
+        ("pv_generation_history", "not_configured"),
         ("battery_efficiency", "unavailable"),
     ]
     assert all(item["reason"] for item in body["sources"])
@@ -282,9 +290,14 @@ def test_a_configuration_without_persistence_reports_every_source_unavailable(
     with application(tmp_path, monkeypatch, persistence=False) as environment:
         body = get(environment.client)
 
-    assert {item["status"] for item in body["sources"]} == {"unavailable"}
+    assert {item["status"] for item in body["sources"]} == {
+        "unavailable",
+        "not_configured",
+    }
     assert all(
-        "persistence is not configured" in item["reason"] for item in body["sources"]
+        "persistence is not configured" in item["reason"]
+        for item in body["sources"]
+        if item["status"] == "unavailable"
     )
 
 

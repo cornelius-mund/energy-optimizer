@@ -310,7 +310,25 @@ sources have current, valid data; the plan generator receives one coherent
 `ProviderDataSnapshot`. Concurrent orchestration cycles are skipped to avoid
 duplicate plans.
 
-### Forecast.Solar PV forecast importer
+### Home Assistant measured PV history
+
+Configure `home_assistant.pv_generation` as an energy aggregation of cumulative
+Wh, kWh, or MWh counters (the same `terms` mapping as household load). Enable
+orchestration and its `pv_generation_history` source with an hourly interval and
+optional `history_lookback_seconds`. Persistence is required for orchestration.
+The importer bootstraps from available Home Assistant retention, fetches weekly
+chunks, and thereafter requests only newly completed hours. It retains up to
+87,672 hourly values. Invalid or incomplete hours remain null gaps with detailed
+causes in the dashboard's Excluded hours tab; failed requests preserve existing
+history. Entity mappings include units, state class and optional physical limits.
+
+Measured production appears as `pv_generation_actual` on the historic dashboard
+and in `GET /api/v1/dashboard/data?scenario_kind=actual`, with hourly UTC
+timestamps, kW values and observation/source metadata. It is stored separately
+from Forecast.Solar's forecasts, which continue using the `pv_generation`
+orchestration source and `scenario_kind=forecast`.
+
+### Forecast.Solar PV forecast retrieval
 
 `ForecastSolarImporter` retrieves PV production forecasts directly from the free
 public Forecast.Solar API. Home Assistant, an account, and an API key are not

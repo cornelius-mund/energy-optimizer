@@ -734,6 +734,52 @@ def _build_pv_generation_registration(
     )
 
 
+def _build_pv_history_registration(
+    configuration: Configuration, sources: _Sources, store: ProviderDataStore
+) -> ProviderRegistration | None:
+    from energy_optimizer.providers.home_assistant_pv import (
+        HomeAssistantPvImporter,
+        PvGenerationHistoryData,
+    )
+
+    home_assistant = configuration.home_assistant
+    if (
+        home_assistant is None
+        or home_assistant.pv_generation is None
+        or "pv_generation_history" not in sources
+    ):
+        return None
+    importer = HomeAssistantPvImporter(home_assistant)
+    adapter = TypeAdapter(PvGenerationHistoryData)
+    key = ProviderDataKey("pv-generation-history", "home-assistant", "pv_generation")
+
+    def plan(
+        now: datetime, schedule: DataSourceScheduleConfiguration
+    ) -> HistoryPlan[PvGenerationHistoryData] | None:
+        end = now.replace(minute=0, second=0, microsecond=0)
+        persisted = store.load(key, adapter)
+        start = (
+            end - timedelta(hours=HISTORY_RETENTION_HOURS)
+            if persisted is None
+            else persisted.start_time + timedelta(hours=len(persisted.generation_kw))
+        )
+        return (
+            None
+            if start >= end
+            else importer.plan(start, end, schedule.history_lookback_seconds, now=now)
+        )
+
+    return _registration(
+        "pv_generation_history",
+        PvGenerationHistoryData,
+        adapter,
+        key,
+        store,
+        plan,
+        importer.is_fresh,
+    )
+
+
 def _build_electricity_prices_registration(
     configuration: Configuration, sources: _Sources, store: ProviderDataStore
 ) -> ProviderRegistration | None:
@@ -952,6 +998,7 @@ def _build_battery_efficiency_registration(
 
 _REGISTRATION_FACTORIES = (
     _build_household_load_registration,
+    _build_pv_history_registration,
     _build_pv_generation_registration,
     _build_electricity_prices_registration,
     _build_grid_flow_registration,

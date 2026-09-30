@@ -22,6 +22,11 @@ pytestmark = pytest.mark.e2e
 
 def test_appliance_controls_and_imported_actuals(page: Page, tmp_path: Path) -> None:
     config = configuration(tmp_path / "data")
+    assert config.home_assistant is not None and config.orchestration is not None
+    config.home_assistant.pv_generation = config.home_assistant.energy_history["pv"]
+    config.orchestration.sources["pv_generation_history"] = (
+        config.orchestration.sources["history.pv"]
+    )
     rates = {"sensor.house": 5, "sensor.hp": 2, "sensor.ev": 3, "sensor.pv": 4}
     fake = FakeHomeAssistant(
         {
@@ -80,8 +85,19 @@ def test_appliance_controls_and_imported_actuals(page: Page, tmp_path: Path) -> 
                 for item in json.loads(page.locator("body").inner_text())["series"]
             }
             assert values["history.pv_actual"] == [4, 4]
+            assert values["pv_generation_actual"] == [4, 4]
             assert values["total_consumption_actual"] == [8, 8]
             assert values["unmanaged_household_load_actual"] == [3, 3]
+            page.goto(f"{url}/dashboard/")
+            expect(page.locator("#status")).not_to_contain_text("Loading")
+            page.locator("#start-date").fill("2026-01-01T00:00")
+            page.locator("#end-date").fill("2026-01-01T02:00")
+            page.locator("#range-form button[type=submit]").click()
+            legend = page.locator('[data-series-id="pv_generation_actual"].legend-item')
+            expect(legend).to_contain_text("PV generation (kW)")
+            points = page.locator('#power-points [aria-label^="PV generation,"]')
+            expect(points).to_have_count(2)
+            assert "4 kW" in (points.first.get_attribute("aria-label") or "")
             page.goto(f"{url}/docs")
             operation = page.locator(
                 "#operations-default-validate_appliance_api_v1_appliances_validate_post"

@@ -25,6 +25,10 @@ from energy_optimizer.providers.home_assistant_energy_history import (
     EnergyHistoryData,
     merge_energy_history,
 )
+from energy_optimizer.providers.home_assistant_pv import (
+    PvGenerationHistoryData,
+    merge_pv_history,
+)
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     GridFlowData,
@@ -70,6 +74,8 @@ def _record_count(model: object) -> int | str:
         return len(model.load_kw)
     if isinstance(model, GridFlowData):
         return len(model.import_kw)
+    if isinstance(model, PvGenerationHistoryData):
+        return len(model.generation_kw)
     return "unknown"
 
 
@@ -130,6 +136,13 @@ class ProviderDataStore:
         self, key: ProviderDataKey, adapter: TypeAdapter[ModelT], model: ModelT
     ) -> ModelT:
         """Replace the primary file, keeping a valid previous version as backup."""
+        if isinstance(model, PvGenerationHistoryData):
+            model = cast(
+                ModelT,
+                merge_pv_history(
+                    cast(PvGenerationHistoryData | None, self.load(key, adapter)), model
+                ),
+            )
         if isinstance(model, EnergyHistoryData):
             model = cast(
                 ModelT,
@@ -293,7 +306,18 @@ class ProviderDataStore:
             # Data persisted before hour exclusion may flag hours as suspect.
             # Those hours are converted to excluded hours as they are read.
             model = upgrade_legacy_quality(adapter.validate_json(payload))
-        except ValueError, ValidationError:
+            if isinstance(model, PvGenerationHistoryData):
+                from energy_optimizer.household_load_records import (
+                    household_load_points,
+                )
+
+                household_load_points(model.as_energy_history().as_load())
+                if (
+                    model.source.provider != "home-assistant"
+                    or model.source.entity_id != "pv_generation"
+                ):
+                    return None
+        except ValueError, ValidationError, ProviderDataStoreError:
             return None
         return payload, model
 

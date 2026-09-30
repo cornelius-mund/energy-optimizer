@@ -1245,6 +1245,8 @@ def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
         [
             "Household load: Available",
             "Grid import and export: Available",
+            "PV generation history: Not configured "
+            "(no Home Assistant PV-generation entities are configured)",
             "Battery efficiency: Available",
         ]
     )
@@ -1340,7 +1342,7 @@ def test_excluded_hours_tab_reports_sources_without_history(page: Page) -> None:
     _open_dashboard(page, "excluded", (start, start + timedelta(hours=4)))
 
     expect(page.locator("#excluded-content")).to_be_visible()
-    expect(page.locator("#excluded-sources li")).to_have_count(3)
+    expect(page.locator("#excluded-sources li")).to_have_count(4)
     expect(page.locator("#excluded-sources")).to_contain_text(
         "Household load: Unavailable "
         "(no persisted household-load data is available yet)"

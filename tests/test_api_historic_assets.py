@@ -498,7 +498,7 @@ def test_availability_identifies_every_asset_and_why_absent_ones_are_missing(
         "grid_export_actual",
     ]
     for absent, reason in (
-        ("pv_generation", "no historic PV-generation importer is available"),
+        ("pv_generation", "no Home Assistant PV-generation entities are configured"),
         ("electric_vehicle", "no electric-vehicle importer is available"),
         ("heat_pump", "no heat-pump importer is available"),
     ):

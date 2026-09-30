@@ -434,11 +434,54 @@ def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
 
 
 def load_pv_generation(context: HistoricReadContext) -> HistoricAssetResult:
-    """Report PV actuals as absent; Forecast.Solar only supplies forecasts."""
-    return _not_configured(
+    """Read measured PV history without consuming Forecast.Solar's forecasts."""
+    from energy_optimizer.providers.home_assistant_pv import PvGenerationHistoryData
+
+    configuration = context.configuration
+    home_assistant = configuration.home_assistant
+    if home_assistant is None or home_assistant.pv_generation is None:
+        return _not_configured(
+            "pv_generation", "no Home Assistant PV-generation entities are configured"
+        )
+    data = _load(
+        context,
         "pv_generation",
-        "no historic PV-generation importer is available; PV forecasts are served "
-        "by scenario_kind=forecast",
+        ProviderDataKey("pv-generation-history", "home-assistant", "pv_generation"),
+        TypeAdapter(PvGenerationHistoryData),
+        "PV-generation",
+    )
+    if isinstance(data, HistoricAssetResult):
+        return data
+    values = {
+        data.start_time + index * _HOUR: value
+        for index, value in enumerate(data.generation_kw)
+    }
+    schedule = (
+        configuration.orchestration.sources.get("pv_generation_history")
+        if configuration.orchestration is not None
+        else None
+    )
+    return _result(
+        "pv_generation",
+        "PV-generation",
+        [
+            _series(
+                context,
+                series_id="pv_generation_actual",
+                data_type="pv_generation",
+                unit=data.unit,
+                source=data.source,
+                values=values,
+                available_start=data.start_time,
+                available_end=data.start_time + len(data.generation_kw) * _HOUR,
+                retrieved_at=data.retrieved_at,
+                freshness=polling_freshness(
+                    data.latest_observation_at,
+                    schedule.interval_seconds * 2 if schedule is not None else None,
+                    context.now,
+                ),
+            )
+        ],
     )
 
 
