@@ -15,14 +15,90 @@ details; each section lists only its additional 422 causes.
 
 ## Hourly optimization API
 
-`POST /optimize` validates an hourly request: a timezone-aware `start_time`,
+`POST /optimize` solves an hourly electrical schedule: a timezone-aware `start_time`,
 `interval_minutes: 60`, and equally sized series of `load_kw`, `pv_generation_kw`,
 `import_price_eur_per_kwh`, and `export_price_eur_per_kwh`, with one value per hour
-from one to 168 hours, in kW or EUR/kWh as named by their fields. A valid request
-returns a `validated` response containing the horizon metadata; invalid JSON or
-values return HTTP 422 with field-level validation details. The endpoint is the API
-boundary for the optimizer; solver schedule results will be added by a later
-vertical slice.
+from one to 168 hours, in kW or EUR/kWh as named by their fields. Inputs must be
+finite; power must be non-negative. Optional `heat_pump` uses the contract below
+and must match the start and horizon. Optional `battery` uses the battery contract
+and must match the start; its initial SOC and limits govern the schedule (the
+observed SOC series is not a prescribed future trajectory).
+
+HiGHS minimizes grid import cost minus export revenue subject to configured grid
+limits. Each hour balances grid import + used PV + battery discharge against
+household load + heat-pump consumption + battery charging + grid export. PV may
+be curtailed. Grid import/export and battery charging/discharging cannot happen
+simultaneously. Battery round-trip efficiency is split equally between charging
+and discharging; no terminal SOC target is imposed. Household load must exclude
+the separately supplied heat-pump demand to avoid double counting.
+
+Responses include horizon metadata, `status: "optimal"`, `objective_eur`, and
+one value per hour in `grid_import_kw`, `grid_export_kw`, `pv_used_kw`,
+`heat_pump_kw`, `battery_charge_kw`, `battery_discharge_kw`, and `battery_soc_kwh`.
+Disabled assets return zero series. An impossible balance or discrete operating
+requirement returns HTTP 200 with `status: "infeasible"`, null objective, empty
+series and diagnostics. Malformed inputs return 422. Unsupported solver settings,
+solver failures, or reaching the configured time limit without an optimum return
+503 with actionable details. Only `solver.name: highs` is supported.
+
+## Heat-pump electrical load API
+
+`POST /api/v1/heat-pump` validates the version-1 contract below; `GET` returns
+the latest persisted Home Assistant snapshot (404 before the first import; 503
+when mappings or persistence are unavailable). All timestamps require an offset
+and normalize to UTC. `latest_observation_at` cannot exceed `retrieved_at`.
+
+```json
+{
+  "schema_version": "1", "start_time": "2026-01-01T00:00:00Z",
+  "interval_minutes": 60, "load_kw": [1, 1, 1],
+  "available": [true, true, false],
+  "minimum_power_kw": 1, "maximum_power_kw": 2,
+  "required_energy_kwh": 2, "unit": "kW", "energy_unit": "kWh",
+  "source": {"provider": "home-assistant", "entity_id": "heat_pump"},
+  "retrieved_at": "2026-01-01T00:00:00Z",
+  "latest_observation_at": "2026-01-01T00:00:00Z"
+}
+```
+
+`load_kw` is an observed baseline, not mandatory future consumption. It and
+`available` must have the same length (1–168 hours). The optimizer schedules
+exactly `required_energy_kwh` across available hours: each hour is off or operates
+between the configured minimum and maximum power. There is no thermal model,
+comfort temperature, minimum run time, or daily repeating schedule. A baseline
+can be nonzero in a future unavailable hour: availability governs the plan only.
+Power is limited to 0–1000 kW (maximum must be positive), minimum cannot exceed
+maximum, baseline cannot exceed maximum, and required energy is 0–168000 kWh.
+Energy beyond available capacity or below one minimum on-hour is rejected with
+422. Other infeasible discrete combinations are reported by the solver.
+Only `source` is optional; unknown fields, nonfinite numbers, and incomplete
+objects return 422. Validation responses add `status: "validated"` and
+`freshness: "unknown"`; persisted reads report `fresh`, `stale`, or `unknown`
+using `home_assistant.max_data_age_seconds` and the oldest mapped observation.
+Stale reads have `status: "stale"`; they are withheld from automatic planning.
+
+### Home Assistant import
+
+Configure `home_assistant.heat_pump.power` (W/kW) and `required_energy` (Wh/kWh)
+as `{entity_id, unit}` mappings, optionally with `attribute`. The latter must
+represent **remaining electrical energy for the configured horizon**, not a
+cumulative meter or thermal energy. `minimum_power_kw`, `maximum_power_kw`, and
+an explicit hourly `available` list configure flexibility. See
+`config.example.yaml`. Enable `orchestration.sources.heat_pump` with a polling
+interval and persistence to import automatically; connection URL, token,
+timeout, and age threshold use the shared Home Assistant settings.
+
+Each poll reads `/api/states/<entity_id>` once per distinct mapped entity,
+converts W/Wh to kW/kWh, holds the current power as the baseline for the horizon
+starting at the current UTC hour, and validates the whole snapshot before saving.
+This baseline is also returned in dashboard forecast data as
+`heat_pump_forecast`; it is a snapshot projection, not historic actuals.
+State mappings verify reported units; attribute units are explicitly configured.
+Missing entities/attributes, unknown/unavailable states, malformed JSON,
+non-numeric or negative values, invalid/future timestamps and inconsistent limits
+fail atomically with actionable provider errors. HTTP 401/403 identifies token
+failure without exposing credentials. Failed imports retain the last valid
+snapshot; stale snapshots are marked by polling and persisted reads.
 
 ## Electricity-price API
 

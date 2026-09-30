@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Query, Request
+from pydantic import TypeAdapter
 
 from energy_optimizer.api import historic
 from energy_optimizer.api.excluded import read_excluded_hours
@@ -28,8 +29,12 @@ from energy_optimizer.api.schemas import (
     ExcludedHoursResponse,
 )
 from energy_optimizer.api.series import align_hourly_values
+from energy_optimizer.heat_pump import HeatPumpLoad
 from energy_optimizer.providers.awattar import AwattarImporter
 from energy_optimizer.providers.forecast_solar import ForecastSolarImporter
+from energy_optimizer.providers.home_assistant_heat_pump import (
+    HomeAssistantHeatPumpImporter,
+)
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     ElectricityPriceData,
@@ -366,6 +371,61 @@ def _forecast_dashboard_data(
 
     series: list[DashboardSeries] = []
     diagnostics: list[str] = []
+    home_assistant = configuration.home_assistant
+    if home_assistant is not None and home_assistant.heat_pump is not None:
+        try:
+            heat_pump = store.load(
+                ProviderDataKey("heat-pump", "home-assistant", "heat_pump"),
+                TypeAdapter(HeatPumpLoad),
+            )
+        except ProviderDataStoreError:
+            heat_pump = None
+            diagnostics.append(
+                "heat-pump baseline data is invalid; check persisted data"
+            )
+        if heat_pump is None:
+            diagnostics.append(
+                "heat-pump baseline is unavailable; "
+                "check configured entities and polling"
+            )
+        else:
+            heat_pump_importer = HomeAssistantHeatPumpImporter(home_assistant)
+            aligned = align_hourly_values(
+                {
+                    heat_pump.start_time + timedelta(hours=index): value
+                    for index, value in enumerate(heat_pump.load_kw)
+                },
+                start,
+                end,
+            )
+            series.append(
+                DashboardSeries(
+                    id="heat_pump_forecast",
+                    data_type="heat_pump",
+                    scenario_kind="forecast",
+                    timestamps=[timestamp for timestamp, _ in aligned],
+                    values=[value for _, value in aligned],
+                    unit="kW",
+                    source=None
+                    if heat_pump.source is None
+                    else api_source(heat_pump.source),
+                    requested_start_time=start,
+                    requested_end_time=end,
+                    available_start_time=heat_pump.start_time,
+                    available_end_time=heat_pump.start_time
+                    + timedelta(hours=len(heat_pump.load_kw)),
+                    retrieved_at=heat_pump.retrieved_at,
+                    freshness="unknown"
+                    if home_assistant.max_data_age_seconds is None
+                    else "fresh"
+                    if heat_pump_importer.is_fresh(heat_pump)
+                    else "stale",
+                    validation_status="valid",
+                    missing_intervals=[
+                        timestamp for timestamp, value in aligned if value is None
+                    ],
+                )
+            )
     if configuration.forecast_solar is not None:
         key = ProviderDataKey(
             data_type="pv-generation",

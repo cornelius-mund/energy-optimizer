@@ -28,6 +28,11 @@ from energy_optimizer.api.schemas import (
 )
 from energy_optimizer.api.validation import require_aware_timestamps
 from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.heat_pump import (
+    HeatPumpLoad,
+    HeatPumpLoadResponse,
+    HeatPumpSource,
+)
 from energy_optimizer.providers.interfaces import GridFlowData, HouseholdLoadData
 from energy_optimizer.providers.interfaces import (
     SourceMetadata as ProviderSourceMetadata,
@@ -41,6 +46,45 @@ from energy_optimizer.storage import (
 router = APIRouter()
 tail_router = APIRouter()
 Freshness = Literal["fresh", "stale", "unknown"]
+
+
+@router.post("/api/v1/heat-pump", response_model=HeatPumpLoadResponse)
+def heat_pump(data: HeatPumpLoad) -> HeatPumpLoadResponse:
+    """Validate normalized heat-pump load and electrical flexibility constraints."""
+    return HeatPumpLoadResponse(**data.model_dump())
+
+
+@router.get(
+    "/api/v1/heat-pump",
+    response_model=HeatPumpLoadResponse,
+    responses={
+        404: {"description": "No imported heat-pump snapshot"},
+        503: {"description": "Mappings or persistence unavailable"},
+    },
+)
+def persisted_heat_pump(request: Request) -> HeatPumpLoadResponse:
+    """Return the latest imported heat-pump snapshot with polling freshness."""
+    store, configuration = _require_home_assistant(request, "heat-pump")
+    if configuration.heat_pump is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Home Assistant heat-pump mappings are not configured",
+        )
+    data = _load_persisted(
+        store,
+        ProviderDataKey("heat-pump", "home-assistant", "heat_pump"),
+        TypeAdapter(HeatPumpLoad),
+    )
+    freshness = polling_freshness(
+        data.latest_observation_at,
+        configuration.max_data_age_seconds,
+        datetime.now(timezone.utc),
+    )
+    return HeatPumpLoadResponse(
+        **data.model_dump(),
+        freshness=freshness,
+        status="stale" if freshness == "stale" else "validated",
+    )
 
 
 def validated_utc_range(
@@ -84,7 +128,9 @@ def polling_freshness(
     return "fresh" if age_seconds <= max_age_seconds else "stale"
 
 
-def api_source(source: ProviderSourceMetadata | SourceMetadata) -> SourceMetadata:
+def api_source(
+    source: ProviderSourceMetadata | SourceMetadata | HeatPumpSource,
+) -> SourceMetadata:
     """Convert source metadata to the HTTP representation."""
     return SourceMetadata(provider=source.provider, entity_id=source.entity_id)
 

@@ -346,6 +346,7 @@ class HomeAssistantConfiguration(_StrictModel):
     grid_import: EnergyAggregateConfiguration | None = None
     grid_export: EnergyAggregateConfiguration | None = None
     battery: HomeAssistantBatteryConfiguration | None = None
+    heat_pump: "HomeAssistantHeatPumpConfiguration | None" = None
     timeout_seconds: float = Field(gt=0, le=120)
     max_data_age_seconds: float | None = Field(default=None, gt=0)
 
@@ -390,6 +391,34 @@ class HomeAssistantConfiguration(_StrictModel):
     def battery_source_id(self) -> str:
         """Return the stable persistence identity for battery data."""
         return BATTERY_SOURCE_ID
+
+
+class HeatPumpEntityConfiguration(_StrictModel):
+    """One instantaneous electrical value or attribute in Home Assistant."""
+
+    entity_id: str = Field(min_length=1, max_length=255)
+    unit: Literal["W", "kW", "Wh", "kWh"]
+    attribute: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class HomeAssistantHeatPumpConfiguration(_StrictModel):
+    """Current power and energy requirement, with explicit scheduling bounds."""
+
+    power: HeatPumpEntityConfiguration
+    required_energy: HeatPumpEntityConfiguration
+    minimum_power_kw: float = Field(default=0, ge=0, le=1000, allow_inf_nan=False)
+    maximum_power_kw: float = Field(gt=0, le=1000, allow_inf_nan=False)
+    available: list[bool] = Field(min_length=1, max_length=168)
+
+    @model_validator(mode="after")
+    def validate_units_and_limits(self) -> "HomeAssistantHeatPumpConfiguration":
+        if self.power.unit not in {"W", "kW"}:
+            raise ValueError("heat_pump.power must use W or kW")
+        if self.required_energy.unit not in {"Wh", "kWh"}:
+            raise ValueError("heat_pump.required_energy must use Wh or kWh")
+        if self.minimum_power_kw > self.maximum_power_kw:
+            raise ValueError("heat_pump minimum power must not exceed maximum power")
+        return self
 
 
 class ForecastSolarConfiguration(_StrictModel):

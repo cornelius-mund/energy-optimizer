@@ -18,6 +18,7 @@ from energy_optimizer.config import (
     OrchestrationConfiguration,
 )
 from energy_optimizer.exclusions import exclusion_summary
+from energy_optimizer.heat_pump import HeatPumpLoad, HeatPumpSource
 from energy_optimizer.history_merge import HISTORY_RETENTION_HOURS, merge_price_history
 from energy_optimizer.providers.awattar import AwattarImporter
 from energy_optimizer.providers.forecast_solar import (
@@ -35,6 +36,9 @@ from energy_optimizer.providers.home_assistant_battery_efficiency import (
 )
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
+)
+from energy_optimizer.providers.home_assistant_heat_pump import (
+    HomeAssistantHeatPumpImporter,
 )
 from energy_optimizer.providers.home_assistant_history import (
     HistoryPlan,
@@ -568,7 +572,7 @@ class ProviderOrchestrator:
     @staticmethod
     def _key_for(data_type: str, data: object) -> ProviderDataKey:
         source = getattr(data, "source", None)
-        if not isinstance(source, SourceMetadata):
+        if not isinstance(source, (SourceMetadata, HeatPumpSource)):
             raise OrchestrationError(
                 "normalized provider data must expose SourceMetadata as source"
             )
@@ -946,7 +950,30 @@ def _build_battery_efficiency_registration(
     )
 
 
+def _build_heat_pump_registration(
+    configuration: Configuration, sources: _Sources, store: ProviderDataStore
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    if (
+        home_assistant is None
+        or home_assistant.heat_pump is None
+        or "heat_pump" not in sources
+    ):
+        return None
+    importer = HomeAssistantHeatPumpImporter(home_assistant)
+    return _registration(
+        "heat_pump",
+        HeatPumpLoad,
+        TypeAdapter(HeatPumpLoad),
+        ProviderDataKey("heat-pump", "home-assistant", "heat_pump"),
+        store,
+        _fetch_plan(lambda now: importer.fetch(now=now)),
+        importer.is_fresh,
+    )
+
+
 _REGISTRATION_FACTORIES = (
+    _build_heat_pump_registration,
     _build_household_load_registration,
     _build_pv_generation_registration,
     _build_electricity_prices_registration,

@@ -45,6 +45,9 @@ orchestration:
     battery:
       enabled: true
       interval_seconds: 300
+    heat_pump:
+      enabled: true
+      interval_seconds: 300
     battery_efficiency:
       enabled: true
       interval_seconds: 86400
@@ -104,6 +107,18 @@ awattar:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token
+  # Remaining electrical energy for this horizon, not a cumulative energy meter.
+  # Power is a baseline snapshot; available hours define the scheduling window.
+  heat_pump:
+    power:
+      entity_id: sensor.heat_pump_power
+      unit: W
+    required_energy:
+      entity_id: sensor.heat_pump_required_energy
+      unit: kWh
+    minimum_power_kw: 0.5
+    maximum_power_kw: 3
+    available: [true, true, true, true, true, true]
   household_load:
     terms:
       - operation: add

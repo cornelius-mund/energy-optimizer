@@ -9,6 +9,8 @@ description = "HTTP service for optimizing household energy usage"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "pyomo>=6.9,<7.0",
+    "highspy>=1.10,<2.0",
     "fastapi>=0.115,<1.0",
     "httpx>=0.28,<1.0",
     "pydantic>=2.10,<3.0",
@@ -57,3 +59,8 @@ testpaths = ["tests"]
 markers = [
     "e2e: browser end-to-end tests requiring Playwright browsers",
 ]
+
+# Pyomo does not ship type information; keep the rest of the project strict.
+[[tool.mypy.overrides]]
+module = ["pyomo.*"]
+ignore_missing_imports = true

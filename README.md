@@ -1,5 +1,13 @@
 # Energy Optimizer
 
+Heat-pump electrical scheduling is available through `POST /optimize`: submit
+hourly load/prices/PV and optional heat-pump constraints to receive a cost-minimal
+schedule. Configure Home Assistant heat-pump power and remaining-energy mappings
+for automatic polling and a dashboard forecast baseline. See the
+[heat-pump API and importer reference](docs/api.md#heat-pump-electrical-load-api)
+and `config.example.yaml`. The model handles electrical flexibility without a
+physical thermal model.
+
 An open-source web service for optimizing the energy usage of a single-family
 house. It optimizes the interaction between household electrical load,
 photovoltaic generation, electricity grid import and export, battery storage,

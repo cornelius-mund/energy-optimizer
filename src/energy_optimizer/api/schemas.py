@@ -11,18 +11,21 @@ from energy_optimizer.api.validation import (
     require_aware_timestamps,
 )
 from energy_optimizer.exclusions import ExclusionReason
+from energy_optimizer.heat_pump import HeatPumpLoad
 
 MAX_HORIZON_HOURS = 87_672
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class HourlyOptimizationRequest(_StrictModel):
     """Validated hourly inputs accepted by the optimization boundary."""
 
     start_time: datetime = Field(description="Timezone-aware start of the horizon")
+    heat_pump: HeatPumpLoad | None = None
+    battery: "BatteryRequest | None" = None
     interval_minutes: Literal[60] = Field(
         description="Duration of every interval; hourly requests require 60"
     )
@@ -52,6 +55,13 @@ class HourlyOptimizationRequest(_StrictModel):
         }
         if len(set(lengths.values())) != 1:
             raise ValueError(f"time-series lengths must match: {lengths}")
+        if self.heat_pump is not None and (
+            self.heat_pump.start_time != self.start_time
+            or len(self.heat_pump.load_kw) != len(self.load_kw)
+        ):
+            raise ValueError("heat_pump start_time and horizon must match optimization")
+        if self.battery is not None and self.battery.start_time != self.start_time:
+            raise ValueError("battery start_time must match optimization")
         return self
 
 
@@ -625,7 +635,16 @@ class GridFlowResponse(_StrictModel):
 class OptimizationResponse(_StrictModel):
     """Response returned after an hourly request passes API validation."""
 
-    status: Literal["validated"]
+    status: Literal["optimal", "infeasible"]
     start_time: datetime
     interval_minutes: Literal[60]
     hours: int = Field(ge=1, le=168)
+    objective_eur: float | None = None
+    grid_import_kw: list[float] = Field(default_factory=list)
+    grid_export_kw: list[float] = Field(default_factory=list)
+    pv_used_kw: list[float] = Field(default_factory=list)
+    heat_pump_kw: list[float] = Field(default_factory=list)
+    battery_charge_kw: list[float] = Field(default_factory=list)
+    battery_discharge_kw: list[float] = Field(default_factory=list)
+    battery_soc_kwh: list[float] = Field(default_factory=list)
+    diagnostics: list[str] = Field(default_factory=list)
