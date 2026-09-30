@@ -774,10 +774,10 @@ def test_importer_excludes_the_hours_of_an_invalid_state_of_charge_sample(
 
 
 def test_importer_rejects_state_of_charge_history_that_starts_too_late() -> None:
-    # The first observation lies in the hour after the last requested boundary, so
-    # no complete hour of state of charge exists.
+    # The first observation lies in the last requested hour, so the first whole
+    # boundary is the requested end and no complete hour of state of charge exists.
     home_assistant = efficiency_home_assistant(
-        [(START + timedelta(hours=4, minutes=30), "50")]
+        [(START + timedelta(hours=3, minutes=30), "50")]
     )
 
     with pytest.raises(HomeAssistantError, match="no complete state-of-charge history"):
@@ -785,15 +785,136 @@ def test_importer_rejects_state_of_charge_history_that_starts_too_late() -> None
 
 
 def test_importer_carries_state_of_charge_forward_through_unchanged_hours() -> None:
-    # Home Assistant only reports changes. Each hour takes the last value seen
-    # before its closing boundary, so the 03:30 change is visible from hour 3.
+    # Home Assistant only reports changes. Value ``i`` is the state in force at
+    # the opening boundary of hour ``i``, so the 03:30 change first shows at 04:00.
     home_assistant = efficiency_home_assistant(
         [(START, "50"), (START + timedelta(hours=3, minutes=30), "70")]
     )
 
     data = build_efficiency_history(home_assistant)
 
-    assert data.state_of_charge_percent == (50.0, 50.0, 50.0, 70.0, 70.0)
+    assert data.state_of_charge_percent == (50.0, 50.0, 50.0, 50.0, 70.0)
+
+
+def test_importer_includes_a_state_change_on_a_boundary_in_that_boundary() -> None:
+    # An instant on a boundary belongs to the earlier hour, like every
+    # observation, so the state recorded at 02:00 is in force at 02:00.
+    home_assistant = efficiency_home_assistant(
+        [(START, "50"), (START + timedelta(hours=2), "60")]
+    )
+
+    data = build_efficiency_history(home_assistant)
+
+    assert data.state_of_charge_percent == (50.0, 50.0, 60.0, 60.0, 60.0)
+
+
+def test_importer_requests_no_state_of_charge_beyond_the_requested_end() -> None:
+    home_assistant = efficiency_home_assistant([(START, "50")])
+
+    build_efficiency_history(home_assistant)
+
+    ranges = home_assistant.requested_ranges("sensor.soc")
+    assert ranges
+    assert max(end for _, end in ranges) == START + timedelta(hours=4)
+
+
+# The state of charge at each of the 13 boundaries of a 12-hour window. It is full
+# at boundaries 2, 7, and 11, so the window holds two full-to-full cycles.
+CYCLE_STATE_OF_CHARGE = (80, 80, 100, 90, 80, 70, 90, 100, 90, 80, 70, 100, 100)
+# Battery energy per hour. Each cycle ends with the charging hours that bring the
+# battery back to full: hours 5 and 6 for the first cycle and hour 10 for the second.
+CYCLE_BATTERY_IN = (0, 5, 0, 0, 0, 4, 4, 0, 0, 0, 6, 0)
+CYCLE_BATTERY_OUT = (0, 0, 2.5, 2.5, 2.6, 0, 0, 1.9, 1.9, 1.9, 0, 0)
+
+
+def counter_states(per_hour: tuple[float, ...]) -> list[tuple[datetime, str]]:
+    """Return a total-increasing counter that reads every hour boundary."""
+    total = 100.0
+    states = [(START, repr(total))]
+    for hour, energy in enumerate(per_hour, start=1):
+        total += energy
+        states.append((START + timedelta(hours=hour), repr(total)))
+    return states
+
+
+def two_cycle_home_assistant() -> FakeHomeAssistant:
+    """Serve two full-to-full cycles whose state of charge changes off the hour.
+
+    The state of charge changes 20 minutes before each boundary, so a series that
+    is shifted by one hour differs from the correct one.
+    """
+    constant = {
+        "sensor.charge_in": (1.0,) * 12,
+        "sensor.charge_out": (0.9,) * 12,
+        "sensor.discharge_in": (1.0,) * 12,
+        "sensor.discharge_out": (0.9,) * 12,
+    }
+    counters = {
+        "sensor.battery_in": counter_states(CYCLE_BATTERY_IN),
+        "sensor.battery_out": counter_states(CYCLE_BATTERY_OUT),
+        **{entity_id: counter_states(steps) for entity_id, steps in constant.items()},
+    }
+    soc_states = [(START, str(CYCLE_STATE_OF_CHARGE[0]))] + [
+        (START + timedelta(hours=hour, minutes=-20), str(value))
+        for hour, value in enumerate(CYCLE_STATE_OF_CHARGE)
+        if hour > 0
+    ]
+    return FakeHomeAssistant(
+        {**counters, "sensor.soc": soc_states},
+        units={"sensor.soc": "%"},
+        state_classes={"sensor.soc": "measurement"},
+    )
+
+
+def test_efficiency_of_two_full_cycles_includes_the_charge_that_ends_at_full() -> None:
+    """The measured efficiency must not depend on where the state changes in an hour.
+
+    Battery energy in is 14 kWh and out is 13.3 kWh over the two cycles, so the
+    efficiency is 0.95. A state of charge stored one hour late moves each cycle
+    window one hour early, which drops the charging hour that ends at full and
+    yields 13.3 kWh out for 13 kWh in: a ratio above 1 that is clamped to 1.
+    """
+    data = build_efficiency_history(two_cycle_home_assistant(), end_hours=12)
+
+    assert data.state_of_charge_percent == tuple(
+        float(value) for value in CYCLE_STATE_OF_CHARGE
+    )
+    result = calculate_battery_efficiency(
+        data, calculation_configuration(), now=START + timedelta(hours=12)
+    )
+    assert result.complete_cycle_count == 2
+    assert result.battery_throughput_kwh == pytest.approx(14.0)
+    assert result.battery_efficiency == pytest.approx(0.95)
+    assert result.component_statuses is not None
+    assert result.component_statuses["battery_efficiency"] == "calculated"
+
+
+def test_incremental_imports_merge_to_the_state_of_charge_of_one_full_import() -> None:
+    home_assistant = two_cycle_home_assistant()
+    client = home_assistant.client()
+    importer = HomeAssistantBatteryEfficiencyImporter(importer_configuration())
+    try:
+        first = import_and_build(
+            importer, client, START, START + timedelta(hours=6), now=START
+        )
+        second = import_and_build(
+            importer,
+            client,
+            START + timedelta(hours=6),
+            START + timedelta(hours=12),
+            now=START,
+        )
+        full = import_and_build(
+            importer, client, START, START + timedelta(hours=12), now=START
+        )
+    finally:
+        client.close()
+
+    merged = merge_battery_efficiency_history(first, second)
+
+    assert merged.state_of_charge_percent == full.state_of_charge_percent
+    assert merged.battery_energy_in_kwh == pytest.approx(full.battery_energy_in_kwh)
+    assert merged.battery_energy_out_kwh == pytest.approx(full.battery_energy_out_kwh)
 
 
 @pytest.mark.parametrize(

@@ -56,8 +56,10 @@ _HOUR = timedelta(hours=1)
 class _StateOfCharge:
     """Hourly state of charge read from Home Assistant, with its excluded hours.
 
-    ``values[i]`` is the last state recorded before ``start_time + (i + 1)``
-    hours; it is ``None`` when that state is invalid.
+    ``values[i]`` is the last state recorded at or before ``start_time + i``
+    hours, the opening boundary of hour ``i``; it is ``None`` when that state is
+    invalid. The series holds one value more than the hours it spans, because the
+    last hour also needs its closing boundary.
     """
 
     start_time: datetime
@@ -126,19 +128,14 @@ class HomeAssistantBatteryEfficiencyImporter:
             )
             for name, leg in legs.items()
         }
-        # The state-of-charge series needs one boundary sample after the last
-        # whole hour.
-        soc_end = end + timedelta(hours=1)
+        # The state-of-charge series reads one value per boundary, so the closing
+        # boundary of the last hour is the requested end itself.
         needs = tuple(
             need
             for pair in aggregates.values()
             for aggregate in pair
             for need in aggregate.needs()
-        ) + (
-            HistoryNeed(
-                configuration.state_of_charge.entity_id, "state", start, soc_end
-            ),
-        )
+        ) + (HistoryNeed(configuration.state_of_charge.entity_id, "state", start, end),)
 
         def build(history: HomeAssistantHistory) -> BatteryEfficiencyHistoryData:
             series = {
@@ -149,7 +146,7 @@ class HomeAssistantBatteryEfficiencyImporter:
                 for name, (energy_in, energy_out) in aggregates.items()
             }
             soc = _state_of_charge_series(
-                history, configuration.state_of_charge, start, soc_end
+                history, configuration.state_of_charge, start, end
             )
             aligned_start, aligned_end, aligned, exclusions = self._align_history(
                 series, soc, end
@@ -293,11 +290,13 @@ def _state_of_charge_series(
     start_time: datetime,
     end_time: datetime,
 ) -> _StateOfCharge:
-    """Forward-fill the state-of-charge samples of a window into hourly values.
+    """Forward-fill the state-of-charge samples of a window to hour boundaries.
 
-    A sample that is unavailable, not a number, or outside 0 to 100 percent is
-    not carried forward: the hours in which it is in force are excluded and the
-    values at their boundaries are ``None``.
+    The result holds the state in force at every boundary from the first whole
+    hour to ``end_time``, one value more than there are hours. A sample that is
+    unavailable, not a number, or outside 0 to 100 percent is not carried forward:
+    the hours in which it is in force are excluded and the values at their
+    boundaries are ``None``.
     """
     entity_id = mapping.entity_id
     records: dict[datetime, HistorySample] = {}
@@ -350,20 +349,22 @@ def _state_of_charge_series(
     # Home Assistant's history API only returns a row when an entity's
     # state changes, so an hour with no row does not mean the value is
     # missing; it means the value has not changed since the previous
-    # observation. Carry the most recent known value forward for each
-    # hour instead of requiring a fresh row in every bucket.
+    # observation. Carry the most recent known value forward to every hour
+    # boundary instead of requiring a fresh row in every bucket. A state
+    # recorded exactly on a boundary is in force there, like the counter
+    # observations that close the hour before it.
     values: list[float | None] = []
     last_sample: HistorySample | None = None
     next_index = 0
-    for index in range(hours):
-        boundary = effective_start + timedelta(hours=index + 1)
-        while next_index < len(ordered) and ordered[next_index][0] < boundary:
+    for index in range(hours + 1):
+        boundary = effective_start + timedelta(hours=index)
+        while next_index < len(ordered) and ordered[next_index][0] <= boundary:
             last_sample = ordered[next_index][1]
             next_index += 1
         if last_sample is None:  # pragma: no cover - effective_start guarantees this
             raise HomeAssistantError(
                 "Home Assistant returned no state-of-charge observation "
-                f"before {boundary.isoformat()} for {entity_id}"
+                f"at or before {boundary.isoformat()} for {entity_id}"
             )
         values.append(
             None if _state_of_charge_reason(last_sample) else last_sample.value

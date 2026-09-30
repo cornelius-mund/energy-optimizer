@@ -358,10 +358,10 @@ Every series identifies its `source`, requested and `available_*` coverage,
   The price history is a separate record from the replace-latest forecast run, so
   the Forecast tab is unaffected. Hours without a published price stay explicit
   gaps.
-- Battery state of charge is the sample at the start of each hour, in percent. It
-  comes from the retained history used for the calculated battery efficiency, so
-  it is available only when `home_assistant.battery.efficiency_calculation` is
-  configured.
+- Battery state of charge is the state in force at the start of each hour, in
+  percent: the last state recorded at or before it. It comes from the retained
+  history used for the calculated battery efficiency, so it is available only when
+  `home_assistant.battery.efficiency_calculation` is configured.
 
 Historic actuals never contain forecasts or optimizer plan snapshots.
 

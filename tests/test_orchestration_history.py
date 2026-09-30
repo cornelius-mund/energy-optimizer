@@ -343,7 +343,7 @@ def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
     # Bootstrap: ten years of history. Every one of the 10 distinct entities is
     # imported as one sequence of seven-day chunks. The entity that household
     # load and grid import share covers the earlier household lookback, and the
-    # state of charge reaches one hour beyond the last complete hour.
+    # state of charge ends at the last complete hour, like every energy entity.
     end = BASE + 6 * ONE_HOUR
     start = end - RETENTION
     assert bootstrap_requests == {
@@ -356,7 +356,7 @@ def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
         "sensor.ac_into_inverter": chunks(start, end),
         "sensor.mppt_energy": chunks(start, end),
         "sensor.inverter_to_ac": chunks(start, end),
-        SOC: chunks(start, end + ONE_HOUR),
+        SOC: chunks(start, end),
     }
 
     # Steady state: only the three new hours, one request per distinct entity.
@@ -372,7 +372,7 @@ def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
         "sensor.ac_into_inverter": [(persisted_end, new_end)],
         "sensor.mppt_energy": [(persisted_end, new_end)],
         "sensor.inverter_to_ac": [(persisted_end, new_end)],
-        SOC: [(persisted_end, new_end + ONE_HOUR)],
+        SOC: [(persisted_end, new_end)],
     }
     assert sum(len(ranges) for ranges in incremental_requests.values()) == 10
 

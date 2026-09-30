@@ -128,8 +128,9 @@ class BatteryEfficiencyHistoryData:
 
     An hour excluded in any component is excluded in all six energy legs, so the
     ratios never mix valid and invalid legs. A state-of-charge value is one
-    hour boundary: ``state_of_charge_percent[i]`` lies between hour ``i - 1`` and
-    hour ``i``. It is ``None`` when the state of charge was invalid there or an
+    hour boundary: ``state_of_charge_percent[i]`` is the last state recorded at or
+    before the start of hour ``i``, so it lies between hour ``i - 1`` and hour
+    ``i``. It is ``None`` when the state of charge was invalid there or an
     adjacent hour is excluded.
     """
 
