@@ -503,24 +503,41 @@ coverage, the controls use the union of their available ranges so valid price
 and PV points are retained; each chart shows the other provider's missing
 intervals as gaps. If forecast coverage is unavailable, it keeps the
 unavailable state instead of inventing a range. The x-axis labels include each
-point's date and time in the configured time zone; chart points also expose their
-exact timestamp and value on pointer hover and keyboard focus. The detail lists
+point's date and time in the configured time zone. The detail lists
 (coverage, retrieved, generated, published) use the same zone.
+
+Every chart has its own legend beside it (below it on screens up to 760px wide).
+The legend lists only the series that chart draws, in chart order, as
+`<label> (<unit>)` with a swatch in the line's color, for example
+`Import price (EUR/kWh)`; a series without data has no entry. Each entry is a
+`<button>` whose `aria-pressed` state tells whether the line is shown. Clicking it,
+or pressing Enter or Space on it, hides the line and its points or shows them again
+without a new request. The chart's value axis, tick labels, and precision are
+recomputed from the lines that remain, and stay at the default scale when every
+line is hidden. Hidden lines are remembered per series ID for the page session, so
+they survive a range reload and a tab switch, and a page reload shows them again.
+Nothing is stored in the browser. The Efficiency and Excluded hours tabs draw no
+chart and show no legend.
+
+Chart points expose the series label, the exact timestamp in the configured zone,
+and the value with its unit on pointer hover and keyboard focus, for example
+`Import price · 2026-09-30 23:00 · 0.14 EUR/kWh`. The tooltip stays inside the chart
+its point belongs to, so it never covers that chart's legend.
 
 The dashboard also provides a Forecast tab backed by
 `GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify
 their source, unit, coverage, retrieval time, and freshness. PV generation uses
 `kW`; market prices use `EUR/kWh`. The Forecast tab renders power and price data
-in separate charts, each with its own unit axis, data-driven scale, legend
-labels, and accessible description. Each scale uses finite visible values with
+in separate charts, each with its own unit axis, data-driven scale, legend,
+and accessible description. Each scale uses finite visible values with
 small padding, while flat or empty data receives a safe non-zero fallback
 domain. API boundaries and point timestamps are UTC hourly half-open ranges, which
 the dashboard shows in the configured time zone. The aWATTar price forecast is
 requested for a window that reaches 48 hours past the current hour, so it covers
 the next local day as soon as the day-ahead prices are published at 14:00 local
 time. Missing or partial observations remain gaps and are not interpolated or treated
-as zero. Chart points expose their exact timestamp and value with the series
-unit on pointer hover and keyboard focus.
+as zero. The forecast charts have the same per-chart legends, show and hide
+behavior, and point tooltips as the Historic actuals tab.
 
 The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so the
 dashboard remains available after the Python application is installed into the

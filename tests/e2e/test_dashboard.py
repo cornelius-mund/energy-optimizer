@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from playwright.sync_api import Page, Request, Route, expect
+from playwright.sync_api import FloatRect, Page, Request, Route, expect
 from pydantic import TypeAdapter
 
 from energy_optimizer.exclusions import (
@@ -312,9 +312,16 @@ def test_historic_tab_renders_every_available_asset_with_its_availability(
     expect(page.locator("#battery-chart")).to_be_visible()
     expect(page.locator("#battery-axis-unit")).to_have_text("%")
     expect(page.locator("#battery-points circle")).to_have_count(2)
-    expect(page.locator("#legend .legend-item")).to_have_count(6)
-    expect(page.locator("#legend")).to_contain_text("Grid import (kW)")
-    expect(page.locator("#legend")).to_contain_text("Battery state of charge (%)")
+    expect(page.locator("#legend")).to_have_count(0)
+    expect(page.locator("#power-legend .legend-item")).to_have_text(
+        ["Household load (kW)", "Grid import (kW)", "Grid export (kW)"]
+    )
+    expect(page.locator("#price-legend .legend-item")).to_have_text(
+        ["Import price (EUR/kWh)", "Export price (EUR/kWh)"]
+    )
+    expect(page.locator("#battery-legend .legend-item")).to_have_text(
+        ["Battery state of charge (%)"]
+    )
     expect(page.locator("#details")).to_contain_text("home-assistant / grid_flow")
     expect(page.locator("#details")).to_contain_text("awattar.de / de")
     battery_point = page.locator("#battery-points circle").first
@@ -346,7 +353,307 @@ def test_historic_tab_withholds_invalid_asset_data_but_keeps_valid_series(
     expect(page.locator("#power-series-paths path")).to_have_count(1)
     expect(page.locator("#power-points circle")).to_have_count(2)
     expect(page.locator("#details")).to_contain_text("Invalid data withheld")
-    expect(page.locator("#legend")).not_to_contain_text("Grid import")
+    expect(page.locator("#power-legend")).not_to_contain_text("Grid import")
+    expect(page.locator("#power-legend .legend-item")).to_have_count(1)
+
+
+CHARTS: Final = ("power", "price", "battery")
+
+
+def _seed_historic_assets(
+    e2e_api: httpx.Client, e2e_server: LiveServer
+) -> tuple[datetime, datetime]:
+    """Seed actuals for the power, price, and battery charts and return their window."""
+    start, end = _past_window()
+    _seed_household(e2e_api, start, [1.2, 1.0])
+    _seed_grid_flow(e2e_api, start)
+    _seed_price_and_battery_history(e2e_server, start)
+    return start, end
+
+
+def _console_errors(page: Page) -> list[str]:
+    """Record every console error and uncaught page error from now on."""
+    errors: list[str] = []
+    page.on(
+        "console",
+        lambda message: (
+            errors.append(message.text) if message.type == "error" else None
+        ),
+    )
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    return errors
+
+
+def _box(page: Page, selector: str) -> FloatRect:
+    """Return the on-screen bounding box of one element."""
+    box = page.locator(selector).bounding_box()
+    assert box is not None, f"{selector} is not rendered"
+    return box
+
+
+def _axis_ticks(page: Page, chart: str) -> list[str]:
+    """Return the value-axis tick labels of one chart, bottom to top."""
+    return page.locator(
+        f"#{chart}-labels .axis-label:not(.x-axis-label)"
+    ).all_text_contents()
+
+
+def _line_paths(page: Page, chart: str) -> dict[str, str]:
+    """Return the path data of every drawn line of one chart by series id."""
+    paths: dict[str, str] = page.locator(f"#{chart}-series-paths path").evaluate_all(
+        """(paths) => Object.fromEntries(
+          paths.map((path) => [path.dataset.seriesId, path.getAttribute("d")])
+        )"""
+    )
+    return paths
+
+
+def _swatch_and_line_colors(page: Page, chart: str) -> dict[str, list[str]]:
+    """Return each legend swatch color and its line's stroke color by series id."""
+    colors: dict[str, list[str]] = page.locator(f"#{chart}-panel").evaluate(
+        """(panel) => Object.fromEntries(
+          [...panel.querySelectorAll(".legend-item")].map((entry) => {
+            const id = entry.dataset.seriesId;
+            const line = panel.querySelector(`path[data-series-id="${id}"]`);
+            return [id, [
+              getComputedStyle(entry.querySelector(".legend-swatch")).backgroundColor,
+              getComputedStyle(line).stroke,
+            ]];
+          })
+        )"""
+    )
+    return colors
+
+
+def _reload_range(page: Page) -> None:
+    """Submit the current range again and wait for the reload to finish."""
+    page.locator("#range-form button[type=submit]").click()
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+
+
+def test_each_chart_has_its_own_legend_beside_it(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify every chart lists its own series with matching colors to its right."""
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+
+    expect(page.locator("#legend")).to_have_count(0)
+    expected = {
+        "power": ["Household load (kW)", "Grid import (kW)", "Grid export (kW)"],
+        "price": ["Import price (EUR/kWh)", "Export price (EUR/kWh)"],
+        "battery": ["Battery state of charge (%)"],
+    }
+    for chart in CHARTS:
+        entries = page.locator(f"#{chart}-legend .legend-item")
+        expect(entries).to_have_text(expected[chart])
+        for index in range(len(expected[chart])):
+            entry = entries.nth(index)
+            expect(entry).to_have_attribute("aria-pressed", "true")
+            assert entry.evaluate("(node) => node.tagName") == "BUTTON"
+            assert entry.get_attribute("type") == "button"
+        svg = _box(page, f"#{chart}-chart")
+        legend = _box(page, f"#{chart}-legend")
+        assert legend["x"] >= svg["x"] + svg["width"]
+        colors = _swatch_and_line_colors(page, chart)
+        assert len(colors) == len(expected[chart])
+        assert all(swatch == stroke for swatch, stroke in colors.values())
+        assert len({swatch for swatch, _ in colors.values()}) == len(colors)
+
+
+def test_legend_entries_show_and_hide_lines_and_rescale_the_axis(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify a legend entry hides one line, rescales its axis, and restores it."""
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    errors = _console_errors(page)
+    queries = _data_requests(page)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+    original_ticks = _axis_ticks(page, "power")
+    original_paths = _line_paths(page, "power")
+    original_labels: list[str] = page.locator("#power-points circle").evaluate_all(
+        "(points) => points.map((point) => point.getAttribute('aria-label'))"
+    )
+    other_charts = {
+        chart: (_axis_ticks(page, chart), _line_paths(page, chart))
+        for chart in ("price", "battery")
+    }
+    queries.clear()
+
+    grid_import = page.locator("#power-legend [data-series-id=grid_import_actual]")
+    grid_import.click()
+
+    expect(grid_import).to_have_attribute("aria-pressed", "false")
+    expect(grid_import).to_have_css("text-decoration-line", "line-through")
+    expect(grid_import.locator(".legend-swatch")).to_have_css("opacity", "0.3")
+    expect(page.locator("#power-series-paths path")).to_have_count(2)
+    expect(
+        page.locator("#power-series-paths [data-series-id=grid_import_actual]")
+    ).to_have_count(0)
+    expect(page.locator("#power-points circle")).to_have_count(4)
+    remaining: list[str] = page.locator("#power-points circle").evaluate_all(
+        "(points) => points.map((point) => point.getAttribute('aria-label'))"
+    )
+    assert remaining == [
+        label for label in original_labels if not label.startswith("Grid import")
+    ]
+    # Grid import holds the largest power values, so the axis shrinks without it.
+    assert float(_axis_ticks(page, "power")[-1]) < float(original_ticks[-1])
+    assert set(_line_paths(page, "power")) == {
+        "household_load_actual",
+        "grid_export_actual",
+    }
+    for chart, (ticks, paths) in other_charts.items():
+        assert _axis_ticks(page, chart) == ticks
+        assert _line_paths(page, chart) == paths
+    expect(page.locator("#power-legend .legend-item")).to_have_count(3)
+    assert queries == [], "toggling a line must not refetch data"
+
+    grid_import.click()
+
+    expect(grid_import).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#power-points circle")).to_have_count(6)
+    assert _line_paths(page, "power") == original_paths
+    assert _axis_ticks(page, "power") == original_ticks
+
+    entries = page.locator("#power-legend .legend-item")
+    for index in range(3):
+        entries.nth(index).click()
+    expect(page.locator("#power-series-paths path")).to_have_count(0)
+    expect(page.locator("#power-points circle")).to_have_count(0)
+    expect(page.locator("#power-chart")).to_be_visible()
+    expect(page.locator("#power-axis-unit")).to_have_text("kW")
+    ticks = _axis_ticks(page, "power")
+    assert len(ticks) == 5
+    assert (ticks[0], ticks[-1]) == ("0.0", "1.0")
+    expect(page.locator("#power-labels .x-axis-label")).to_have_count(2)
+    expect(entries).to_have_count(3)
+    for index in range(3):
+        expect(entries.nth(index)).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#price-series-paths path")).to_have_count(2)
+
+    for index in range(3):
+        entries.nth(index).click()
+    expect(page.locator("#power-series-paths path")).to_have_count(3)
+    assert _line_paths(page, "power") == original_paths
+    assert _axis_ticks(page, "power") == original_ticks
+    assert errors == []
+
+
+def test_hidden_series_stay_hidden_until_the_page_is_reloaded(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify hidden lines survive range and tab changes, not a page reload."""
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+    grid_import = page.locator("#power-legend [data-series-id=grid_import_actual]")
+    grid_import.click()
+    expect(page.locator("#power-series-paths path")).to_have_count(2)
+
+    _reload_range(page)
+    expect(grid_import).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#power-series-paths path")).to_have_count(2)
+    expect(page.locator("#power-points circle")).to_have_count(4)
+
+    page.locator("#excluded-tab").click()
+    expect(page.locator("#excluded-content")).to_be_visible()
+    expect(page.locator(".chart-legend:visible")).to_have_count(0)
+    page.locator("#actuals-tab").click()
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    expect(grid_import).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#power-series-paths path")).to_have_count(2)
+    assert "grid_import_actual" not in _line_paths(page, "power")
+
+    _open_dashboard(page, e2e_server)
+    expect(page.locator("#power-legend .legend-item")).to_have_count(3)
+    expect(grid_import).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#power-series-paths path")).to_have_count(3)
+
+
+def test_legend_entries_are_operable_from_the_keyboard(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify Tab reaches legend entries and Enter and Space toggle their lines."""
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+    entries = page.locator("#power-legend .legend-item")
+
+    page.locator("#power-points circle").last.focus()
+    page.keyboard.press("Tab")
+    expect(entries.nth(0)).to_be_focused()
+
+    page.keyboard.press("Enter")
+    expect(entries.nth(0)).to_have_attribute("aria-pressed", "false")
+    expect(entries.nth(0)).to_be_focused()
+    expect(page.locator("#power-series-paths path")).to_have_count(2)
+
+    page.keyboard.press("Space")
+    expect(entries.nth(0)).to_have_attribute("aria-pressed", "true")
+    expect(entries.nth(0)).to_be_focused()
+    expect(page.locator("#power-series-paths path")).to_have_count(3)
+
+    page.keyboard.press("Tab")
+    expect(entries.nth(1)).to_be_focused()
+    page.keyboard.press("Space")
+    expect(entries.nth(1)).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#power-series-paths path")).to_have_count(2)
+
+
+def test_tooltip_names_its_series_and_stays_inside_its_chart(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify the tooltip names its line and stays clear of the legend."""
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+
+    for chart in CHARTS:
+        # The last point of a chart is the one nearest its right edge.
+        point = page.locator(f"#{chart}-points circle").last
+        label = point.get_attribute("aria-label") or ""
+        name, remainder = label.split(", ", 1)
+        stamp, value = remainder.split(": ", 1)
+        point.hover()
+
+        tooltip = page.locator("#point-tooltip")
+        expect(tooltip).to_have_text(f"{name} · {stamp} · {value}")
+        box = _box(page, "#point-tooltip")
+        svg = _box(page, f"#{chart}-chart")
+        legend = _box(page, f"#{chart}-legend")
+        assert box["x"] >= svg["x"]
+        assert box["x"] + box["width"] <= svg["x"] + svg["width"]
+        assert box["y"] >= svg["y"]
+        assert box["y"] + box["height"] <= svg["y"] + svg["height"]
+        assert box["x"] + box["width"] <= legend["x"]
+        assert (
+            page.locator(f"#{chart}-points circle").last.get_attribute("aria-label")
+            == label
+        )
+
+
+def test_legends_are_placed_below_their_charts_on_narrow_screens(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify each legend sits under its chart and inside the card at 600px."""
+    page.set_viewport_size({"width": 600, "height": 900})
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+
+    card = _box(page, ".chart-card")
+    for chart in CHARTS:
+        svg = _box(page, f"#{chart}-chart")
+        legend = _box(page, f"#{chart}-legend")
+        assert legend["y"] >= svg["y"] + svg["height"]
+        assert legend["x"] >= card["x"]
+        assert legend["x"] + legend["width"] <= card["x"] + card["width"]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
 
 
 def test_efficiency_tab_renders_battery_and_inverter_components(
@@ -440,7 +747,8 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
     annotations = _assistive_annotations(page)
     assert len(annotations) == 1
     assert not any("default" in text.lower() for text in annotations)
-    expect(page.locator("#legend")).to_be_empty()
+    expect(page.locator(".chart-legend .legend-item")).to_have_count(0)
+    expect(page.locator(".chart-panel:visible")).to_have_count(0)
 
 
 def test_efficiency_tab_shows_one_annotation_for_each_fallback_status(
@@ -592,7 +900,7 @@ def test_efficiency_tab_formats_throughput_to_two_decimals(
 
 
 def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) -> None:
-    """Verify forecast data drives separate charts and a data-driven legend."""
+    """Verify forecast data drives separate charts, each with its own legend."""
     start, end = _window()
     _seed_forecasts(e2e_server, start)
 
@@ -606,10 +914,25 @@ def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) 
     expect(page.locator("#price-chart")).to_be_visible()
     expect(page.locator("#power-points circle")).to_have_count(2)
     expect(page.locator("#price-points circle")).to_have_count(4)
-    expect(page.locator("#legend .legend-item")).to_have_count(3)
-    expect(page.locator("#legend")).to_contain_text("PV generation (kW)")
-    expect(page.locator("#legend")).to_contain_text("Import price (EUR/kWh)")
-    expect(page.locator("#legend")).to_contain_text("Export price (EUR/kWh)")
+    expect(page.locator("#legend")).to_have_count(0)
+    expect(page.locator("#power-legend .legend-item")).to_have_text(
+        ["PV generation (kW)"]
+    )
+    expect(page.locator("#price-legend .legend-item")).to_have_text(
+        ["Import price (EUR/kWh)", "Export price (EUR/kWh)"]
+    )
+    expect(page.locator("#battery-panel")).to_be_hidden()
+    expect(page.locator("#battery-legend .legend-item")).to_have_count(0)
+    import_price = page.locator("#price-legend [data-series-id=import_price_forecast]")
+    expect(import_price).to_have_attribute("aria-pressed", "true")
+    import_price.click()
+    expect(import_price).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#price-series-paths path")).to_have_count(1)
+    expect(page.locator("#price-points circle")).to_have_count(2)
+    expect(page.locator("#power-series-paths path")).to_have_count(1)
+    import_price.click()
+    expect(page.locator("#price-series-paths path")).to_have_count(2)
+    expect(page.locator("#price-points circle")).to_have_count(4)
     price_ticks = page.locator("#price-labels .axis-label:not(.x-axis-label)")
     expect(price_ticks).to_have_count(5)
     tick_labels = price_ticks.all_text_contents()
@@ -1192,7 +1515,7 @@ def test_forecast_prices_show_the_next_local_day_in_the_configured_zone(
     assert "2026-10-01 00:00" in (points.nth(3).get_attribute("aria-label") or "")
     slot.focus()
     expect(page.locator("#point-tooltip")).to_have_text(
-        "2026-09-30 23:00 · 0.14 EUR/kWh"
+        "Import price · 2026-09-30 23:00 · 0.14 EUR/kWh"
     )
     ticks = page.locator("#price-labels .x-axis-label")
     expect(ticks).to_have_text(

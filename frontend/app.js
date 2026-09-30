@@ -24,7 +24,6 @@
   const badge = document.querySelector("#scenario-badge");
   const heading = document.querySelector("#chart-heading");
   const eyebrow = document.querySelector("#series-eyebrow");
-  const legend = document.querySelector("#legend");
   const interpretation = document.querySelector("#interpretation-text");
   const efficiencySummary = document.querySelector("#efficiency-summary");
   const efficiencyMetrics = document.querySelector("#efficiency-metrics");
@@ -36,6 +35,10 @@
   const excludedTable = document.querySelector("#excluded-table");
   const excludedRows = document.querySelector("#excluded-rows");
   let scenario = "actual";
+  // The ids of the series the operator hid through a legend. It lives for the
+  // page session only, so it survives a range reload and a tab switch and is
+  // reset by a page reload.
+  const hiddenSeries = new Set();
 
   const pad = (value) => String(value).padStart(2, "0");
   const hourMilliseconds = 60 * 60 * 1000;
@@ -214,7 +217,9 @@
   const formatMetricValue = (metric) => (metricValueFormatters[metric.unit] || String)(metric.value);
   const chartDefinitions = {
     power: {
+      panel: document.querySelector("#power-panel"),
       element: document.querySelector("#power-chart"),
+      legend: document.querySelector("#power-legend"),
       grid: document.querySelector("#power-grid-lines"),
       labels: document.querySelector("#power-labels"),
       points: document.querySelector("#power-points"),
@@ -222,9 +227,12 @@
       axisUnit: document.querySelector("#power-axis-unit"),
       title: document.querySelector("#power-chart-title"),
       description: document.querySelector("#power-chart-description"),
+      series: [],
     },
     price: {
+      panel: document.querySelector("#price-panel"),
       element: document.querySelector("#price-chart"),
+      legend: document.querySelector("#price-legend"),
       grid: document.querySelector("#price-grid-lines"),
       labels: document.querySelector("#price-labels"),
       points: document.querySelector("#price-points"),
@@ -232,9 +240,12 @@
       axisUnit: document.querySelector("#price-axis-unit"),
       title: document.querySelector("#price-chart-title"),
       description: document.querySelector("#price-chart-description"),
+      series: [],
     },
     battery: {
+      panel: document.querySelector("#battery-panel"),
       element: document.querySelector("#battery-chart"),
+      legend: document.querySelector("#battery-legend"),
       grid: document.querySelector("#battery-grid-lines"),
       labels: document.querySelector("#battery-labels"),
       points: document.querySelector("#battery-points"),
@@ -242,6 +253,7 @@
       axisUnit: document.querySelector("#battery-axis-unit"),
       title: document.querySelector("#battery-chart-title"),
       description: document.querySelector("#battery-chart-description"),
+      series: [],
     },
   };
   const chartSeries = (series) => ({
@@ -279,14 +291,26 @@
       && parseInputTimestamp(end) <= parseInputTimestamp(coverage.end))) return null;
     return coverage;
   };
-  const showPoint = (timestamp, value, unit, point) => {
-    tooltip.textContent = `${formatTimestamp(timestamp)} · ${value} ${unit}`;
+  // The tooltip sits above its point, or below it when the chart has no room
+  // above, and is clamped to the box of the chart the point belongs to. The
+  // legend is outside that box, so the tooltip never covers it.
+  const showPoint = (label, timestamp, value, unit, point, chart) => {
+    const margin = 4;
+    const gap = 8;
+    tooltip.textContent = `${label} · ${formatTimestamp(timestamp)} · ${value} ${unit}`;
+    tooltip.style.maxWidth = "";
     tooltip.hidden = false;
-    const chart = document.querySelector("#chart").getBoundingClientRect();
+    const origin = tooltip.parentElement.getBoundingClientRect();
+    const bounds = chart.getBoundingClientRect();
     const pointBox = point.getBoundingClientRect();
-    const left = Math.min(Math.max(pointBox.left - chart.left, 8), chart.width - 180);
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${Math.max(pointBox.top - chart.top - 42, 4)}px`;
+    const available = bounds.width - 2 * margin;
+    if (tooltip.offsetWidth > available) tooltip.style.maxWidth = `${available}px`;
+    const { offsetWidth: width, offsetHeight: height } = tooltip;
+    const left = Math.min(Math.max(pointBox.left, bounds.left + margin), bounds.right - width - margin);
+    const above = pointBox.top - height - gap;
+    const top = above >= bounds.top + margin ? above : pointBox.bottom + gap;
+    tooltip.style.left = `${left - origin.left}px`;
+    tooltip.style.top = `${Math.min(top, bounds.bottom - height - margin) - origin.top}px`;
   };
   const hidePoint = () => { tooltip.hidden = true; };
   const hasSeriesData = (series, id) => series.some(
@@ -351,15 +375,19 @@
     if (first.published_at) addDetail("Published", formatTimestamp(first.published_at));
   };
 
-  const renderGraph = (definition, series) => {
-    const { element, grid, labels, points, seriesPaths, axisUnit, title, description } = definition;
+  // Draws every series that is not hidden. The title, the description, and the
+  // time axis describe the whole chart, so hiding a series changes only the
+  // lines, the points, and the value axis, which is rescaled to what remains.
+  const renderGraph = (definition) => {
+    const { panel, element, grid, labels, points, seriesPaths, axisUnit, title, description, series } = definition;
     grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
-      element.removeAttribute("hidden");
+    panel.removeAttribute("hidden");
+    const visibleSeries = series.filter((item) => !hiddenSeries.has(item.id));
     const unit = unitForSeries(series[0]);
     axisUnit.textContent = unit;
     title.textContent = `${series.map(seriesLabel).join(" and ")} (${unit})`;
     description.textContent = `${series.map((item) => `${seriesLabel(item)} in ${unitForSeries(item)}`).join("; ")}. Missing intervals remain gaps.`;
-    const valueList = series.flatMap((item) => item.values);
+    const valueList = visibleSeries.flatMap((item) => item.values);
     const left = 52; const right = 785; const top = 18; const bottom = 276;
     const { min, max } = axisDomainForValues(valueList);
     const axisPrecision = axisPrecisionForSpan(max - min);
@@ -388,6 +416,7 @@
       labels.append(label);
     }
     series.forEach((item, seriesIndex) => {
+      if (hiddenSeries.has(item.id)) return;
       const className = seriesClass(item, seriesIndex);
       let path = "";
       item.values.forEach((value, index) => {
@@ -398,23 +427,54 @@
         point.setAttribute("cx", x(index, item.values.length)); point.setAttribute("cy", y(value)); point.setAttribute("r", item.values.length > 48 ? 2.5 : 4); point.setAttribute("class", `point point-${className.replace("series-", "")}`);
         point.setAttribute("tabindex", "0");
         point.setAttribute("aria-label", `${seriesLabel(item)}, ${formatTimestamp(item.timestamps[index])}: ${value} ${unitForSeries(item)}`);
-        point.addEventListener("pointerenter", () => showPoint(item.timestamps[index], value, unitForSeries(item), point));
+        const show = () => showPoint(seriesLabel(item), item.timestamps[index], value, unitForSeries(item), point, element);
+        point.addEventListener("pointerenter", show);
         point.addEventListener("pointerleave", hidePoint);
-        point.addEventListener("focus", () => showPoint(item.timestamps[index], value, unitForSeries(item), point));
+        point.addEventListener("focus", show);
         point.addEventListener("blur", hidePoint);
         points.append(point);
       });
       const seriesLine = document.createElementNS("http://www.w3.org/2000/svg", "path");
       seriesLine.setAttribute("d", path.trim());
       seriesLine.setAttribute("class", `series-line ${className}`);
+      seriesLine.dataset.seriesId = item.id;
       seriesPaths.append(seriesLine);
     });
   };
 
+  // One button per series of the chart. Toggling updates the entry in place
+  // instead of rebuilding the legend, so keyboard focus stays on the entry.
+  const renderLegend = (definition) => {
+    definition.legend.replaceChildren();
+    definition.series.forEach((item, seriesIndex) => {
+      const entry = document.createElement("button");
+      entry.type = "button";
+      entry.className = `legend-item ${seriesClass(item, seriesIndex).replace("series-", "legend-")}`;
+      entry.dataset.seriesId = item.id;
+      entry.setAttribute("aria-pressed", String(!hiddenSeries.has(item.id)));
+      const swatch = document.createElement("span");
+      swatch.className = "legend-swatch";
+      swatch.setAttribute("aria-hidden", "true");
+      entry.append(swatch, `${seriesLabel(item)} (${unitForSeries(item)})`);
+      entry.addEventListener("click", () => {
+        const hide = !hiddenSeries.has(item.id);
+        if (hide) hiddenSeries.add(item.id); else hiddenSeries.delete(item.id);
+        entry.setAttribute("aria-pressed", String(!hide));
+        hidePoint();
+        renderGraph(definition);
+        diagnostic("debug", "series_toggled", { series: item.id, visible: !hide });
+      });
+      definition.legend.append(entry);
+    });
+  };
+
   const renderChart = (data) => {
-    Object.values(chartDefinitions).forEach(({ element, grid, labels, points, seriesPaths }) => {
-      element.setAttribute("hidden", "");
+    Object.values(chartDefinitions).forEach((definition) => {
+      const { panel, grid, labels, points, seriesPaths, legend } = definition;
+      panel.setAttribute("hidden", "");
       grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
+      legend.replaceChildren();
+      definition.series = [];
     });
     hidePoint();
     const series = selectedSeries(data);
@@ -462,10 +522,13 @@
       chartNote.textContent = "Each value is a calculated ratio over the retained battery and inverter history, not an hourly observation.";
       return;
     }
-    chartNote.textContent = `Each point represents one hourly interval. Times are shown in ${zoneName()}. Charts are separated by unit. Focus a point to inspect it.`;
+    chartNote.textContent = `Each point represents one hourly interval. Times are shown in ${zoneName()}. Charts are separated by unit. Focus a point to inspect it, or use a legend entry to show or hide its line.`;
     Object.entries(chartSeries(series)).forEach(([kind, groupedSeries]) => {
-      const usableSeries = groupedSeries.filter((item) => hasSeriesData([item], item.id));
-      if (usableSeries.length) renderGraph(chartDefinitions[kind], usableSeries);
+      const definition = chartDefinitions[kind];
+      definition.series = groupedSeries.filter((item) => hasSeriesData([item], item.id));
+      if (!definition.series.length) return;
+      renderLegend(definition);
+      renderGraph(definition);
     });
   };
 
@@ -591,30 +654,6 @@
       : efficiency
         ? `These ratios are calculated from measured battery and inverter energy over the complete retained history${efficiencyHistory ? ` (${formatTimestamp(efficiencyHistory.available_start_time)} to ${formatTimestamp(efficiencyHistory.available_end_time)})` : ""}. Battery efficiency is one full-cycle value; inverter charge and discharge are separate conversion values.`
         : "These are imported actuals from the configured providers. Prices are those that applied in completed hours. They are not forecasts and do not describe an optimization plan; battery state of charge is the sample at the start of each hour.";
-    legend.replaceChildren();
-    const labels = forecast
-      ? [
-        ["pv_generation_forecast", "PV generation", "legend-0"],
-        ["import_price_forecast", "Import price", "legend-1"],
-        ["export_price_forecast", "Export price", "legend-2"],
-      ].filter(([id]) => hasSeriesData(series, id))
-      : efficiency
-        ? []
-      : [
-        ["household_load_actual", "Household load", "legend-0"],
-        ["grid_import_actual", "Grid import", "legend-1"],
-        ["grid_export_actual", "Grid export", "legend-2"],
-        ["import_price_actual", "Import price", "legend-1"],
-        ["export_price_actual", "Export price", "legend-2"],
-        ["battery_state_of_charge_actual", "Battery state of charge", "legend-0"],
-      ].filter(([id]) => hasSeriesData(series, id));
-    labels.forEach(([id, label, legendClass]) => {
-      const item = document.createElement("span");
-      item.className = `legend-item ${legendClass}`;
-      const source = series.find((candidate) => candidate.id === id);
-      item.textContent = `${label} (${unitForSeries(source)})`;
-      legend.append(item);
-    });
   };
 
   const loadExcluded = async (start, end) => {
