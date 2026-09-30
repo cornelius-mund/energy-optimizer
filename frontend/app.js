@@ -170,6 +170,8 @@
       : item.unit;
   const seriesLabel = (item) => ({
     household_load_actual: "Household load",
+    unmanaged_household_load_actual: "Unmanaged household load",
+    total_consumption_actual: "Total consumption",
     grid_import_actual: "Grid import",
     grid_export_actual: "Grid export",
     import_price_actual: "Import price",
@@ -182,7 +184,7 @@
     inverter_discharge_efficiency_actual: "Inverter discharge efficiency",
     battery_efficiency_actual: "Battery round-trip efficiency",
     round_trip_efficiency_actual: "Complete round-trip efficiency",
-  }[item.id] || item.id);
+  }[item.id] || item.id.replace(/^(appliance|history)\./, "").replace(/_actual$/, "").replace(/_/g, " "));
   const assetLabel = (asset) => ({
     household_load: "Household load",
     pv_generation: "PV generation",

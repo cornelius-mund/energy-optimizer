@@ -21,8 +21,7 @@ paths:
   /optimize:
     post:
       summary: Optimize
-      description: Solve an hourly electrical schedule with optional flexible heat-pump
-        load.
+      description: Validate hourly inputs; schedule optimization is not implemented.
       operationId: optimize_optimize_post
       requestBody:
         content:
@@ -37,39 +36,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/OptimizationResponse'
-        '503':
-          description: Solver unavailable or optimum not reached
         '422':
           description: Validation Error
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
-  /api/v1/heat-pump:
+  /api/v1/appliances:
     get:
-      summary: Persisted Heat Pump
-      description: Return the latest imported heat-pump snapshot with polling freshness.
-      operationId: persisted_heat_pump_api_v1_heat_pump_get
+      summary: Appliances
+      description: List configured appliances and their explicit accounting/control
+        modes.
+      operationId: appliances_api_v1_appliances_get
       responses:
         '200':
           description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HeatPumpLoadResponse'
-        '404':
-          description: No imported heat-pump snapshot
-        '503':
-          description: Mappings or persistence unavailable
+                additionalProperties:
+                  $ref: '#/components/schemas/ApplianceCapabilities'
+                type: object
+                title: Response Appliances Api V1 Appliances Get
+  /api/v1/appliances/validate:
     post:
-      summary: Heat Pump
-      description: Validate normalized heat-pump load and electrical flexibility constraints.
-      operationId: heat_pump_api_v1_heat_pump_post
+      summary: Validate Appliance
+      description: Validate provider-independent electrical appliance capabilities.
+      operationId: validate_appliance_api_v1_appliances_validate_post
       requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/HeatPumpLoad'
+              $ref: '#/components/schemas/ApplianceCapabilities'
         required: true
       responses:
         '200':
@@ -77,7 +75,47 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HeatPumpLoadResponse'
+                $ref: '#/components/schemas/ApplianceCapabilities'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/energy-history/{source_id}:
+    get:
+      summary: Energy History
+      description: Read appliance or generic measured energy history for a UTC-hour
+        range.
+      operationId: energy_history_api_v1_energy_history__source_id__get
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Source Id
+      - name: start_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: Start Time
+      - name: end_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: End Time
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSeries'
         '422':
           description: Validation Error
           content:
@@ -413,6 +451,45 @@ paths:
                 $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
+    ApplianceCapabilities:
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          minLength: 1
+          title: Name
+        included_in_household_load:
+          type: boolean
+          title: Included In Household Load
+        maximum_power_kw:
+          type: number
+          maximum: 1000.0
+          exclusiveMinimum: 0.0
+          title: Maximum Power Kw
+        control:
+          type: string
+          enum:
+          - continuous
+          - discrete
+          title: Control
+        power_levels:
+          anyOf:
+          - items:
+              type: number
+              maximum: 1.0
+              minimum: 0.0
+            type: array
+          - type: 'null'
+          title: Power Levels
+      additionalProperties: false
+      type: object
+      required:
+      - name
+      - included_in_household_load
+      - maximum_power_kw
+      - control
+      title: ApplianceCapabilities
+      description: Continuous power or enumerated fractions of rated maximum power.
     BatteryRequest:
       properties:
         schema_version:
@@ -1106,10 +1183,7 @@ components:
           description: UTC start of the excluded hour
         source:
           type: string
-          enum:
-          - household_load
-          - grid_flow
-          - battery_efficiency
+          minLength: 1
           title: Source
         causes:
           items:
@@ -1179,10 +1253,7 @@ components:
       properties:
         source:
           type: string
-          enum:
-          - household_load
-          - grid_flow
-          - battery_efficiency
+          minLength: 1
           title: Source
         status:
           type: string
@@ -1216,10 +1287,7 @@ components:
       properties:
         source:
           type: string
-          enum:
-          - household_load
-          - grid_flow
-          - battery_efficiency
+          minLength: 1
           title: Source
         reason:
           type: string
@@ -1455,204 +1523,6 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
-    HeatPumpLoad:
-      properties:
-        schema_version:
-          type: string
-          const: '1'
-          title: Schema Version
-        start_time:
-          type: string
-          format: date-time
-          title: Start Time
-        interval_minutes:
-          type: integer
-          const: 60
-          title: Interval Minutes
-        load_kw:
-          items:
-            type: number
-            maximum: 1000.0
-            minimum: 0.0
-          type: array
-          maxItems: 168
-          minItems: 1
-          title: Load Kw
-        available:
-          items:
-            type: boolean
-          type: array
-          maxItems: 168
-          minItems: 1
-          title: Available
-        minimum_power_kw:
-          type: number
-          maximum: 1000.0
-          minimum: 0.0
-          title: Minimum Power Kw
-        maximum_power_kw:
-          type: number
-          maximum: 1000.0
-          exclusiveMinimum: 0.0
-          title: Maximum Power Kw
-        required_energy_kwh:
-          type: number
-          maximum: 168000.0
-          minimum: 0.0
-          title: Required Energy Kwh
-        unit:
-          type: string
-          const: kW
-          title: Unit
-        energy_unit:
-          type: string
-          const: kWh
-          title: Energy Unit
-        source:
-          anyOf:
-          - $ref: '#/components/schemas/HeatPumpSource'
-          - type: 'null'
-        retrieved_at:
-          type: string
-          format: date-time
-          title: Retrieved At
-        latest_observation_at:
-          type: string
-          format: date-time
-          title: Latest Observation At
-      additionalProperties: false
-      type: object
-      required:
-      - schema_version
-      - start_time
-      - interval_minutes
-      - load_kw
-      - available
-      - minimum_power_kw
-      - maximum_power_kw
-      - required_energy_kwh
-      - unit
-      - energy_unit
-      - retrieved_at
-      - latest_observation_at
-      title: HeatPumpLoad
-      description: An exact electrical energy requirement movable across available
-        hours.
-    HeatPumpLoadResponse:
-      properties:
-        schema_version:
-          type: string
-          const: '1'
-          title: Schema Version
-        start_time:
-          type: string
-          format: date-time
-          title: Start Time
-        interval_minutes:
-          type: integer
-          const: 60
-          title: Interval Minutes
-        load_kw:
-          items:
-            type: number
-            maximum: 1000.0
-            minimum: 0.0
-          type: array
-          maxItems: 168
-          minItems: 1
-          title: Load Kw
-        available:
-          items:
-            type: boolean
-          type: array
-          maxItems: 168
-          minItems: 1
-          title: Available
-        minimum_power_kw:
-          type: number
-          maximum: 1000.0
-          minimum: 0.0
-          title: Minimum Power Kw
-        maximum_power_kw:
-          type: number
-          maximum: 1000.0
-          exclusiveMinimum: 0.0
-          title: Maximum Power Kw
-        required_energy_kwh:
-          type: number
-          maximum: 168000.0
-          minimum: 0.0
-          title: Required Energy Kwh
-        unit:
-          type: string
-          const: kW
-          title: Unit
-        energy_unit:
-          type: string
-          const: kWh
-          title: Energy Unit
-        source:
-          anyOf:
-          - $ref: '#/components/schemas/HeatPumpSource'
-          - type: 'null'
-        retrieved_at:
-          type: string
-          format: date-time
-          title: Retrieved At
-        latest_observation_at:
-          type: string
-          format: date-time
-          title: Latest Observation At
-        status:
-          type: string
-          enum:
-          - validated
-          - stale
-          title: Status
-          default: validated
-        freshness:
-          type: string
-          enum:
-          - fresh
-          - stale
-          - unknown
-          title: Freshness
-          default: unknown
-      additionalProperties: false
-      type: object
-      required:
-      - schema_version
-      - start_time
-      - interval_minutes
-      - load_kw
-      - available
-      - minimum_power_kw
-      - maximum_power_kw
-      - required_energy_kwh
-      - unit
-      - energy_unit
-      - retrieved_at
-      - latest_observation_at
-      title: HeatPumpLoadResponse
-    HeatPumpSource:
-      properties:
-        provider:
-          type: string
-          maxLength: 100
-          minLength: 1
-          title: Provider
-        entity_id:
-          anyOf:
-          - type: string
-            maxLength: 255
-            minLength: 1
-          - type: 'null'
-          title: Entity Id
-      additionalProperties: false
-      type: object
-      required:
-      - provider
-      title: HeatPumpSource
     HistoricHouseholdLoadResponse:
       properties:
         status:
@@ -1768,14 +1638,6 @@ components:
       description: Historic household-load actuals returned to the dashboard.
     HourlyOptimizationRequest:
       properties:
-        heat_pump:
-          anyOf:
-          - $ref: '#/components/schemas/HeatPumpLoad'
-          - type: 'null'
-        battery:
-          anyOf:
-          - $ref: '#/components/schemas/BatteryRequest'
-          - type: 'null'
         start_time:
           type: string
           format: date-time
@@ -1949,9 +1811,7 @@ components:
       properties:
         status:
           type: string
-          enum:
-          - optimal
-          - infeasible
+          const: validated
           title: Status
         start_time:
           type: string
@@ -1966,51 +1826,6 @@ components:
           maximum: 168.0
           minimum: 1.0
           title: Hours
-        objective_eur:
-          anyOf:
-          - type: number
-          - type: 'null'
-          title: Objective Eur
-        grid_import_kw:
-          items:
-            type: number
-          type: array
-          title: Grid Import Kw
-        grid_export_kw:
-          items:
-            type: number
-          type: array
-          title: Grid Export Kw
-        pv_used_kw:
-          items:
-            type: number
-          type: array
-          title: Pv Used Kw
-        heat_pump_kw:
-          items:
-            type: number
-          type: array
-          title: Heat Pump Kw
-        battery_charge_kw:
-          items:
-            type: number
-          type: array
-          title: Battery Charge Kw
-        battery_discharge_kw:
-          items:
-            type: number
-          type: array
-          title: Battery Discharge Kw
-        battery_soc_kwh:
-          items:
-            type: number
-          type: array
-          title: Battery Soc Kwh
-        diagnostics:
-          items:
-            type: string
-          type: array
-          title: Diagnostics
       additionalProperties: false
       type: object
       required:

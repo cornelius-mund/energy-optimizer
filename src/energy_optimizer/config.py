@@ -2,6 +2,7 @@
 
 import logging
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -20,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from energy_optimizer.appliances import ApplianceCapabilities
 from energy_optimizer.providers.interfaces import (
     BATTERY_SOURCE_ID,
     GRID_FLOW_SOURCE_ID,
@@ -346,7 +348,9 @@ class HomeAssistantConfiguration(_StrictModel):
     grid_import: EnergyAggregateConfiguration | None = None
     grid_export: EnergyAggregateConfiguration | None = None
     battery: HomeAssistantBatteryConfiguration | None = None
-    heat_pump: "HomeAssistantHeatPumpConfiguration | None" = None
+    energy_history: dict[str, EnergyAggregateConfiguration] = Field(
+        default_factory=dict
+    )
     timeout_seconds: float = Field(gt=0, le=120)
     max_data_age_seconds: float | None = Field(default=None, gt=0)
 
@@ -393,32 +397,10 @@ class HomeAssistantConfiguration(_StrictModel):
         return BATTERY_SOURCE_ID
 
 
-class HeatPumpEntityConfiguration(_StrictModel):
-    """One instantaneous electrical value or attribute in Home Assistant."""
+class ApplianceConfiguration(ApplianceCapabilities):
+    """An installation-specific appliance with optional measured energy history."""
 
-    entity_id: str = Field(min_length=1, max_length=255)
-    unit: Literal["W", "kW", "Wh", "kWh"]
-    attribute: str | None = Field(default=None, min_length=1, max_length=255)
-
-
-class HomeAssistantHeatPumpConfiguration(_StrictModel):
-    """Current power and energy requirement, with explicit scheduling bounds."""
-
-    power: HeatPumpEntityConfiguration
-    required_energy: HeatPumpEntityConfiguration
-    minimum_power_kw: float = Field(default=0, ge=0, le=1000, allow_inf_nan=False)
-    maximum_power_kw: float = Field(gt=0, le=1000, allow_inf_nan=False)
-    available: list[bool] = Field(min_length=1, max_length=168)
-
-    @model_validator(mode="after")
-    def validate_units_and_limits(self) -> "HomeAssistantHeatPumpConfiguration":
-        if self.power.unit not in {"W", "kW"}:
-            raise ValueError("heat_pump.power must use W or kW")
-        if self.required_energy.unit not in {"Wh", "kWh"}:
-            raise ValueError("heat_pump.required_energy must use Wh or kWh")
-        if self.minimum_power_kw > self.maximum_power_kw:
-            raise ValueError("heat_pump minimum power must not exceed maximum power")
-        return self
+    history: EnergyAggregateConfiguration | None = None
 
 
 class ForecastSolarConfiguration(_StrictModel):
@@ -538,6 +520,7 @@ class Configuration(_StrictModel):
     grid: GridConfiguration
     solver: SolverConfiguration
     home_assistant: HomeAssistantConfiguration | None = None
+    appliances: dict[str, ApplianceConfiguration] = Field(default_factory=dict)
     forecast_solar: ForecastSolarConfiguration | None = None
     awattar: AwattarConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
@@ -561,7 +544,33 @@ class Configuration(_StrictModel):
             and self.persistence is None
         ):
             raise ValueError("persistence is required when orchestration is enabled")
+        histories = self.home_assistant.energy_history if self.home_assistant else {}
+
+        for key in (*self.appliances, *histories):
+            if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key) is None:
+                raise ValueError(
+                    "appliance and energy_history IDs must use "
+                    "lowercase letters, digits and underscores"
+                )
+        if self.home_assistant is None and any(
+            appliance.history is not None for appliance in self.appliances.values()
+        ):
+            raise ValueError(
+                "home_assistant connection is required for appliance history"
+            )
         return self
+
+    def configured_energy_histories(self) -> dict[str, EnergyAggregateConfiguration]:
+        """Return stable identities of all generic and appliance history sources."""
+        histories = self.home_assistant.energy_history if self.home_assistant else {}
+        return {
+            **{f"history.{name}": mapping for name, mapping in histories.items()},
+            **{
+                f"appliance.{name}": item.history
+                for name, item in self.appliances.items()
+                if item.history is not None
+            },
+        }
 
     def is_configured_household_load_source(
         self, provider: str, entity_id: str | None

@@ -11,7 +11,6 @@ from energy_optimizer.api.validation import (
     require_aware_timestamps,
 )
 from energy_optimizer.exclusions import ExclusionReason
-from energy_optimizer.heat_pump import HeatPumpLoad
 
 MAX_HORIZON_HOURS = 87_672
 
@@ -24,8 +23,6 @@ class HourlyOptimizationRequest(_StrictModel):
     """Validated hourly inputs accepted by the optimization boundary."""
 
     start_time: datetime = Field(description="Timezone-aware start of the horizon")
-    heat_pump: HeatPumpLoad | None = None
-    battery: "BatteryRequest | None" = None
     interval_minutes: Literal[60] = Field(
         description="Duration of every interval; hourly requests require 60"
     )
@@ -55,13 +52,6 @@ class HourlyOptimizationRequest(_StrictModel):
         }
         if len(set(lengths.values())) != 1:
             raise ValueError(f"time-series lengths must match: {lengths}")
-        if self.heat_pump is not None and (
-            self.heat_pump.start_time != self.start_time
-            or len(self.heat_pump.load_kw) != len(self.load_kw)
-        ):
-            raise ValueError("heat_pump start_time and horizon must match optimization")
-        if self.battery is not None and self.battery.start_time != self.start_time:
-            raise ValueError("battery start_time must match optimization")
         return self
 
 
@@ -457,14 +447,14 @@ class ExcludedHour(_StrictModel):
     """One excluded hour of one source."""
 
     hour_start: datetime = Field(description="UTC start of the excluded hour")
-    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    source: str = Field(min_length=1)
     causes: list[ExclusionCause] = Field(min_length=1)
 
 
 class ExcludedHoursSource(_StrictModel):
     """Whether one source could be read, and how many hours it excluded."""
 
-    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    source: str = Field(min_length=1)
     status: Literal["available", "not_configured", "unavailable", "invalid"] = Field(
         description=(
             "available: persisted history was read; not_configured: the "
@@ -479,7 +469,7 @@ class ExcludedHoursSource(_StrictModel):
 class ExcludedHoursSummary(_StrictModel):
     """The number of excluded hours of one source for one reason."""
 
-    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    source: str = Field(min_length=1)
     reason: ExclusionReason
     excluded_hour_count: int = Field(
         ge=1, description="Hours with this reason; an hour counts once per reason"
@@ -635,16 +625,7 @@ class GridFlowResponse(_StrictModel):
 class OptimizationResponse(_StrictModel):
     """Response returned after an hourly request passes API validation."""
 
-    status: Literal["optimal", "infeasible"]
+    status: Literal["validated"]
     start_time: datetime
     interval_minutes: Literal[60]
     hours: int = Field(ge=1, le=168)
-    objective_eur: float | None = None
-    grid_import_kw: list[float] = Field(default_factory=list)
-    grid_export_kw: list[float] = Field(default_factory=list)
-    pv_used_kw: list[float] = Field(default_factory=list)
-    heat_pump_kw: list[float] = Field(default_factory=list)
-    battery_charge_kw: list[float] = Field(default_factory=list)
-    battery_discharge_kw: list[float] = Field(default_factory=list)
-    battery_soc_kwh: list[float] = Field(default_factory=list)
-    diagnostics: list[str] = Field(default_factory=list)

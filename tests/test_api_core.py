@@ -19,13 +19,12 @@ def test_optimize_accepts_a_valid_hourly_request(
         response = client.post("/optimize", json=valid_request)
 
     assert response.status_code == 200
-    data = response.json()
-    assert data["status"] == "optimal"
-    assert data["start_time"] == "2026-01-01T00:00:00Z"
-    assert data["interval_minutes"] == 60
-    assert data["hours"] == 2
-    assert data["grid_import_kw"] == pytest.approx([1.2, 0.6])
-    assert data["objective_eur"] == pytest.approx(0.51)
+    assert response.json() == {
+        "status": "validated",
+        "start_time": "2026-01-01T00:00:00Z",
+        "interval_minutes": 60,
+        "hours": 2,
+    }
 
 
 @pytest.mark.parametrize(

@@ -18,7 +18,6 @@ from energy_optimizer.config import (
     OrchestrationConfiguration,
 )
 from energy_optimizer.exclusions import exclusion_summary
-from energy_optimizer.heat_pump import HeatPumpLoad, HeatPumpSource
 from energy_optimizer.history_merge import HISTORY_RETENTION_HOURS, merge_price_history
 from energy_optimizer.providers.awattar import AwattarImporter
 from energy_optimizer.providers.forecast_solar import (
@@ -34,11 +33,12 @@ from energy_optimizer.providers.home_assistant_battery_efficiency import (
     calculate_battery_efficiency,
     merge_battery_efficiency_history,
 )
+from energy_optimizer.providers.home_assistant_energy_history import (
+    EnergyHistoryData,
+    HomeAssistantEnergyHistoryImporter,
+)
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
-)
-from energy_optimizer.providers.home_assistant_heat_pump import (
-    HomeAssistantHeatPumpImporter,
 )
 from energy_optimizer.providers.home_assistant_history import (
     HistoryPlan,
@@ -572,7 +572,7 @@ class ProviderOrchestrator:
     @staticmethod
     def _key_for(data_type: str, data: object) -> ProviderDataKey:
         source = getattr(data, "source", None)
-        if not isinstance(source, (SourceMetadata, HeatPumpSource)):
+        if not isinstance(source, SourceMetadata):
             raise OrchestrationError(
                 "normalized provider data must expose SourceMetadata as source"
             )
@@ -950,30 +950,7 @@ def _build_battery_efficiency_registration(
     )
 
 
-def _build_heat_pump_registration(
-    configuration: Configuration, sources: _Sources, store: ProviderDataStore
-) -> ProviderRegistration | None:
-    home_assistant = configuration.home_assistant
-    if (
-        home_assistant is None
-        or home_assistant.heat_pump is None
-        or "heat_pump" not in sources
-    ):
-        return None
-    importer = HomeAssistantHeatPumpImporter(home_assistant)
-    return _registration(
-        "heat_pump",
-        HeatPumpLoad,
-        TypeAdapter(HeatPumpLoad),
-        ProviderDataKey("heat-pump", "home-assistant", "heat_pump"),
-        store,
-        _fetch_plan(lambda now: importer.fetch(now=now)),
-        importer.is_fresh,
-    )
-
-
 _REGISTRATION_FACTORIES = (
-    _build_heat_pump_registration,
     _build_household_load_registration,
     _build_pv_generation_registration,
     _build_electricity_prices_registration,
@@ -1011,6 +988,49 @@ def build_configured_orchestrator(
         registration = factory(configuration, orchestration.sources, store)
         if registration is not None:
             registrations.append(registration)
+    home_assistant = configuration.home_assistant
+    if home_assistant is not None:
+        from energy_optimizer.providers.home_assistant_energy import is_fresh
+
+        histories = configuration.configured_energy_histories()
+        for name, aggregation in histories.items():
+            if name not in orchestration.sources or aggregation is None:
+                continue
+            importer = HomeAssistantEnergyHistoryImporter(aggregation, name)
+            adapter = TypeAdapter(EnergyHistoryData)
+            key = ProviderDataKey("energy-history", "home-assistant", name)
+
+            def plan(
+                now: datetime,
+                schedule: DataSourceScheduleConfiguration,
+                importer: HomeAssistantEnergyHistoryImporter = importer,
+                key: ProviderDataKey = key,
+            ) -> HistoryPlan[EnergyHistoryData] | None:
+                end = now.replace(minute=0, second=0, microsecond=0)
+                persisted = store.load(key, adapter)
+                start = (
+                    end - timedelta(hours=HISTORY_RETENTION_HOURS)
+                    if persisted is None
+                    else persisted.start_time + timedelta(hours=len(persisted.power_kw))
+                )
+                return (
+                    None
+                    if start >= end
+                    else importer.plan(
+                        start, end, schedule.history_lookback_seconds, now=now
+                    )
+                )
+
+            def fresh(data: EnergyHistoryData, *, now: datetime) -> bool:
+                return is_fresh(
+                    data.latest_observation_at,
+                    home_assistant.max_data_age_seconds,
+                    now=now,
+                )
+
+            registrations.append(
+                _registration(name, EnergyHistoryData, adapter, key, store, plan, fresh)
+            )
 
     history_importer = (
         HomeAssistantHistoryImporter(

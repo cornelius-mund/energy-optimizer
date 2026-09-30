@@ -1,17 +1,10 @@
 """Core HTTP API routes."""
 
-from dataclasses import asdict
-
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from starlette.responses import RedirectResponse
 
 from energy_optimizer import __version__
 from energy_optimizer.api.schemas import HourlyOptimizationRequest, OptimizationResponse
-from energy_optimizer.optimization import (
-    BatteryLimits,
-    OptimizationError,
-    solve_schedule,
-)
 
 router = APIRouter()
 
@@ -37,48 +30,12 @@ def dashboard_redirect() -> RedirectResponse:
     return RedirectResponse(url="/dashboard/", status_code=307)
 
 
-@router.post(
-    "/optimize",
-    response_model=OptimizationResponse,
-    responses={503: {"description": "Solver unavailable or optimum not reached"}},
-)
-def optimize(request: Request, data: HourlyOptimizationRequest) -> OptimizationResponse:
-    """Solve an hourly electrical schedule with optional flexible heat-pump load."""
-    configuration = request.app.state.configuration
-    battery = data.battery
-    limits = (
-        None
-        if battery is None
-        else BatteryLimits(
-            minimum_soc_kwh=battery.minimum_soc_kwh,
-            maximum_soc_kwh=battery.maximum_soc_kwh,
-            initial_soc_kwh=battery.initial_soc_kwh,
-            maximum_charge_kw=battery.maximum_charge_kw,
-            maximum_discharge_kw=battery.maximum_discharge_kw,
-            battery_efficiency=battery.battery_efficiency,
-        )
-    )
-    try:
-        schedule = solve_schedule(
-            data.load_kw,
-            data.pv_generation_kw,
-            data.import_price_eur_per_kwh,
-            data.export_price_eur_per_kwh,
-            maximum_import_kw=configuration.grid.maximum_import_kw,
-            maximum_export_kw=configuration.grid.maximum_export_kw,
-            solver_name=configuration.solver.name,
-            time_limit_seconds=configuration.solver.time_limit_seconds,
-            heat_pump=data.heat_pump,
-            battery=limits,
-        )
-    except OptimizationError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+@router.post("/optimize", response_model=OptimizationResponse)
+def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
+    """Validate hourly inputs; schedule optimization is not implemented."""
     return OptimizationResponse(
-        **asdict(schedule),
-        start_time=data.start_time,
-        interval_minutes=data.interval_minutes,
-        hours=len(data.load_kw),
-        diagnostics=["Load and operating limits cannot be fulfilled"]
-        if schedule.status == "infeasible"
-        else [],
+        status="validated",
+        start_time=request.start_time,
+        interval_minutes=request.interval_minutes,
+        hours=len(request.load_kw),
     )
