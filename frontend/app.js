@@ -225,7 +225,6 @@
       points: document.querySelector("#power-points"),
       seriesPaths: document.querySelector("#power-series-paths"),
       axisUnit: document.querySelector("#power-axis-unit"),
-      title: document.querySelector("#power-chart-title"),
       description: document.querySelector("#power-chart-description"),
       series: [],
     },
@@ -238,7 +237,6 @@
       points: document.querySelector("#price-points"),
       seriesPaths: document.querySelector("#price-series-paths"),
       axisUnit: document.querySelector("#price-axis-unit"),
-      title: document.querySelector("#price-chart-title"),
       description: document.querySelector("#price-chart-description"),
       series: [],
     },
@@ -251,7 +249,6 @@
       points: document.querySelector("#battery-points"),
       seriesPaths: document.querySelector("#battery-series-paths"),
       axisUnit: document.querySelector("#battery-axis-unit"),
-      title: document.querySelector("#battery-chart-title"),
       description: document.querySelector("#battery-chart-description"),
       series: [],
     },
@@ -375,18 +372,24 @@
     if (first.published_at) addDetail("Published", formatTimestamp(first.published_at));
   };
 
-  // Draws every series that is not hidden. The title, the description, and the
-  // time axis describe the whole chart, so hiding a series changes only the
-  // lines, the points, and the value axis, which is rescaled to what remains.
+  // Draws every series that is not hidden. Hiding a series changes the lines,
+  // the points, the value axis, which is rescaled to what remains, and the
+  // accessible name and description; the time axis does not change. The name is
+  // an aria-label because an SVG <title> child is drawn by browsers as a native
+  // tooltip over the chart, on top of the point tooltip.
   const renderGraph = (definition) => {
-    const { panel, element, grid, labels, points, seriesPaths, axisUnit, title, description, series } = definition;
+    const { panel, element, grid, labels, points, seriesPaths, axisUnit, description, series } = definition;
     grid.replaceChildren(); labels.replaceChildren(); points.replaceChildren(); seriesPaths.replaceChildren();
     panel.removeAttribute("hidden");
     const visibleSeries = series.filter((item) => !hiddenSeries.has(item.id));
     const unit = unitForSeries(series[0]);
     axisUnit.textContent = unit;
-    title.textContent = `${series.map(seriesLabel).join(" and ")} (${unit})`;
-    description.textContent = `${series.map((item) => `${seriesLabel(item)} in ${unitForSeries(item)}`).join("; ")}. Missing intervals remain gaps.`;
+    element.setAttribute("aria-label", visibleSeries.length
+      ? `${visibleSeries.map(seriesLabel).join(" and ")} (${unit})`
+      : `No series shown (${unit})`);
+    description.textContent = visibleSeries.length
+      ? `${visibleSeries.map((item) => `${seriesLabel(item)} in ${unitForSeries(item)}`).join("; ")}. Missing intervals remain gaps.`
+      : "Every series of this chart is hidden. Use the legend to show one.";
     const valueList = visibleSeries.flatMap((item) => item.values);
     const left = 52; const right = 785; const top = 18; const bottom = 276;
     const { min, max } = axisDomainForValues(valueList);

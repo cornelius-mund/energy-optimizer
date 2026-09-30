@@ -198,7 +198,13 @@ legend.
 - **Tooltips:** hovering or focusing a point shows the line it belongs to, its time in
   the configured zone, and its value with the unit, for example
   `Import price · 2026-09-30 23:00 · 0.14 EUR/kWh`. The tooltip stays inside its chart
-  and never covers the legend. The point's accessible label is unchanged.
+  and never covers the legend. The point's accessible label is unchanged. This is the
+  only tooltip: nothing in a chart makes the browser draw a second, native one.
+- **Accessible name and description:** each chart is an image named after the lines it
+  shows, for example `Grid import and Grid export (kW)`, and described as
+  `Grid import in kW; Grid export in kW. Missing intervals remain gaps.` Hiding a line
+  removes it from both. A chart whose lines are all hidden is named
+  `No series shown (kW)`.
 
 ## Dashboard time zone
 
