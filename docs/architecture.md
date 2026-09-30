@@ -1,12 +1,13 @@
 # Architecture
 
-This document describes the implemented architecture and the boundaries used for
-maintainable vertical slices. Package names may evolve as the energy and asset
-models become better understood, but each module below has a current runtime role.
+This document describes the architecture and the boundaries used for maintainable
+vertical slices. Package names may evolve as the energy and asset models become
+better understood. Every module below has a current runtime role, except the
+planned `optimization/` package, which does not exist yet: `POST /optimize` only
+validates its request. The `application` and `domain` layers named below are
+boundaries without a package of their own.
 
 ## Package Structure
-
-The planned package layout is:
 
 ```text
 src/energy_optimizer/
@@ -20,16 +21,15 @@ src/energy_optimizer/
 │   ├── persistence.py        # Shared provider persistence mapping
 │   ├── schemas.py            # HTTP request and response models
 │   ├── series.py             # Dashboard series alignment
-│   ├── validation.py          # Shared HTTP validation helpers
-│   └── routers/               # Core, provider, and dashboard route groups
+│   ├── validation.py         # Shared HTTP validation helpers
+│   └── routers/              # Core, provider, and dashboard route groups
 ├── config.py                 # YAML loading and validated runtime settings
 ├── orchestration.py          # Scheduled provider retrieval and plan triggers
 ├── providers/
-│   ├── interfaces.py         # Provider contracts
+│   ├── interfaces.py         # Provider-independent normalized data models
 │   ├── http.py               # Shared bounded JSON HTTP requests
-│   ├── prices.py             # Electricity-price adapters
-│   ├── awattar.py            # German aWATTar EPEX Spot price adapter
-│   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast adapter
+│   ├── awattar.py            # German aWATTar EPEX Spot price importer
+│   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast importer
 │   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── home_assistant.py     # Household-load Home Assistant composition
 │   ├── home_assistant_history.py # Shared once-per-cycle Home Assistant history import
@@ -42,17 +42,12 @@ src/energy_optimizer/
 ├── legacy_quality.py         # Converts suspect quality of earlier versions on read
 ├── history_merge.py          # Merge and retention rules for grid-flow and price history
 ├── household_load_store.py   # Append-friendly household-load NDJSON storage
-├── storage_errors.py          # Storage error contract
-└── optimization/
-    ├── model.py              # Pyomo MILP model construction
-    ├── solver.py             # HiGHS integration
-    └── results.py            # Solver output and diagnostics mapping
+├── storage_errors.py         # Storage error contract
+└── optimization/             # Planned, not yet present: model.py, solver.py, results.py (see Optimization)
 ```
 
-The API package keeps schemas, lifecycle, middleware, and reusable mapping helpers
-separate from route handlers. Generic storage delegates household-load history to
-its own NDJSON module, while provider registration is composed through ordered
-factories in `orchestration.py`.
+Generic storage delegates household-load history to its own NDJSON module, and
+provider registration is composed through ordered factories in `orchestration.py`.
 
 ## Dependency Direction
 
@@ -80,13 +75,12 @@ storage -> validated provider-independent data models
 - `domain` contains provider- and framework-independent energy concepts. It should
   not import FastAPI, Pyomo, HiGHS, or vendor clients.
 - `providers.interfaces` defines the data required by the application. Concrete
-  provider adapters may use HTTP clients and vendor-specific formats, but they
-  return normalized domain data before optimization sees it.
-- `optimization` translates domain inputs into a MILP, delegates solving through
-  the solver adapter, and maps solver variables back into a domain result. It
-  should not depend on a particular API or data provider.
-- `config` loads deployment settings such as time resolution, asset limits,
-  provider selection, and solver options. The composition layer passes validated
+  provider adapters (see Providers) return normalized domain data before
+  optimization sees it.
+- `optimization` translates domain inputs into a MILP, solves it through the solver
+  adapter, and maps the result back into the domain (see Optimization). It should
+  not depend on a particular API or data provider.
+- `config` loads deployment settings. The composition layer passes validated
   configuration to components instead of having configuration code construct
   business objects directly.
 
@@ -114,9 +108,9 @@ the same normalized domain representation.
 
 ### API
 
-The API exposes optimization and health endpoints. Request and response schemas
-belong here because they describe the HTTP contract, not the internal optimization
-model.
+The API exposes the optimization, health, provider-data, and dashboard endpoints
+documented in [`docs/api.md`](api.md). Request and response schemas belong here
+because they describe the HTTP contract, not the internal optimization model.
 
 ### Configuration
 
@@ -136,27 +130,26 @@ the range controls step by one hour.
 ### Domain
 
 The domain represents time-series data, energy balances, asset capabilities, state
-of charge, availability, schedules, and optimization outcomes. It should be
-usable without starting FastAPI, reading YAML, making network requests, or loading
-Pyomo.
+of charge, availability, schedules, and optimization outcomes. It should be usable
+without starting FastAPI, reading YAML, making network requests, or loading Pyomo.
 
 ### Providers
 
-Provider interfaces define the data needed from prices, PV forecasts, and weather
-services. Adapters own vendor-specific authentication, HTTP calls, response
-formats, and provider errors. Normalization and validation happen before data is
-passed to the application or optimizer.
+The normalized data models in `providers/interfaces.py` define the data needed from
+prices and PV forecasts (weather services are possible providers, but none exists
+yet). Adapters own vendor-specific authentication, HTTP calls, response formats,
+and provider errors. Normalization and validation happen before data is passed to
+the application or optimizer.
 
 Home Assistant history is imported by one shared layer,
-`home_assistant_history.py`, so that an entity is downloaded once per
-orchestration cycle however many records use it. A cycle has three phases. In the
-plan phase every due source declares the history it needs as `HistoryNeed`
-values (entity ID, kind, and time range including the source's own lookback) and
-how to build its final record from that history; a source that is not due, or has
-no missing completed hour, declares nothing and causes no Home Assistant
-request. In the import phase the layer merges the needs per entity ID into one
-range (earliest start, latest end), fetches each entity exactly once with one
-HTTP client, and cleans it. In the build phase every source builds and persists
+`home_assistant_history.py`, so an entity is downloaded once per orchestration
+cycle however many records use it. A cycle has three phases. Plan: every due
+source declares the history it needs as `HistoryNeed` values (entity ID, kind, and
+time range including the source's own lookback) and how to build its record from
+it; a source that is not due, or has no missing completed hour, declares nothing
+and causes no Home Assistant request. Import: the layer merges the needs per
+entity ID into one range (earliest start, latest end), fetches each entity exactly
+once with one HTTP client, and cleans it. Build: every source builds and persists
 its record from the shared series, in registration order. Sources without Home
 Assistant history needs (Forecast.Solar, aWATTar, and the live battery state)
 fetch inside their build step. An entity that is both a counter and plain state
@@ -171,29 +164,28 @@ a finite number or as invalid (`unavailable`, `non_numeric`, `not_finite`, or
 `last_reset` from the previous sample where Home Assistant omits them. It never
 drops or repairs a sample: an invalid sample stays in the series with its raw
 state and its reason, so that a consumer can exclude the hours it touches and show
-the exact data point. It keeps only the cleaned series and only until
-the cycle ends: raw responses are dropped as soon as they are cleaned, and there
-is no cross-cycle cache (that belongs to a separate provider-caching feature).
-Bearer-token authentication and the request timeout come from the Home
-Assistant configuration. Requests covering more than seven days are split into
-contiguous half-open chunks; the source's lookback is part of its declared range
-and so moves only the start of the first chunk. Records from all chunks are
-combined before normalization so counter steps and excluded hours remain
-continuous at chunk boundaries. A failure while importing one entity, which
-includes an HTTP error, a transport failure, or a malformed response, is recorded
-against that entity and re-raised, with the entity named in the message, to every
-source that reads it and to no other source; every other entity is still
-imported. A bad sample is not such a failure: it never fails an entity or a
-source.
+the exact data point. It keeps only the cleaned series, and only until the cycle
+ends: raw responses are dropped as soon as they are cleaned, and there is no
+cross-cycle cache (that belongs to a separate provider-caching feature).
+Bearer-token authentication and the request timeout come from the Home Assistant
+configuration. Requests covering more than seven days are split into contiguous
+half-open chunks; the source's lookback is part of its declared range and so moves
+only the start of the first chunk. Records from all chunks are combined before
+normalization so counter steps and excluded hours remain continuous at chunk
+boundaries. A failure while importing one entity (an HTTP error, a transport
+failure, or a malformed response) is recorded against that entity and re-raised,
+with the entity named in the message, to every source that reads it and to no
+other source; every other entity is still imported. A bad sample is not such a
+failure: it never fails an entity or a source.
 
 Each source reads its own window of the shared series exactly as Home Assistant
 would answer an independent request for it: the state in force at the window's
 start, stamped with that start (the time Home Assistant recorded it is kept as
 `observed_at`, so data points show the true time), followed by every change up to
 its end. An invalid state in force is carried like any other, so a valid state is
-never carried across an outage. Consequently a source's
-result equals what a separate fetch of its window would have produced, and a
-property-based test checks this equivalence.
+never carried across an outage. Consequently a source's result equals what a
+separate fetch of its window would have produced, and a property-based test checks
+this equivalence.
 
 The `home_assistant_energy.py` component is the pure normalization step that runs
 on such a window with the consuming aggregate's own entity settings, so one
@@ -231,12 +223,10 @@ cause excludes:
 
 An excluded hour has no value and carries one or more `ExclusionCause` records
 (`exclusions.py`): a reason code from a closed set, a message, the entity, and the
-exact data points (raw state, recorded time, and for a step the previous and
-current observation, the step's energy, and the maximum). At most 50 data points
-are kept per entity and hour, with the full count. Some conditions make the
-entity unusable as a whole and remain hard errors that fail the sources that read
-it: no history at all, an instantaneous power unit, duplicate timestamps, and a
-period without a complete hour.
+exact data points (fields and the 50-data-point bound: [`docs/api.md`](api.md#excluded-hours)).
+Some conditions make the entity unusable as a whole and remain hard errors that
+fail the sources that read it: no history at all, an instantaneous power unit,
+duplicate timestamps, and a period without a complete hour.
 
 Signed aggregation excludes a combined hour when any contributing entity is
 excluded for it (the cause of the entity is kept; no partial sum is formed), and
@@ -250,17 +240,19 @@ sum is wanted, so a negative sum becomes exactly `0` and the hour stays valid.
 That is not a repair: it is the explicit meaning of the configured formula, it
 never applies to a non-finite sum or an excluded entity hour, and it leaves no
 exclusion record, so the count is kept in the `clamped_hour_count` field of
-`HomeAssistantEnergySeries` and logged with `part` in the aggregate summary. Household load, grid import and export, and both sides of every
-efficiency leg use the same aggregation type. Individual chunk request outcomes are debug-level
-diagnostics. The import emits one structured summary at info level with its
-entity, failed-entity, request, and invalid-sample counts, and a warning for
-every failed entity, except that a rejected token (HTTP 401 or 403) ends the
-import and is logged once as `home_assistant_history_authentication_failed`.
-Each aggregate build emits one structured summary at info level, with its
-excluded-hour and clamped-hour counts, or one failure summary at warning level
-after the complete entity set has been processed. Orchestration emits one
-`provider_hours_excluded` warning per source and refresh with the number of newly
-excluded hours by reason.
+`HomeAssistantEnergySeries` and logged with `part` in the aggregate summary.
+Household load, grid import and export, and both sides of every efficiency leg use
+the same aggregation type.
+
+**Logging.** Individual chunk request outcomes are debug-level diagnostics. The
+import emits one structured summary at info level with its entity, failed-entity,
+request, and invalid-sample counts, and a warning for every failed entity, except
+that a rejected token (HTTP 401 or 403) ends the import and is logged once as
+`home_assistant_history_authentication_failed`. Each aggregate build emits one
+structured summary at info level, with its excluded-hour and clamped-hour counts,
+or one failure summary at warning level after the complete entity set has been
+processed. Orchestration emits one `provider_hours_excluded` warning per source and
+refresh with the number of newly excluded hours by reason.
 
 **Persistence of excluded hours.** The persisted series of household load, grid
 flow, and the efficiency history hold `null` for an excluded hour, so the hours
@@ -293,12 +285,13 @@ also appends the gap hours as NDJSON records, because it appends only new record
 and the file would otherwise contain a hole that fails validation on the next
 read. In the battery-efficiency history all six legs hold `null` for a gap hour
 and the state of charge holds `null` for every boundary of it, one more than there
-are gap hours, so the series keeps one more state of charge than each energy leg and no
-value is invented; the calculation then ignores the gap like any excluded hour.
-Only a range that starts after the persisted end is bridged. An incoming range
-that overlaps the persisted end merges as before, and a range that ends before the
-persisted history starts, with hours in between, is still rejected. Each bridged
-gap is logged as one `provider_history_unavailable` warning per source and refresh.
+are gap hours, so the series keeps one more state of charge than each energy leg
+and no value is invented; the calculation then ignores the gap like any excluded
+hour. Only a range that starts after the persisted end is bridged. An incoming
+range that overlaps the persisted end merges as before, and a range that ends
+before the persisted history starts, with hours in between, is still rejected.
+Each bridged gap is logged as one `provider_history_unavailable` warning per source
+and refresh.
 
 **Battery efficiency.** The measured battery-efficiency importer aligns the six
 energy legs and the state-of-charge history. The state of charge holds one value
@@ -310,17 +303,19 @@ is shifted by an hour puts each cycle window off the charging hour that ends at
 full. A state-of-charge sample that is unavailable, not a number, or outside 0 to
 100 percent (`soc_out_of_range`) is never carried forward and excludes the hours
 in which it is in force. An hour excluded in any leg or in the state of charge is
-excluded in all six legs, and the state-of-charge values that bracket it (`state_of_charge_percent[i]` and
-`[i + 1]` for hour `i`) are dropped, so the ratios never mix valid and invalid
-legs. `calculate_battery_efficiency` skips excluded hours and does not use a
-full-charge cycle that contains one, which reduces the number of usable cycles
-instead of producing a wrong ratio. On a DC-coupled system the AC-sourced charge
-(battery in minus PV yield) and the DC-bus input of the discharge (battery out plus
-PV yield minus battery in) are negative in ordinary hours, so those two aggregations
-take `part: positive`. Left at `net`, every PV-surplus hour would exclude itself in
-all six legs and remove the full-charge cycle it belongs to. The exclusions are read through
-`GET /api/v1/dashboard/excluded-hours` (see [`docs/api.md`](api.md)) and shown
-on the dashboard's **Excluded hours** tab.
+excluded in all six legs, and the state-of-charge values that bracket it
+(`state_of_charge_percent[i]` and `[i + 1]` for hour `i`) are dropped, so the
+ratios never mix valid and invalid legs. `calculate_battery_efficiency` skips
+excluded hours and does not use a full-charge cycle that contains one, which
+reduces the number of usable cycles instead of producing a wrong ratio. On a
+DC-coupled system the AC-sourced charge (`inverter_charge.energy_out`: battery in
+minus PV yield) and the DC-bus input of the discharge (`inverter_discharge.energy_in`:
+battery out plus PV yield minus battery in) are negative in ordinary hours, so those
+two aggregations take `part: positive`. Left at `net`, every PV-surplus hour would
+exclude itself in all six legs and remove the full-charge cycle it belongs to.
+The exclusions are read through `GET /api/v1/dashboard/excluded-hours` and shown on
+the dashboard's **Excluded hours** tab ([`docs/api.md`](api.md#excluded-hours)).
+
 `HomeAssistantLoadImporter` composes this functionality into the logical
 `household_load` record. `HomeAssistantGridFlowImporter` composes it independently
 for import and export, allowing multiple signed entities per channel, then aligns
@@ -336,18 +331,9 @@ the reads of the persisted store that decide it, which happen in the plan phase.
 
 `HomeAssistantBatteryImporter` is intentionally separate from the cumulative
 energy helper because battery state of charge and capabilities are instantaneous
-state values. It reads the live state-of-charge entity, while static capability
-limits and the one battery round-trip efficiency may be supplied as validated constants or as configured
-Home Assistant state entities. Entity values can optionally select a named
-attribute; all values are converted to the battery contract, and one current SOC
-value is returned together with scalar capability limits and the one battery
-round-trip efficiency. Only
-entity-backed values determine freshness, and a failure in any required mapping
-prevents a partial snapshot from being returned. Historic SOC reconstruction for
-efficiency calculations is handled by the dedicated measured-efficiency importer,
-which aligns configured battery and inverter expressions with state-of-charge
-history, imported through the same shared layer, before persisting it for the
-daily calculation.
+state values (behavior: [`docs/api.md`](api.md#home-assistant-battery-import)).
+Historic SOC reconstruction for efficiency calculations is handled by the
+measured-efficiency importer above, through the same shared history layer.
 
 Normalized provider data may be persisted after validation when persistence is
 configured. The storage component stores the normalized provider model or
@@ -357,47 +343,39 @@ read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
 JSON model. Grid-flow saves are merged by hourly timestamp into one contiguous
-retained history (incoming values win, at most 87,672 hours, hours between the
-stored history and a later incoming range are excluded as `history_unavailable`,
-any other gap is rejected without changing the stored history) by the pure rules
-in `history_merge.py`;
-measured battery-efficiency history is persisted as one aligned multi-series
-record.
-Each scheduled recompute requests only the hours after the previously
-persisted history from Home Assistant, merges them into the retained record,
-and bounds retention to the same ten-year limit as household-load history, so
-the daily calculation only pays the cost of a complete history fetch once,
-not on every run.
-Household-load history uses one self-contained hourly observation
-per line in an NDJSON file. API submissions may append overlapping corrections,
-and reads select the latest record for each timestamp before discarding values
-older than the 87,672-value ten-year limit. Scheduled collection requests only
-missing completed hours and does not append overlapping records. Compaction is
-triggered after the physical record count exceeds that limit plus a bounded
-buffer; it atomically replaces the primary and preserves the prior valid
-history as the backup. An incomplete final append line is ignored, while other
-malformed records follow the normal recovery error path. Existing monolithic
-household-load JSON primary and backup files are migrated to NDJSON on first
-access. Scheduled and API persistence use the same append and compaction
-behavior.
+retained history by the pure rules in `history_merge.py` (behavior:
+[`docs/api.md`](api.md#grid-flow-api)); measured battery-efficiency history is
+persisted as one aligned multi-series record.
 
-The direct Forecast.Solar adapter is a separate provider slice for short-term PV
+Household-load history uses one self-contained hourly observation per line in an
+NDJSON file. API submissions may append overlapping corrections, and reads select
+the latest record for each timestamp before discarding values older than the
+87,672-value ten-year limit. Scheduled collection requests only missing completed
+hours and does not append overlapping records. Compaction is triggered after the
+physical record count exceeds that limit plus a bounded buffer; it atomically
+replaces the primary and preserves the prior valid history as the backup. An
+incomplete final append line is ignored, while other malformed records follow the
+normal recovery error path. Existing monolithic household-load JSON primary and
+backup files are migrated to NDJSON on first access. Scheduled and API persistence
+use the same append and compaction behavior.
+
+The direct Forecast.Solar importer is a separate provider slice for short-term PV
 forecasts. It uses the public API without Home Assistant, an account, or an API
 key, and is configured with the PV location, panel declination and azimuth, and
 installed peak power. Forecast.Solar returns period-energy estimates at irregular
-sunrise and sunset boundaries; the adapter converts those values to hourly UTC
+sunrise and sunset boundaries; the importer converts those values to hourly UTC
 `PvGenerationData` rather than treating the provider response as normalized.
-Forecast forecasts use `retrieved_at` and `expires_at` instead of household-load
-observation metadata. Forecasts are persisted through the generic JSON storage
-path and replace the previous forecast, unlike append-friendly household-load
-history. The free public tier is limited to one plane, hourly resolution, and
-today plus the following day; polling is configured by orchestration so the
-public rate limit is respected.
+Forecasts use `retrieved_at` and `expires_at` instead of household-load
+observation metadata. They are persisted through the generic JSON storage path and
+replace the previous forecast, unlike append-friendly household-load history. The
+free public tier is limited to one plane, hourly resolution, and today plus the
+following day; polling is configured by orchestration so the public rate limit is
+respected.
 
-The historic household-load read endpoint queries this normalized store rather
-than exposing files. It accepts a timezone-aware half-open range, returns only
-the retained hourly points in that range, and includes requested coverage,
-available coverage, source metadata, retrieval metadata, validation status, and
+The historic household-load read endpoint (`GET /api/v1/historic/household-load`)
+queries this normalized store rather than exposing files. It accepts a
+timezone-aware half-open range and returns only the retained hourly points in it,
+with requested and available coverage, source, retrieval, validation status, and
 polling freshness. Historical validity and polling freshness are separate: a
 stale observation remains usable historical actual data and is reported as
 stale, while corrupt or unrecoverable persistence is returned as a service
@@ -408,43 +386,38 @@ dashboard contract. `api/historic.py` holds one loader per asset (household
 load, PV generation, grid flow, electricity prices, battery, electric vehicle,
 and heat pump). A loader reads only its own persisted normalized record and
 returns explicit series plus an availability status, so an absent, stale, or
-corrupt asset can never invalidate the series of another asset. Corrupt or
-unrecoverable records are withheld rather than mapped, and their technical cause
-is logged instead of returned. Assets without an importer (PV actuals, electric
-vehicle, heat pump) report `not_configured`; adding an importer means
-registering one loader. Electricity-price history is a separate
-`electricity-price-history` record written by the price orchestration
-registration, because the forecast record is replaced by every run and the two
-must not be confused; a failure to write it never blocks the forecast refresh.
-Battery state of charge reuses the retained hourly history that the measured
-efficiency calculation already persists. The dashboard consumes this contract and
-labels its values as actuals; it does not infer provider semantics or combine
-forecasts and plans.
+corrupt asset never invalidates another asset's series (status semantics,
+withheld corrupt records, and adding an importer:
+[`docs/api.md`](api.md#response-status-and-asset-availability)). Electricity-price
+history is a separate `electricity-price-history` record written by the price
+orchestration registration, because the forecast record is replaced by every run
+and the two must not be confused; a failure to write it never blocks the forecast
+refresh. Battery state of charge reuses the retained hourly history of the measured
+efficiency calculation. The dashboard consumes this contract and labels its values
+as actuals; it does not infer provider semantics or combine forecasts and plans.
 
-The versioned dashboard read contract is exposed at
-`GET /api/v1/dashboard/data`. It uses one response envelope for actual,
-forecast, and plan scenarios, while each series carries its machine-readable
-scenario kind, unit, source or plan identity, requested and available coverage,
-freshness, validation status, and nullable missing intervals. Forecast reads use
-the latest complete persisted run and never combine overlapping provider runs.
+The versioned dashboard read contract, `GET /api/v1/dashboard/data`, uses one
+response envelope for actual, forecast, and plan scenarios; each series carries its
+scenario kind, unit, source or plan identity, coverage, freshness, validation
+status, and missing intervals (`DashboardSeries` in the OpenAPI contract). Forecast
+reads use the latest complete persisted run and never combine overlapping provider
+runs.
 
 The static frontend cannot be templated with the configured zone, so it reads it
 from `GET /api/v1/dashboard/settings` before its first data request. The frontend
-performs all zone conversion with the browser's `Intl` support and no dependency:
-local wall times entered in the controls become whole UTC hours in data requests,
-and every timestamp it displays is converted back to the configured zone, never to
-the browser's. When clocks go back, a repeated local time resolves to its first
-occurrence and displayed times in the repeated hour carry their UTC offset; when
-clocks go forward, a skipped local time resolves forward by the length of the gap.
+performs all zone conversion with the browser's `Intl` support and no dependency,
+converting local wall times entered in the controls to whole UTC hours in data
+requests and every displayed timestamp back to the configured zone, never to the
+browser's (daylight-saving rules: [`docs/api.md`](api.md#dashboard-settings-and-time-zone)).
 If the settings request fails or the browser does not know the zone, the dashboard
 reports an error and sends no data request.
 
-The aWATTar adapter requests an explicit window instead of relying on the
+The aWATTar importer requests an explicit window instead of relying on the
 endpoint's default: `start` is the hour-aligned start given to the importer
 (inclusive) and `end` is its `end_time`, or a fixed 48-hour look-ahead after
 `start` (exclusive). The same end bounds the request and the selection of returned
 intervals, so the reach of the persisted prices, including the next day's
-day-ahead prices once they are published, is defined by the adapter.
+day-ahead prices once they are published, is defined by the importer.
 
 ### Optimization
 
