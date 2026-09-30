@@ -270,11 +270,16 @@ history that was persisted. A refresh with excluded hours is a `success` and doe
 not block optimization; there is no `suspect` run status.
 
 **Battery efficiency.** The measured battery-efficiency importer aligns the six
-energy legs and the state-of-charge history. A state-of-charge sample that is
-unavailable, not a number, or outside 0 to 100 percent (`soc_out_of_range`) is
-never carried forward and excludes the hours in which it is in force. An hour
-excluded in any leg or in the state of charge is excluded in all six legs, and the
-state-of-charge values that bracket it (`state_of_charge_percent[i]` and
+energy legs and the state-of-charge history. The state of charge holds one value
+per hour boundary: `state_of_charge_percent[i]` is the last state recorded at or
+before the start of hour `i`, so a state recorded exactly on a boundary is in force
+there and the series holds one value more than each energy leg. The full-charge
+cycles of the calculation are bounded by these boundaries; a state of charge that
+is shifted by an hour puts each cycle window off the charging hour that ends at
+full. A state-of-charge sample that is unavailable, not a number, or outside 0 to
+100 percent (`soc_out_of_range`) is never carried forward and excludes the hours
+in which it is in force. An hour excluded in any leg or in the state of charge is
+excluded in all six legs, and the state-of-charge values that bracket it (`state_of_charge_percent[i]` and
 `[i + 1]` for hour `i`) are dropped, so the ratios never mix valid and invalid
 legs. `calculate_battery_efficiency` skips excluded hours and does not use a
 full-charge cycle that contains one, which reduces the number of usable cycles
