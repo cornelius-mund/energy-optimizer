@@ -114,9 +114,10 @@ class HomeAssistantGridFlowImporter:
     def _log_failure(error: Exception) -> None:
         logger.error(
             "event=provider_fetch_failed component=home_assistant "
-            "operation=fetch data_type=grid_flow error_type=%s",
+            "operation=fetch data_type=grid_flow error_type=%s error=%s",
             error.__class__.__name__,
-            exc_info=True,
+            error,
+            exc_info=(None if isinstance(error, HomeAssistantError) else True),
         )
 
     def _combine(

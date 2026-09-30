@@ -35,6 +35,10 @@ from energy_optimizer.orchestration import (
     build_configured_orchestrator,
 )
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
+from energy_optimizer.providers.home_assistant_energy import EnergyAggregate
+from energy_optimizer.providers.home_assistant_grid_flow import (
+    HomeAssistantGridFlowImporter,
+)
 from energy_optimizer.providers.home_assistant_history import (
     HistoryPlan,
     HomeAssistantError,
@@ -833,6 +837,114 @@ def test_provider_failure_log_excludes_token_and_response_body(
     )
     assert "secret-provider-token" not in caplog.text
     assert "raw-response-marker" not in caplog.text
+
+
+def grid_flow_configuration(token: str) -> HomeAssistantConfiguration:
+    entities = {"state_class": "total_increasing", "unit": "kWh"}
+    return HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": token,
+            "grid_import": aggregate_settings(
+                add=[{"entity_id": "sensor.grid_import", **entities}]
+            ),
+            "grid_export": aggregate_settings(
+                add=[{"entity_id": "sensor.grid_export", **entities}]
+            ),
+            "timeout_seconds": 5,
+        }
+    )
+
+
+def import_and_build_failing_source(
+    source: str, client: httpx.Client, token: str
+) -> None:
+    """Run a household-load or grid-flow cycle whose build is expected to fail."""
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
+    if source == "household_load":
+        import_and_build(
+            HomeAssistantLoadImporter(household_configuration(token)),
+            client,
+            start,
+            end,
+            now=now,
+        )
+    else:
+        import_and_build(
+            HomeAssistantGridFlowImporter(grid_flow_configuration(token)),
+            client,
+            start,
+            end,
+            now=now,
+        )
+
+
+def provider_fetch_failures(caplog: LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("event=provider_fetch_failed")
+    ]
+
+
+@pytest.mark.parametrize("source", ["household_load", "grid_flow"])
+@pytest.mark.parametrize(
+    ("status", "message"), [(401, "authentication failed"), (503, "HTTP 503")]
+)
+def test_expected_home_assistant_failure_is_logged_without_traceback(
+    source: str, status: int, message: str, caplog: LogCaptureFixture
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda _: httpx.Response(status))
+    )
+    configure_logging("DEBUG")
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
+            with pytest.raises(HomeAssistantError, match=message):
+                import_and_build_failing_source(source, client, "secret-provider-token")
+    finally:
+        client.close()
+
+    (failure,) = provider_fetch_failures(caplog)
+    assert failure.levelno == logging.ERROR
+    assert failure.exc_info is None
+    assert "component=home_assistant operation=fetch" in failure.getMessage()
+    assert "error_type=HomeAssistant" in failure.getMessage()
+    assert "error=Home Assistant" in failure.getMessage()
+    assert message in failure.getMessage()
+    assert "Traceback" not in caplog.text
+    assert "secret-provider-token" not in caplog.text
+    assert "Bearer" not in caplog.text
+
+
+@pytest.mark.parametrize("source", ["household_load", "grid_flow"])
+def test_unexpected_failure_is_logged_with_traceback(
+    source: str, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch
+) -> None:
+    def fail(*_: object, **__: object) -> None:
+        raise ValueError("unexpected defect")
+
+    monkeypatch.setattr(EnergyAggregate, "build", fail)
+    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(503)))
+    configure_logging("DEBUG")
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
+            with pytest.raises(ValueError, match="unexpected defect"):
+                import_and_build_failing_source(source, client, "secret-provider-token")
+    finally:
+        client.close()
+
+    (failure,) = provider_fetch_failures(caplog)
+    assert failure.levelno == logging.ERROR
+    assert failure.exc_info is not None
+    assert failure.exc_info[0] is ValueError
+    assert "component=home_assistant operation=fetch" in failure.getMessage()
+    assert "error_type=ValueError" in failure.getMessage()
+    assert "secret-provider-token" not in caplog.text
 
 
 def test_persistence_log_reports_counts_without_logging_series(

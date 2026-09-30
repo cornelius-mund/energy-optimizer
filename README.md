@@ -109,6 +109,13 @@ The enclosing history aggregate emits one `home_assistant_history_aggregate`
 the aggregate fails. This keeps normal logs concise while retaining per-chunk
 diagnostics when debug logging is enabled.
 
+The household-load and grid-flow sources log a failed build as one
+`provider_fetch_failed` `ERROR` event whose `error` field holds the message. An
+expected Home Assistant failure, such as a rejected token, an unreachable
+endpoint, or an unknown entity, is logged without a traceback because the message
+names the cause. Any other exception indicates a defect in the service and is
+logged with its traceback.
+
 Startup progress is logged at `INFO` so a container that never becomes ready can
 be diagnosed from its logs: the last startup event that appears is the last phase
 that completed. `process_logging_bootstrapped` is emitted before Uvicorn starts.
