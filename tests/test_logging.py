@@ -343,6 +343,7 @@ def test_configuration_load_is_logged_without_secret_values(
 
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert "configuration_loaded" in messages
+    assert "timezone=UTC" in messages
     assert "do-not-log-this-token" not in messages
 
 

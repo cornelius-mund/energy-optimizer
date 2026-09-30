@@ -14,7 +14,7 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert "<h1>Energy dashboard</h1>" in document
     assert document.count('type="datetime-local"') == 2
     assert document.count('step="3600"') == 2
-    assert "End (UTC, exclusive)" in document
+    assert 'id="end-label">End (exclusive)' in document
     assert "The end time is exclusive" in document
     assert 'aria-live="polite"' in document
     assert 'id="chart"' in document
@@ -41,6 +41,30 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
     assert ".dashboard-grid[hidden] { display: none; }" in styles
     assert ".excluded-grid[hidden] { display: none; }" in styles
+
+
+def test_dashboard_markup_names_no_fixed_zone_for_displayed_times() -> None:
+    """Show the configured zone from the script; the markup only names the API's UTC."""
+    document = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    app = (FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    assert "(UTC" not in document
+    assert "UTC time window" not in document + app
+    assert "UTC date and time" not in document + app
+    assert document.count("UTC") == 1
+    assert "API\n            timestamps are UTC" in document
+    for identifier in (
+        "zone-name",
+        "start-label",
+        "end-label",
+        "excluded-hour-heading",
+        "excluded-point-heading",
+    ):
+        assert f'id="{identifier}"' in document
+        assert f'"#{identifier}"' in app
+    assert 'fetch("/api/v1/dashboard/settings")' in app
+    assert "timeZone" in app
+    assert 'timeZone: "UTC"' not in app
 
 
 def test_efficiency_summary_renders_status_from_one_source() -> None:

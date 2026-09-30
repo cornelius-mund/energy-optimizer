@@ -327,6 +327,38 @@ aligned to the hour, `end_time` must be later than `start_time`, and the range m
 not exceed 87,672 hours; violations return HTTP 422. The range is half-open
 (inclusive start, exclusive end).
 
+### Dashboard settings and time zone
+
+```text
+GET /api/v1/dashboard/settings
+```
+
+```json
+{"timezone": "Europe/Berlin"}
+```
+
+`timezone` is the top-level configuration setting: an IANA name matched exactly and
+case-sensitively (default `UTC`) whose UTC offset is a whole number of hours all
+year. It is validated at startup; an unknown name, a lowercase `utc`, a path-like
+value, an empty value, and zones such as `Asia/Kolkata` or `Australia/Lord_Howe`
+stop startup with an error that names `timezone`. The dashboard reads this endpoint
+before its first data request, because its default range depends on the zone.
+
+Only the dashboard's presentation uses the zone. Every API contract, timestamp, and
+stored record stays UTC, and the data endpoints keep accepting only hour-aligned
+timestamps. The dashboard converts the local wall times of its controls to whole
+UTC hours: in `Europe/Berlin`, the local range `2026-09-30 00:00` to
+`2026-10-01 00:00` requests `start_time=2026-09-29T22:00:00Z` and
+`end_time=2026-09-30T22:00:00Z`.
+
+Around clock changes the dashboard applies fixed rules. When clocks go back, the
+repeated local hour is two separate hourly points whose labels carry the UTC offset
+(`2026-10-25 02:00+02:00` and `2026-10-25 02:00+01:00`), and a control value inside
+the repeated hour resolves to its first occurrence. When clocks go forward, a local
+time that does not exist resolves forward by the length of the gap, so `02:30`
+becomes `03:30`. The default range, today from 00:00 to the next local midnight,
+therefore spans 23 or 25 hours on those days.
+
 ### Series
 
 Every available asset contributes series of `scenario_kind: "actual"` in this
@@ -471,8 +503,9 @@ coverage, the controls use the union of their available ranges so valid price
 and PV points are retained; each chart shows the other provider's missing
 intervals as gaps. If forecast coverage is unavailable, it keeps the
 unavailable state instead of inventing a range. The x-axis labels include each
-point's UTC date and time; chart points also expose their exact timestamp and
-value on pointer hover and keyboard focus.
+point's date and time in the configured time zone; chart points also expose their
+exact timestamp and value on pointer hover and keyboard focus. The detail lists
+(coverage, retrieved, generated, published) use the same zone.
 
 The dashboard also provides a Forecast tab backed by
 `GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify
@@ -481,8 +514,11 @@ their source, unit, coverage, retrieval time, and freshness. PV generation uses
 in separate charts, each with its own unit axis, data-driven scale, legend
 labels, and accessible description. Each scale uses finite visible values with
 small padding, while flat or empty data receives a safe non-zero fallback
-domain. All boundaries and point timestamps are UTC hourly half-open ranges.
-Missing or partial observations remain gaps and are not interpolated or treated
+domain. API boundaries and point timestamps are UTC hourly half-open ranges, which
+the dashboard shows in the configured time zone. The aWATTar price forecast is
+requested for a window that reaches 48 hours past the current hour, so it covers
+the next local day as soon as the day-ahead prices are published at 14:00 local
+time. Missing or partial observations remain gaps and are not interpolated or treated
 as zero. Chart points expose their exact timestamp and value with the series
 unit on pointer hover and keyboard focus.
 
@@ -593,7 +629,8 @@ source and reason, and every excluded hour in ascending order:
 | `combined_negative`, `combined_not_finite` | The signed terms of an hour give a non-finite value, or a negative value unless the aggregation takes `part: positive` |
 | `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` |
 
-The Excluded hours tab loads this endpoint for the chosen UTC window. It shows the
+The Excluded hours tab loads this endpoint for the chosen window, converted from the
+configured time zone to whole UTC hours. It shows the
 checked sources with their status, a summary by source and reason, and a table with
 one row per data point: the hour, source, entity, reason with its message, the data
 point's time and reported value, and its detail (previous value, step, and maximum).

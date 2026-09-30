@@ -25,6 +25,9 @@ from energy_optimizer.providers.normalization import (
 
 logger = logging.getLogger(__name__)
 _HOUR = timedelta(hours=1)
+# aWATTar publishes the EPEX day-ahead prices for the next day at 14:00 local
+# time, so a request that reaches two days ahead always covers tomorrow.
+PRICE_LOOKAHEAD = timedelta(hours=48)
 
 
 class AwattarError(RuntimeError):
@@ -42,10 +45,18 @@ class AwattarClient:
         self.configuration = configuration
         self._http = JsonHttpClient(client)
 
-    def fetch(self) -> Any:
-        """Retrieve the current German market-data document."""
+    def fetch(self, start: datetime, end: datetime) -> Any:
+        """Retrieve the German market-data document for one half-open window.
+
+        ``start`` is inclusive and ``end`` is exclusive. Both must be timezone-aware
+        and are sent as epoch milliseconds, the format aWATTar expects.
+        """
         return self._http.get_json(
             str(self.configuration.base_url),
+            params={
+                "start": _epoch_milliseconds(start),
+                "end": _epoch_milliseconds(end),
+            },
             headers={"Accept": "application/json"},
             timeout_seconds=self.configuration.timeout_seconds,
             error_factory=AwattarError,
@@ -64,8 +75,47 @@ class AwattarClient:
         )
 
 
+def _epoch_milliseconds(value: datetime) -> int:
+    return round(value.timestamp() * 1000)
+
+
 class AwattarNormalizer:
     """Validate market intervals and convert EUR/MWh to EUR/kWh."""
+
+    @staticmethod
+    def request_window(
+        start_time: datetime, end_time: datetime | None
+    ) -> tuple[datetime, datetime]:
+        """Validate the requested period and return its UTC half-open window.
+
+        Without an ``end_time`` the window reaches ``PRICE_LOOKAHEAD`` past the
+        start. The returned end is the value used both for the request and for
+        selecting intervals.
+        """
+        start = as_utc(
+            start_time,
+            error_factory=AwattarError,
+            message="aWATTar price times must include a timezone",
+        )
+        end = (
+            as_utc(
+                end_time,
+                error_factory=AwattarError,
+                message="aWATTar price times must include a timezone",
+            )
+            if end_time is not None
+            else None
+        )
+        validate_hourly_period(
+            start,
+            end,
+            error_factory=AwattarError,
+            start_message="aWATTar start_time must be aligned to the hour",
+            end_message="aWATTar end_time must be aligned to the hour",
+            order_message="aWATTar end_time must be after start_time",
+            check_order_first=False,
+        )
+        return start, end if end is not None else start + PRICE_LOOKAHEAD
 
     def normalize(
         self,
@@ -227,8 +277,9 @@ class AwattarImporter:
     ) -> ElectricityPriceData:
         retrieved_at = now or datetime.now(timezone.utc)
         try:
+            start, end = self._normalizer.request_window(start_time, end_time)
             data = self._normalizer.normalize(
-                self._client.fetch(), start_time, end_time, retrieved_at
+                self._client.fetch(start, end), start, end, retrieved_at
             )
         except Exception as error:
             logger.error(

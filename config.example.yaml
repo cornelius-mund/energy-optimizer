@@ -1,6 +1,13 @@
 # Copy this file to config.yaml and adjust values for the deployment.
 time_resolution_minutes: 60
 
+# IANA time zone in which the dashboard shows and accepts times. Data, API
+# timestamps, and stored records always stay in UTC. Use the exact, case-sensitive
+# name; the default is UTC. Only zones whose UTC offset is a whole number of hours
+# all year are supported, for example Europe/Berlin or America/New_York. Zones
+# such as Asia/Kolkata or Australia/Lord_Howe are rejected at startup.
+timezone: Europe/Berlin
+
 grid:
   maximum_import_kw: 10
   maximum_export_kw: 10
@@ -66,7 +73,9 @@ forecast_solar:
   max_data_age_seconds: 7200
 
 # Optional German EPEX Spot market prices from aWATTar. No API key is required.
-# Values are wholesale EUR/MWh converted to the normalized EUR/kWh contract.
+# Values are wholesale EUR/MWh converted to the normalized EUR/kWh contract. Each
+# request asks for the current hour up to 48 hours ahead, which reaches the next
+# day's prices once aWATTar publishes them at 14:00 local time.
 awattar:
   base_url: https://api.awattar.de/v1/marketdata
   timeout_seconds: 10

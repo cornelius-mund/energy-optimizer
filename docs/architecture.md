@@ -121,9 +121,17 @@ model.
 ### Configuration
 
 Configuration is loaded during startup from YAML and validated into typed settings.
-It should describe runtime behavior, including time resolution, asset limits,
-provider selection, and solver options. Configuration loading should not construct
-business objects or contain optimization logic.
+It should describe runtime behavior, including time resolution, the dashboard time
+zone, asset limits, provider selection, and solver options. Configuration loading
+should not construct business objects or contain optimization logic.
+
+The `timezone` setting is presentation-only. It names an IANA zone (default `UTC`)
+in which the dashboard shows and accepts times. Domain logic, provider adapters,
+storage, and every API contract stay in UTC, so the setting never changes what is
+computed or persisted. Startup validation matches the name exactly against the
+zones the system knows and accepts only zones whose UTC offset is a whole number of
+hours all year, because the dashboard API accepts only UTC-hour-aligned ranges and
+the range controls step by one hour.
 
 ### Domain
 
@@ -394,6 +402,24 @@ forecast, and plan scenarios, while each series carries its machine-readable
 scenario kind, unit, source or plan identity, requested and available coverage,
 freshness, validation status, and nullable missing intervals. Forecast reads use
 the latest complete persisted run and never combine overlapping provider runs.
+
+The static frontend cannot be templated with the configured zone, so it reads it
+from `GET /api/v1/dashboard/settings` before its first data request. The frontend
+performs all zone conversion with the browser's `Intl` support and no dependency:
+local wall times entered in the controls become whole UTC hours in data requests,
+and every timestamp it displays is converted back to the configured zone, never to
+the browser's. When clocks go back, a repeated local time resolves to its first
+occurrence and displayed times in the repeated hour carry their UTC offset; when
+clocks go forward, a skipped local time resolves forward by the length of the gap.
+If the settings request fails or the browser does not know the zone, the dashboard
+reports an error and sends no data request.
+
+The aWATTar adapter requests an explicit window instead of relying on the
+endpoint's default: `start` is the hour-aligned start given to the importer
+(inclusive) and `end` is its `end_time`, or a fixed 48-hour look-ahead after
+`start` (exclusive). The same end bounds the request and the selection of returned
+intervals, so the reach of the persisted prices, including the next day's
+day-ahead prices once they are published, is defined by the adapter.
 
 ### Optimization
 

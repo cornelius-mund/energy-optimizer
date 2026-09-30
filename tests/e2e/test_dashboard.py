@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final, Protocol
+from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -31,6 +34,10 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 pytestmark = pytest.mark.e2e
 
 UTC: Final = timezone.utc
+# The time zone in the e2e service configuration. The browser runs in another
+# zone, so every expectation below proves the configured zone is the one shown.
+DASHBOARD_ZONE: Final = ZoneInfo("Europe/Berlin")
+BROWSER_ZONE: Final = ZoneInfo("America/New_York")
 
 
 class LiveServer(Protocol):
@@ -49,12 +56,43 @@ def _window() -> tuple[datetime, datetime]:
 
 
 def _input_value(timestamp: datetime) -> str:
-    """Format a UTC timestamp for an HTML datetime-local control."""
-    return timestamp.astimezone(UTC).strftime("%Y-%m-%dT%H:%M")
+    """Format an instant as the dashboard-zone wall time of a datetime-local control."""
+    return timestamp.astimezone(DASHBOARD_ZONE).strftime("%Y-%m-%dT%H:%M")
+
+
+def _open_dashboard(page: Page, server: LiveServer) -> None:
+    """Open the dashboard and wait for its settings and first load to finish."""
+    page.goto(f"{server.base_url}/dashboard/")
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+
+
+def _submit_range(page: Page, start: str, end: str) -> None:
+    """Enter dashboard-zone wall times exactly as a user would and submit them."""
+    page.locator("#start-date").fill(start)
+    page.locator("#end-date").fill(end)
+    page.locator("#range-form button[type=submit]").click()
+
+
+def _data_requests(page: Page) -> list[dict[str, str]]:
+    """Record the query of every dashboard data and excluded-hours request."""
+    queries: list[dict[str, str]] = []
+
+    def record(request: Request) -> None:
+        url = urlparse(request.url)
+        if url.path in (
+            "/api/v1/dashboard/data",
+            "/api/v1/dashboard/excluded-hours",
+        ):
+            queries.append(
+                {key: values[0] for key, values in parse_qs(url.query).items()}
+            )
+
+    page.on("request", record)
+    return queries
 
 
 def _load_range(page: Page, start: datetime, end: datetime) -> None:
-    """Submit one UTC dashboard range and wait for the resulting status."""
+    """Submit one dashboard range and wait for the resulting status."""
     page.locator("#start-date").fill(_input_value(start))
     page.locator("#end-date").fill(_input_value(end))
     page.locator("#range-form button[type=submit]").click()
@@ -153,7 +191,7 @@ def _seed_forecasts(
             unit="EUR/kWh",
             source=SourceMetadata(provider="awattar.de", entity_id="de"),
             retrieved_at=retrieved_at,
-            expires_at=effective_price_start + timedelta(hours=2),
+            expires_at=effective_price_start + timedelta(hours=len(import_prices)),
         ),
     )
 
@@ -239,7 +277,7 @@ def test_actuals_render_from_api_to_browser(
     start, end = _window()
     _seed_household(e2e_api, start, [1.2, 1.0])
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     _load_range(page, start, end)
 
     expect(page.locator("#content")).to_be_visible()
@@ -260,7 +298,7 @@ def test_historic_tab_renders_every_available_asset_with_its_availability(
     _seed_grid_flow(e2e_api, start)
     _seed_price_and_battery_history(e2e_server, start)
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     _load_range(page, start, end)
 
     expect(page.locator("#status")).to_have_text("12 data points loaded.")
@@ -298,7 +336,7 @@ def test_historic_tab_withholds_invalid_asset_data_but_keeps_valid_series(
     for path in e2e_server.data_directory.glob("grid-flow-*"):
         path.write_text("{corrupt\n", encoding="utf-8")
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     _load_range(page, start, end)
 
     expect(page.locator("#status")).to_have_text(
@@ -343,7 +381,7 @@ def test_efficiency_tab_renders_battery_and_inverter_components(
         ),
     )
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#efficiency-tab").click()
 
     expect(page.locator("#efficiency-summary")).to_be_visible()
@@ -447,7 +485,7 @@ def test_efficiency_tab_shows_one_annotation_for_each_fallback_status(
         ),
     )
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#efficiency-tab").click()
 
     expect(page.locator("#efficiency-summary dd")).to_have_text(
@@ -523,7 +561,7 @@ def test_efficiency_tab_formats_throughput_to_two_decimals(
         ),
     )
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#efficiency-tab").click()
 
     expect(page.locator("#efficiency-metrics dt")).to_have_text(
@@ -558,7 +596,7 @@ def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) 
     start, end = _window()
     _seed_forecasts(e2e_server, start)
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#forecast-tab").click()
     _load_range(page, start, end)
 
@@ -594,7 +632,7 @@ def test_price_axis_handles_negative_flat_values(
         export_prices=(-0.10, -0.10),
     )
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#forecast-tab").click()
     _load_range(page, start, end)
 
@@ -618,7 +656,7 @@ def test_price_axis_handles_flat_zero_values(
         export_prices=(0.0, 0.0),
     )
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#forecast-tab").click()
     _load_range(page, start, end)
 
@@ -640,7 +678,7 @@ def test_invalid_range_is_rejected_without_an_api_request(
             requests.append(url)
 
     page.on("request", record_request)
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     expect(page.locator("#status")).to_have_class("status error")
     requests.clear()
 
@@ -663,7 +701,7 @@ def test_range_is_aligned_to_available_coverage(
     start, end = _window()
     _seed_household(e2e_api, start, [1.2, 1.0])
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     _load_range(page, start - timedelta(hours=1), end + timedelta(hours=1))
 
     expect(page.locator("#start-date")).to_have_value(_input_value(start))
@@ -675,7 +713,7 @@ def test_unavailable_actuals_are_presented_as_an_error(
     e2e_server: LiveServer, page: Page
 ) -> None:
     """Verify a real unavailable dashboard response is visible to the user."""
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
 
     expect(page.locator("#status")).to_have_class("status error")
     expect(page.locator("#status")).to_contain_text(
@@ -698,7 +736,7 @@ def test_backend_error_is_presented_in_the_dashboard(
         )
 
     page.route("**/api/v1/dashboard/data**", fail_dashboard_request)
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
 
     expect(page.locator("#status")).to_have_text("dashboard backend is unavailable")
     expect(page.locator("#status")).to_have_class("status error")
@@ -710,7 +748,7 @@ def test_partial_coverage_is_shown_as_a_gap(e2e_server: LiveServer, page: Page) 
     start, end = _window()
     _seed_forecasts(e2e_server, start, price_start=start + timedelta(hours=1))
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     page.locator("#forecast-tab").click()
     _load_range(page, start, end + timedelta(hours=1))
 
@@ -739,7 +777,7 @@ def test_stale_actuals_are_shown_with_a_warning(
     old = datetime.now(UTC) - timedelta(days=2)
     _seed_household(e2e_api, start, [1.2, 1.0], retrieved_at=old)
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     _load_range(page, start, end)
 
     expect(page.locator("#status")).to_have_text(
@@ -750,8 +788,20 @@ def test_stale_actuals_are_shown_with_a_warning(
 
 
 def _excluded_stamp(timestamp: datetime) -> str:
-    """Format a UTC timestamp the way the dashboard tables show it."""
-    return timestamp.strftime("%Y-%m-%d %H:%MZ")
+    """Format an instant the way the dashboard shows it in its configured zone.
+
+    A local time that the clock shows twice, the hour after clocks go back, also
+    carries its UTC offset so the two occurrences differ.
+    """
+    local = timestamp.astimezone(DASHBOARD_ZONE)
+    text = local.strftime("%Y-%m-%d %H:%M")
+    offset = local.utcoffset()
+    assert offset is not None
+    if local.replace(fold=0).utcoffset() == local.replace(fold=1).utcoffset():
+        return text
+    minutes = int(offset.total_seconds()) // 60
+    sign = "-" if minutes < 0 else "+"
+    return f"{text}{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
 
 
 def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
@@ -899,7 +949,7 @@ def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
     end = start + timedelta(hours=4)
     _seed_excluded_history(e2e_server, start)
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     expect(page.locator("#status")).not_to_contain_text("Loading")
     page.locator("#excluded-tab").click()
     _load_range(page, start, end)
@@ -986,7 +1036,7 @@ def test_excluded_hours_tab_reports_sources_without_history(
         hours=8
     )
 
-    page.goto(f"{e2e_server.base_url}/dashboard/")
+    _open_dashboard(page, e2e_server)
     expect(page.locator("#status")).not_to_contain_text("Loading")
     page.locator("#excluded-tab").click()
     _load_range(page, start, start + timedelta(hours=4))
@@ -1000,3 +1050,318 @@ def test_excluded_hours_tab_reports_sources_without_history(
     expect(page.locator("#excluded-table")).to_be_hidden()
     # Nothing was checked, so it must not claim that nothing was excluded.
     expect(page.locator("#excluded-empty")).to_be_hidden()
+
+
+def _seed_repeated_hour_exclusions(server: LiveServer, start: datetime) -> None:
+    """Exclude the two hours that show the same local time when clocks go back.
+
+    ``start`` is the first of six hours; the third and fourth are excluded.
+    """
+    observation = datetime.now(UTC)
+
+    def exclusion(hour: datetime) -> HourExclusion:
+        return HourExclusion(
+            hour,
+            (
+                ExclusionCause.of(
+                    "unavailable",
+                    "sensor.household_energy reported an unknown or unavailable state.",
+                    "sensor.household_energy",
+                    [
+                        ExcludedDataPoint(
+                            hour + timedelta(minutes=30), "unavailable", "kWh"
+                        )
+                    ],
+                ),
+            ),
+        )
+
+    ProviderDataStore(server.data_directory).save(
+        ProviderDataKey("household-load", "home-assistant", "household_load"),
+        TypeAdapter(HouseholdLoadData),
+        HouseholdLoadData(
+            schema_version="1",
+            start_time=start,
+            interval_minutes=60,
+            load_kw=(1.0, 1.0, None, None, 1.0, 1.0),
+            unit="kW",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="household_load"
+            ),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+            exclusions=(
+                exclusion(start + timedelta(hours=2)),
+                exclusion(start + timedelta(hours=3)),
+            ),
+        ),
+    )
+
+
+def test_dashboard_settings_report_the_configured_zone(e2e_api: httpx.Client) -> None:
+    """Keep the e2e expectations tied to the zone the service really runs with."""
+    response = e2e_api.get("/api/v1/dashboard/settings")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"timezone": DASHBOARD_ZONE.key}
+
+
+def test_dashboard_names_the_configured_zone_instead_of_utc(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify headings, labels, and help name the zone; UTC only labels the API."""
+    _open_dashboard(page, e2e_server)
+
+    expect(page.locator("#zone-name")).to_have_text("Europe/Berlin")
+    expect(page.locator("#range-heading")).to_have_text(
+        "Choose a time window in Europe/Berlin"
+    )
+    expect(page.locator("#start-label")).to_have_text("Start (Europe/Berlin)")
+    expect(page.locator("#end-label")).to_have_text("End (Europe/Berlin, exclusive)")
+    expect(page.locator("#range-help")).to_contain_text("Europe/Berlin")
+    expect(page.locator(".controls")).not_to_contain_text("UTC")
+    assert page.locator("main").inner_text().count("UTC") == 1
+    expect(page.locator(".lede")).to_contain_text("API timestamps are UTC")
+
+    page.locator("#excluded-tab").click()
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    expect(page.locator("#range-heading")).to_have_text(
+        "Choose a time window in Europe/Berlin"
+    )
+    expect(page.locator("#range-help")).not_to_contain_text("UTC")
+    expect(page.locator("#excluded-hour-heading")).to_have_text("Hour (Europe/Berlin)")
+    expect(page.locator("#excluded-point-heading")).to_have_text(
+        "Data point (Europe/Berlin)"
+    )
+
+    page.locator("#forecast-tab").click()
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    expect(page.locator("#range-help")).not_to_contain_text("UTC")
+
+
+def test_forecast_prices_show_the_next_local_day_in_the_configured_zone(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify prices crossing local midnight read in Berlin time, not New York time."""
+    # 19:00Z is 21:00 in Berlin and 15:00 in New York; six hours reach 02:00 on
+    # the next local day, past local midnight at 22:00Z.
+    start = datetime(2026, 9, 30, 19, tzinfo=UTC)
+    prices = (0.10, 0.12, 0.14, 0.16, 0.18, 0.20)
+    _seed_forecasts(
+        e2e_server,
+        start,
+        import_prices=prices,
+        export_prices=tuple(price - 0.05 for price in prices),
+    )
+    queries = _data_requests(page)
+    _open_dashboard(page, e2e_server)
+    page.locator("#forecast-tab").click()
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    queries.clear()
+
+    # A window wider than the coverage is corrected once to the coverage, which
+    # the controls then show as Berlin wall times.
+    _load_range(page, start - timedelta(hours=1), start + timedelta(hours=8))
+
+    expect(page.locator("#start-date")).to_have_value("2026-09-30T21:00")
+    expect(page.locator("#end-date")).to_have_value("2026-10-01T03:00")
+    assert queries == [
+        {
+            "start_time": "2026-09-30T18:00:00Z",
+            "end_time": "2026-10-01T03:00:00Z",
+            "scenario_kind": "forecast",
+        },
+        {
+            "start_time": "2026-09-30T19:00:00Z",
+            "end_time": "2026-10-01T01:00:00Z",
+            "scenario_kind": "forecast",
+        },
+    ]
+
+    expect(page.locator("#price-chart")).to_be_visible()
+    points = page.locator("#price-points circle")
+    expect(points).to_have_count(12)
+    for hour in range(6):
+        label = points.nth(hour).get_attribute("aria-label") or ""
+        assert _excluded_stamp(start + timedelta(hours=hour)) in label
+    slot = points.nth(2)
+    assert slot.get_attribute("aria-label") == (
+        "Import price, 2026-09-30 23:00: 0.14 EUR/kWh"
+    )
+    assert "17:00" not in (slot.get_attribute("aria-label") or "")
+    assert "2026-10-01 00:00" in (points.nth(3).get_attribute("aria-label") or "")
+    slot.focus()
+    expect(page.locator("#point-tooltip")).to_have_text(
+        "2026-09-30 23:00 · 0.14 EUR/kWh"
+    )
+    ticks = page.locator("#price-labels .x-axis-label")
+    expect(ticks).to_have_text(
+        [_excluded_stamp(start + timedelta(hours=hour)) for hour in (0, 1, 3, 4, 5)]
+    )
+    expect(page.locator("#details")).to_contain_text(
+        "2026-09-30 21:00 to 2026-09-30 23:00"
+    )
+
+
+def test_range_controls_request_whole_utc_hours_for_the_configured_zone(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify Berlin wall times in the controls become whole UTC hours in requests."""
+    queries = _data_requests(page)
+    _open_dashboard(page, e2e_server)
+    queries.clear()
+
+    _submit_range(page, "2026-09-30T00:00", "2026-10-01T00:00")
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    page.locator("#excluded-tab").click()
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+
+    window = {
+        "start_time": "2026-09-29T22:00:00Z",
+        "end_time": "2026-09-30T22:00:00Z",
+    }
+    assert queries == [{**window, "scenario_kind": "actual"}, window]
+
+
+@pytest.mark.parametrize(
+    ("day", "start_utc", "end_utc", "hours"),
+    [
+        ("2026-03-29", "2026-03-28T23:00:00Z", "2026-03-29T22:00:00Z", 23),
+        ("2026-06-15", "2026-06-14T22:00:00Z", "2026-06-15T22:00:00Z", 24),
+        ("2026-10-25", "2026-10-24T22:00:00Z", "2026-10-25T23:00:00Z", 25),
+    ],
+)
+def test_default_range_is_the_local_day_even_when_clocks_change(
+    e2e_server: LiveServer,
+    page: Page,
+    day: str,
+    start_utc: str,
+    end_utc: str,
+    hours: int,
+) -> None:
+    """Verify the default range spans local midnight to local midnight."""
+    page.clock.set_fixed_time(datetime.fromisoformat(f"{day}T12:00:00+00:00"))
+    queries = _data_requests(page)
+    _open_dashboard(page, e2e_server)
+
+    next_day = (datetime.fromisoformat(day) + timedelta(days=1)).date().isoformat()
+    expect(page.locator("#start-date")).to_have_value(f"{day}T00:00")
+    expect(page.locator("#end-date")).to_have_value(f"{next_day}T00:00")
+    assert [(q["start_time"], q["end_time"]) for q in queries] == [(start_utc, end_utc)]
+    parse = datetime.fromisoformat
+    span = parse(end_utc.replace("Z", "+00:00")) - parse(
+        start_utc.replace("Z", "+00:00")
+    )
+    assert span == timedelta(hours=hours)
+
+
+def test_repeated_local_hour_is_two_chart_points_and_two_excluded_rows(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify the hour shown twice when clocks go back stays distinguishable."""
+    # Clocks go back at 01:00Z on 2026-10-25, so 02:00 to 03:00 local time occurs
+    # at 00:00Z under CEST and again at 01:00Z under CET.
+    start = datetime(2026, 10, 24, 22, tzinfo=UTC)
+    end = start + timedelta(hours=6)
+    _seed_forecasts(
+        e2e_server,
+        start,
+        import_prices=(0.10, 0.12, 0.14, 0.16, 0.18, 0.20),
+        export_prices=(0.05, 0.06, 0.07, 0.08, 0.09, 0.10),
+    )
+    _seed_repeated_hour_exclusions(e2e_server, start)
+    _open_dashboard(page, e2e_server)
+
+    page.locator("#forecast-tab").click()
+    _load_range(page, start, end)
+    points = page.locator("#price-points circle")
+    expect(points).to_have_count(12)
+    labels = [points.nth(index).get_attribute("aria-label") or "" for index in range(6)]
+    assert labels[2] == "Import price, 2026-10-25 02:00+02:00: 0.14 EUR/kWh"
+    assert labels[3] == "Import price, 2026-10-25 02:00+01:00: 0.16 EUR/kWh"
+    assert "2026-10-25 01:00:" in labels[1]
+    assert "2026-10-25 03:00:" in labels[4]
+    assert len(set(labels)) == 6
+
+    page.locator("#excluded-tab").click()
+    _load_range(page, start, end)
+    expect(page.locator("#status")).to_have_text("2 excluded hours listed.")
+    rows = page.locator("#excluded-rows tr")
+    expect(rows).to_have_count(2)
+    expect(rows.locator("td:nth-child(1)")).to_have_text(
+        ["2026-10-25 02:00+02:00", "2026-10-25 02:00+01:00"]
+    )
+    expect(rows.locator("td:nth-child(5)")).to_have_text(
+        ["2026-10-25 02:30+02:00", "2026-10-25 02:30+01:00"]
+    )
+
+
+def test_range_controls_resolve_repeated_and_skipped_local_times(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify a repeated time means its first occurrence and a skipped one moves on."""
+    queries = _data_requests(page)
+    _open_dashboard(page, e2e_server)
+    queries.clear()
+
+    # 02:00 occurs at 00:00Z and at 01:00Z on 2026-10-25; the first one is used.
+    _submit_range(page, "2026-10-25T02:00", "2026-10-25T03:00")
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    # 02:00 never occurs on 2026-03-29: clocks jump from 02:00 to 03:00, so it
+    # moves ahead by the one-hour gap.
+    _submit_range(page, "2026-03-29T02:00", "2026-03-29T04:00")
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+
+    assert [(q["start_time"], q["end_time"]) for q in queries] == [
+        ("2026-10-25T00:00:00Z", "2026-10-25T02:00:00Z"),
+        ("2026-03-29T01:00:00Z", "2026-03-29T02:00:00Z"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("respond", "message"),
+    [
+        (
+            lambda route: route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"detail": "settings backend is unavailable"}),
+            ),
+            "The dashboard settings could not be loaded (HTTP 503)",
+        ),
+        (
+            lambda route: route.abort(),
+            "The dashboard settings could not be loaded; check the connection",
+        ),
+        (
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"timezone": "Foo/Bar"}),
+            ),
+            "This browser does not support the configured time zone Foo/Bar",
+        ),
+    ],
+    ids=["http-error", "network-error", "zone-rejected-by-browser"],
+)
+def test_unusable_time_zone_is_reported_and_no_data_is_requested(
+    e2e_server: LiveServer,
+    page: Page,
+    respond: Callable[[Route], object],
+    message: str,
+) -> None:
+    """Verify the dashboard never falls back to a guessed zone."""
+    page.route("**/api/v1/dashboard/settings", respond)
+    queries = _data_requests(page)
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+
+    expect(page.locator("#status")).to_have_class("status error")
+    expect(page.locator("#status")).to_contain_text(message)
+    expect(page.locator("#start-date")).to_be_disabled()
+    expect(page.locator("#start-date")).to_have_value("")
+    for tab in ("#forecast-tab", "#excluded-tab", "#actuals-tab"):
+        page.locator(tab).click()
+        expect(page.locator("#status")).to_have_class("status error")
+        expect(page.locator("#status")).to_contain_text(message)
+    assert queries == []

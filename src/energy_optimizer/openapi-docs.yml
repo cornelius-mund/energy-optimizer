@@ -282,6 +282,25 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/dashboard/settings:
+    get:
+      summary: Dashboard Settings
+      description: 'Return the configured time zone in which the dashboard shows times.
+
+
+        The dashboard requests this before its first data request because its
+
+        default range depends on the zone. Data requests and every API timestamp
+
+        remain UTC.'
+      operationId: dashboard_settings_api_v1_dashboard_settings_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardSettingsResponse'
   /api/v1/pv-generation:
     post:
       summary: Pv Generation
@@ -813,6 +832,21 @@ components:
       - validation_status
       title: DashboardSeries
       description: One aligned, provider-independent dashboard series.
+    DashboardSettingsResponse:
+      properties:
+        timezone:
+          type: string
+          title: Timezone
+          description: IANA time zone in which the dashboard shows and enters times.
+            API timestamps stay in UTC.
+          examples:
+          - Europe/Berlin
+      additionalProperties: false
+      type: object
+      required:
+      - timezone
+      title: DashboardSettingsResponse
+      description: Runtime settings the dashboard reads before it requests any data.
     ElectricityPriceRequest:
       properties:
         schema_version:

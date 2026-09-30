@@ -2,9 +2,11 @@
 
 import logging
 import math
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, available_timezones
 
 import yaml
 from pydantic import (
@@ -30,6 +32,36 @@ logger = logging.getLogger(__name__)
 
 class ConfigurationError(ValueError):
     """Raised when the runtime configuration cannot be used."""
+
+
+@lru_cache(maxsize=None)
+def _timezone_name_error(name: str) -> str | None:
+    """Explain why a time zone cannot be used for dashboard times, if it cannot.
+
+    A name is matched exactly against the IANA names known to this system, so
+    the result does not depend on whether the file system ignores case and a
+    path-like value can never reach the file system. The dashboard API accepts
+    only UTC-hour-aligned ranges, so the offset must be a whole number of hours
+    at every hour of the current year.
+    """
+    if name not in available_timezones():
+        return (
+            f"{name!r} is not a known IANA time zone name; use the exact, "
+            "case-sensitive name, for example Europe/Berlin"
+        )
+    zone = ZoneInfo(name)
+    year = datetime.now(UTC).year
+    instant = datetime(year, 1, 1, tzinfo=UTC)
+    while instant.year == year:
+        offset = instant.astimezone(zone).utcoffset()
+        if offset is None or offset % timedelta(hours=1):
+            return (
+                f"{name} has a UTC offset that is not a whole number of hours "
+                f"(found {offset}); only zones whose offset is always a whole "
+                "number of hours are supported, for example Europe/Berlin"
+            )
+        instant += timedelta(hours=1)
+    return None
 
 
 class GridConfiguration(BaseModel):
@@ -519,6 +551,10 @@ class Configuration(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     time_resolution_minutes: int = Field(gt=0)
+    timezone: str = Field(
+        default="UTC",
+        description="IANA time zone in which the dashboard shows times",
+    )
     grid: GridConfiguration
     solver: SolverConfiguration
     home_assistant: HomeAssistantConfiguration | None = None
@@ -526,6 +562,15 @@ class Configuration(BaseModel):
     awattar: AwattarConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
     orchestration: OrchestrationConfiguration | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        """Accept only known zones whose offset is always whole hours."""
+        error = _timezone_name_error(value)
+        if error is not None:
+            raise ValueError(error)
+        return value
 
     @model_validator(mode="after")
     def validate_orchestration_persistence(self) -> "Configuration":
@@ -645,10 +690,11 @@ def load_configuration(path: Path) -> Configuration:
     logger.info(
         "event=configuration_loaded component=configuration operation=load "
         "path=%s persistence_enabled=%s orchestration_enabled=%s "
-        "home_assistant_enabled=%s",
+        "home_assistant_enabled=%s timezone=%s",
         path,
         configuration.persistence is not None,
         configuration.orchestration is not None and configuration.orchestration.enabled,
         configuration.home_assistant is not None,
+        configuration.timezone,
     )
     return configuration

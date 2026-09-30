@@ -19,6 +19,7 @@ from energy_optimizer.api.schemas import (
     DashboardMetric,
     DashboardPlanSummary,
     DashboardSeries,
+    DashboardSettingsResponse,
     ExcludedHoursResponse,
     SourceMetadata,
 )
@@ -569,6 +570,20 @@ def excluded_hours(
     """
     start, end = _dashboard_range(start_time, end_time)
     return read_excluded_hours(request, start, end)
+
+
+@router.get(
+    "/api/v1/dashboard/settings",
+    response_model=DashboardSettingsResponse,
+)
+def dashboard_settings(request: Request) -> DashboardSettingsResponse:
+    """Return the configured time zone in which the dashboard shows times.
+
+    The dashboard requests this before its first data request because its
+    default range depends on the zone. Data requests and every API timestamp
+    remain UTC.
+    """
+    return DashboardSettingsResponse(timezone=request.app.state.configuration.timezone)
 
 
 @router.get(

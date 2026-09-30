@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from time import perf_counter
 from typing import Any, Callable
 
@@ -46,6 +47,7 @@ class JsonHttpClient:
         log_context: str = "",
         success_log_level: int = logging.INFO,
         error_log_level: int = logging.WARNING,
+        params: Mapping[str, str | int] | None = None,
     ) -> Any:
         """Fetch and decode JSON, translating transport failures for a provider."""
         started_at = perf_counter()
@@ -57,11 +59,12 @@ class JsonHttpClient:
                     response = self._client.get(
                         url,
                         headers=headers,
+                        params=params,
                         timeout=timeout_seconds,
                     )
                 else:
                     with httpx.Client(timeout=timeout_seconds) as client:
-                        response = client.get(url, headers=headers)
+                        response = client.get(url, headers=headers, params=params)
             except httpx.TimeoutException as error:
                 status = "timeout"
                 raise error_factory(timeout_message) from error

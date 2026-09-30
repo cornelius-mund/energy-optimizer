@@ -556,6 +556,20 @@ class ExcludedHoursResponse(BaseModel):
     )
 
 
+class DashboardSettingsResponse(BaseModel):
+    """Runtime settings the dashboard reads before it requests any data."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timezone: str = Field(
+        description=(
+            "IANA time zone in which the dashboard shows and enters times. "
+            "API timestamps stay in UTC."
+        ),
+        examples=["Europe/Berlin"],
+    )
+
+
 class DashboardDataResponse(BaseModel):
     """Versioned read contract for actual, forecast, and plan dashboard data."""
 
