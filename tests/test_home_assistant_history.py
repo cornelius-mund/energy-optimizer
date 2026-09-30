@@ -8,7 +8,6 @@ from typing import Any
 import httpx
 import pytest
 
-from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
 from energy_optimizer.exclusions import ExcludedDataPoint
 from energy_optimizer.providers import home_assistant_history
 from energy_optimizer.providers.home_assistant_energy import EnergyAggregate
@@ -22,6 +21,7 @@ from energy_optimizer.providers.home_assistant_history import (
 )
 from home_assistant_fixtures import (
     FakeHomeAssistant,
+    aggregate_configuration,
     home_assistant_configuration_factory,
 )
 
@@ -29,13 +29,8 @@ FIRST = "sensor.first"
 SECOND = "sensor.second"
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 HALF_HOUR = timedelta(minutes=30)
-ENTITY = HomeAssistantEnergyEntityConfiguration.model_validate(
-    {
-        "entity_id": FIRST,
-        "state_class": "total_increasing",
-        "unit": "kWh",
-        "operation": "add",
-    }
+AGGREGATION = aggregate_configuration(
+    add=[{"entity_id": FIRST, "state_class": "total_increasing", "unit": "kWh"}]
 )
 
 configuration = home_assistant_configuration_factory()
@@ -392,7 +387,7 @@ def test_an_entity_with_only_unavailable_samples_is_imported_not_failed(
 
 
 def test_an_entity_that_is_only_ever_unavailable_excludes_every_hour() -> None:
-    aggregate = EnergyAggregate([ENTITY], hour(0), hour(2), label="unavailable")
+    aggregate = EnergyAggregate(AGGREGATION, hour(0), hour(2), label="unavailable")
     history = import_history(
         FakeHomeAssistant({FIRST: [(hour(0), "unavailable")]}), *aggregate.needs()
     )
@@ -659,8 +654,8 @@ def test_an_invalid_sample_only_excludes_hours_of_the_windows_that_contain_it(
             ]
         }
     )
-    early = EnergyAggregate([ENTITY], hour(0), hour(4), label="early")
-    late = EnergyAggregate([ENTITY], hour(2), hour(4), label="late")
+    early = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="early")
+    late = EnergyAggregate(AGGREGATION, hour(2), hour(4), label="late")
 
     # One shared import serves both consumers.
     history = import_history(home_assistant, *early.needs(), *late.needs())
@@ -687,7 +682,7 @@ def test_an_invalid_sample_only_excludes_hours_of_the_windows_that_contain_it(
 
 
 def test_an_invalid_sample_on_an_hour_boundary_excludes_the_hour_it_closes() -> None:
-    aggregate = EnergyAggregate([ENTITY], hour(0), hour(4), label="boundary")
+    aggregate = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="boundary")
     history = import_history(
         FakeHomeAssistant(
             {
@@ -724,8 +719,8 @@ def test_an_invalid_state_in_force_at_the_window_start_excludes_until_it_ends() 
             ]
         }
     )
-    early = EnergyAggregate([ENTITY], hour(0), hour(4), label="early")
-    late = EnergyAggregate([ENTITY], hour(2), hour(4), label="late")
+    early = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="early")
+    late = EnergyAggregate(AGGREGATION, hour(2), hour(4), label="late")
 
     history = import_history(home_assistant, *early.needs(), *late.needs())
 
@@ -766,7 +761,7 @@ def test_a_sample_without_a_unit_is_only_excluded_where_the_unit_is_unknown() ->
     # reports it, and carried forward from there.
     assert [sample.unit for sample in samples] == [None, "kWh", "kWh"]
     assert [sample.invalid for sample in samples] == [None, None, None]
-    series = EnergyAggregate([ENTITY], hour(0), hour(2), label="unit").build(history)
+    series = EnergyAggregate(AGGREGATION, hour(0), hour(2), label="unit").build(history)
     assert series.values_kw == (None, 1.0)
     (excluded,) = series.exclusions
     assert excluded.hour_start == hour(0)
@@ -846,7 +841,9 @@ def test_duplicate_timestamps_within_one_response_are_left_for_the_consumer() ->
 
     assert len(history.window(FIRST, "counter", hour(0), hour(2))) == 3
     with pytest.raises(HomeAssistantError, match="contains duplicate timestamps"):
-        EnergyAggregate([ENTITY], hour(0), hour(2), label="duplicates").build(history)
+        EnergyAggregate(AGGREGATION, hour(0), hour(2), label="duplicates").build(
+            history
+        )
 
 
 @pytest.mark.parametrize("kind", ["counter", "state"])

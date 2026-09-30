@@ -139,8 +139,10 @@ Configuration is expected to contain parameters such as:
 - Battery and inverter efficiency can be calculated from complete Home Assistant
   history. Battery efficiency is one full-cycle round-trip value; inverter charge
   and discharge efficiencies are independent measured conversion values. Configure
-  signed energy entity lists under `battery.efficiency_calculation` to account for
-  DC-coupled MPPT/PV paths. Fixed `battery_efficiency` takes precedence with a
+  signed energy aggregations under `battery.efficiency_calculation` to account for
+  DC-coupled MPPT/PV paths. An aggregation whose sum is negative in ordinary
+  hours, such as the battery charge minus the PV yield, takes `part: positive`
+  (see "Energy aggregations"). Fixed `battery_efficiency` takes precedence with a
   warning. Before the first complete cycle is available, live battery snapshots
   use a documented 95% default instead of failing. The dashboard's Efficiency
   tab displays the calculated components as raw ratio summaries over retained
@@ -353,15 +355,15 @@ predates Home Assistant's history. The importer returns
 provider-independent household-load data with `load_kw`, `unit: "kW"`, source
 metadata, retrieval time, and the latest source observation time. Household-load
 sources must be energy entities configured with Home Assistant's `state_class`
-(`total` or `total_increasing`), `unit` (`Wh`, `kWh`, or `MWh`), and `operation`
-(`add` or `subtract`). The importer converts each cumulative counter's observed
+(`total` or `total_increasing`) and `unit` (`Wh`, `kWh`, or `MWh`), grouped into
+an energy aggregation by `operation` (`add` or `subtract`). The importer converts each cumulative counter's observed
 increases into hourly kW-equivalent values and combines all contributions into
 one logical `household_load` record.
 Instantaneous power entities reported in `W` or `kW` are rejected and are never
 implicitly converted to energy.
 
-Configure the Home Assistant URL, bearer token, one or more household-load energy
-entities, and request timeout in `config.yaml`. An optional
+Configure the Home Assistant URL, bearer token, the household-load energy
+aggregation, and request timeout in `config.yaml`. An optional
 `max_data_age_seconds` setting enables a polling health check; it does not
 invalidate historical data. The token is a secret and must not be committed to
 source control.
@@ -399,7 +401,7 @@ hour it closes. A sensor that publishes on the hour and is unavailable at
 | `step_above_maximum` | A step exceeds `maximum_interval_energy_kwh` | The hour of the later observation |
 | `hour_above_maximum` | The steps of one hour add up to more than `maximum_interval_energy_kwh` | That hour |
 | `soc_out_of_range` | A state of charge is outside 0 to 100 percent | As `unavailable`, for the state-of-charge entity |
-| `combined_negative`, `combined_not_finite` | The `add` and `subtract` operations of an hour give a negative or non-finite value | That hour |
+| `combined_negative`, `combined_not_finite` | The `add` and `subtract` terms of an hour give a non-finite value, or a negative value unless the aggregation takes the `positive` part | That hour |
 | `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` | That hour |
 
 A counter that drops to zero and returns therefore excludes the hours of the drop
@@ -414,12 +416,13 @@ with the meter or inverter's credible maximum hourly energy. The former
 contains it is rejected at startup because unknown keys are not accepted; remove
 it from any existing `config.yaml`.
 
-A combined household-load or grid-flow hour is excluded when any contributing
-entity is excluded for it, and also when the signed operations make it negative or
-not finite; it is never clamped to zero. Grid import and export are excluded
+A combined hour of an energy aggregation is excluded when any contributing
+entity is excluded for it, and also when the signed terms make it not finite or,
+with the default `part: net`, negative. Grid import and export are excluded
 together, and the state-of-charge and energy legs of the battery efficiency
 history are excluded together (see below). Only the entity that caused an
-exclusion is named.
+exclusion is named. `part: positive` changes only the meaning of a negative sum
+(see "Energy aggregations").
 
 Every cause names the entity, a reason code, a message, and its data points. A
 data point holds the time Home Assistant recorded it, the raw state exactly as
@@ -445,15 +448,18 @@ For example, a household meter can be added while an EV meter is subtracted:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token
-  household_load_entities:
-    - entity_id: sensor.household_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-    - entity_id: sensor.ev_energy
-      state_class: total
-      unit: kWh
-      operation: subtract
+  household_load:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.household_energy
+            state_class: total_increasing
+            unit: kWh
+      - operation: subtract
+        entities:
+          - entity_id: sensor.ev_energy
+            state_class: total
+            unit: kWh
   timeout_seconds: 10
 ```
 
@@ -461,12 +467,56 @@ The normalized aggregate is persisted and exposed under the single source
 identity `home-assistant/household_load`, so storage, freshness evaluation, and
 orchestration consumers receive one coherent household-load dataset.
 
-Household load must be configured through `household_load_entities`. Each mapping
-declares its Home Assistant state class, energy unit, operation, and optional
-physical hourly limit, so instantaneous power sensors cannot be configured
-accidentally. An entity ID may also be listed in the grid-flow mappings when the
-same physical meter provides both household-load and grid-flow measurements. An
-entity ID must not be repeated within one logical mapping category.
+Household load must be configured through `household_load`, an energy aggregation
+(see below). Each entity declares its Home Assistant state class, energy unit, and
+optional physical hourly limit, so instantaneous power sensors cannot be configured
+accidentally. An entity ID may also be listed in the grid-flow aggregations when
+the same physical meter provides both household-load and grid-flow measurements.
+An entity ID must not be repeated within one aggregation.
+
+#### Energy aggregations
+
+Household load, grid import, grid export, and both sides (`energy_in` and
+`energy_out`) of each battery efficiency leg are configured with the same
+aggregation object:
+
+```yaml
+household_load:
+  part: net            # optional; "net" (default) or "positive"
+  terms:
+    - operation: add
+      entities:
+        - {entity_id: sensor.household_energy, state_class: total_increasing, unit: kWh}
+    - operation: subtract
+      entities:
+        - {entity_id: sensor.ev_energy, state_class: total, unit: kWh}
+```
+
+The hourly value is the energy of all `add` entities minus the energy of all
+`subtract` entities. There is at most one term per operation, every term has at
+least one entity, and an entity ID may appear only once within one aggregation.
+The same entity may be used in several aggregations; it is imported once and
+normalized with each aggregation's own entity settings.
+
+`part` says what a negative hourly sum means:
+
+- `net` (default): a negative sum is invalid data. The hour is excluded with the
+  reason `combined_negative` and listed as an excluded hour.
+- `positive`: only the positive part of the sum is wanted, so a negative sum is a
+  legitimate zero. The hour is imported as `0` and is not excluded. It is counted
+  in `clamped_hour_count` in the `home_assistant_history_aggregate` log line of
+  the aggregation, together with `part` and `excluded_hour_count`.
+
+`part: positive` is for sums that are negative in ordinary operation. On a
+DC-coupled system PV reaches the battery directly, so the energy the inverter
+charged from AC is the battery's charging energy minus the PV yield. In a
+PV-surplus hour that difference is negative and means "no charging from AC".
+`part: positive` does not hide bad data: a non-finite sum and every entity-level
+exclusion still exclude the hour.
+
+The former `household_load_entities`, `grid_import_entities`, and
+`grid_export_entities` lists, and a per-entity `operation`, are no longer
+accepted. Wrap the entities in `terms` and rename the keys.
 
 Call `fetch(start_time, end_time, history_lookback_seconds)` for a requested
 period. `end_time` may be omitted to fetch through the latest completed UTC
@@ -486,10 +536,12 @@ this provider adapter.
 
 `HomeAssistantGridFlowImporter` composes the shared Home Assistant energy-history
 retrieval and normalization functionality for grid import and export. Configure
-one or more entities for each channel; every entity uses `state_class` (`total` or
-`total_increasing`), an energy `unit` (`Wh`, `kWh`, or `MWh`), and an explicit
-`operation` (`add` or `subtract`). Import and export are aligned to their common
-available hourly start, and an hour excluded in either channel is excluded in both.
+`grid_import` and `grid_export` together, each as an energy aggregation (see
+"Energy aggregations") of one or more entities; every entity uses `state_class`
+(`total` or `total_increasing`) and an energy `unit` (`Wh`, `kWh`, or `MWh`), and
+the `operation` (`add` or `subtract`) of its term. Import and export are aligned
+to their common available hourly start, and an hour excluded in either channel is
+excluded in both.
 Long grid-flow requests use the same contiguous, seven-day maximum chunks as
 household load, and a failed chunk or channel never produces a partial result.
 
@@ -497,16 +549,20 @@ household load, and a failed chunk or channel never produces a partial result.
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token
-  grid_import_entities:
-    - entity_id: sensor.grid_import_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-  grid_export_entities:
-    - entity_id: sensor.grid_export_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
+  grid_import:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.grid_import_energy
+            state_class: total_increasing
+            unit: kWh
+  grid_export:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.grid_export_energy
+            state_class: total_increasing
+            unit: kWh
   timeout_seconds: 10
   max_data_age_seconds: 7200
 ```

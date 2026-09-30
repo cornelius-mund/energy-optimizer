@@ -20,7 +20,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import perf_counter
 
-from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
+from energy_optimizer.config import (
+    EnergyAggregateConfiguration,
+    HomeAssistantEnergyEntityConfiguration,
+)
 from energy_optimizer.exclusions import (
     ExcludedDataPoint,
     ExclusionCause,
@@ -67,12 +70,16 @@ class HomeAssistantEnergySeries:
     """One normalized hourly energy contribution from Home Assistant.
 
     An excluded hour has no value (``None``) and one entry in ``exclusions``.
+    ``clamped_hour_count`` counts the hours whose negative sum was set to zero
+    because the aggregation asked for the positive part only. Such an hour is
+    valid, so it has no exclusion; the count keeps the clamp visible.
     """
 
     start_time: datetime
     values_kw: tuple[float | None, ...]
     latest_observation_at: datetime
     exclusions: tuple[HourExclusion, ...] = ()
+    clamped_hour_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +105,7 @@ class _Component:
 
 
 class EnergyAggregate:
-    """One signed energy expression: what it needs and how it is built.
+    """One configured energy aggregation: what it needs and how it is built.
 
     ``needs`` declares the entities and time range, including the source's own
     lookback, so the orchestrator can import each entity once for all sources.
@@ -108,29 +115,36 @@ class EnergyAggregate:
 
     def __init__(
         self,
-        entities: list[HomeAssistantEnergyEntityConfiguration] | None,
+        configuration: EnergyAggregateConfiguration | None,
         start_time: datetime,
         end_time: datetime,
         history_lookback_seconds: float = 0,
         *,
         label: str,
     ) -> None:
-        """Validate the requested period and the configured entities.
+        """Validate the requested period and the configured aggregation.
 
         A combined hour is excluded when any contributing entity is excluded for
-        it, and also when the add and subtract operations make it negative or
-        not finite; it is never clamped to zero.
+        it, and also when its sum is not finite. A negative sum excludes the hour
+        as well, unless the aggregation is configured to take the ``positive``
+        part only: then the negative sum is a legitimate zero and is counted
+        instead of excluded.
         """
         self.start_time = _as_utc(start_time)
         self.end_time = _as_utc(end_time)
         _validate_period(
             self.start_time, self.end_time, history_lookback_seconds, label
         )
-        if not entities:
+        if configuration is None:
             raise HomeAssistantError(
-                f"no Home Assistant {label} energy entities are configured"
+                f"no Home Assistant {label} energy aggregation is configured"
             )
-        self.entities = tuple(entities)
+        self.part = configuration.part
+        self.entities = tuple(
+            (1.0 if term.operation == "add" else -1.0, entity)
+            for term in configuration.terms
+            for entity in term.entities
+        )
         self.history_lookback_seconds = history_lookback_seconds
         self.label = label
         self._history_start = self.start_time - timedelta(
@@ -141,7 +155,7 @@ class EnergyAggregate:
         """Declare the counter history of every entity for the imported range."""
         return tuple(
             HistoryNeed(entity.entity_id, "counter", self._history_start, self.end_time)
-            for entity in self.entities
+            for _, entity in self.entities
         )
 
     def build(self, history: HomeAssistantHistory) -> HomeAssistantEnergySeries:
@@ -154,13 +168,15 @@ class EnergyAggregate:
                 "event=home_assistant_history_aggregate component=home_assistant "
                 "operation=aggregate status=success label=%s entity_count=%s "
                 "start_time=%s end_time=%s hour_count=%s excluded_hour_count=%s "
-                "duration_ms=%.1f",
+                "part=%s clamped_hour_count=%s duration_ms=%.1f",
                 self.label,
                 entity_count,
                 self.start_time.isoformat(),
                 self.end_time.isoformat(),
                 len(result.values_kw),
                 len(result.exclusions),
+                self.part,
+                result.clamped_hour_count,
                 (perf_counter() - started_at) * 1000,
             )
             return result
@@ -185,11 +201,11 @@ class EnergyAggregate:
         end = self.end_time
         label = self.label
         series_list = [
-            (self._normalize_entity(history, entity), entity)
-            for entity in self.entities
+            (self._normalize_entity(history, entity), sign, entity)
+            for sign, entity in self.entities
         ]
 
-        aggregate_start = max(series.start_time for series, _ in series_list)
+        aggregate_start = max(series.start_time for series, _, _ in series_list)
         if aggregate_start >= end:
             raise HomeAssistantError(
                 f"Home Assistant {label} entities have no complete hourly history "
@@ -197,14 +213,13 @@ class EnergyAggregate:
             )
         value_count = int((end - aggregate_start).total_seconds() // 3600)
         components: list[_Component] = []
-        for series, entity in series_list:
+        for series, sign, entity in series_list:
             offset = int((aggregate_start - series.start_time).total_seconds() // 3600)
             values = series.values_kw[offset : offset + value_count]
             if len(values) != value_count:
                 raise HomeAssistantError(
                     f"Home Assistant {label} entities returned misaligned hourly series"
                 )
-            sign = 1.0 if entity.operation == "add" else -1.0
             components.append(_Component(sign, entity.entity_id, series, values))
 
         entity_exclusions = merge_exclusions(
@@ -220,6 +235,7 @@ class EnergyAggregate:
         excluded = {item.hour_start for item in entity_exclusions}
         combined_exclusions: list[HourExclusion] = []
         values_out: list[float | None] = []
+        clamped_hour_count = 0
         for index in range(value_count):
             hour_start = aggregate_start + index * _HOUR
             if hour_start in excluded:
@@ -232,10 +248,14 @@ class EnergyAggregate:
             if not math.isfinite(total):
                 reason: ExclusionReason = "combined_not_finite"
                 described = "not finite"
-            elif total < -_NEGATIVE_ROUNDING_KWH:
+            elif total < -_NEGATIVE_ROUNDING_KWH and self.part == "net":
                 reason = "combined_negative"
                 described = "negative"
             else:
+                if total < -_NEGATIVE_ROUNDING_KWH:
+                    # Only reachable for the positive part, where a negative sum
+                    # is a legitimate zero and must stay visible in the log.
+                    clamped_hour_count += 1
                 values_out.append(max(0.0, total))
                 continue
             values_out.append(None)
@@ -257,6 +277,7 @@ class EnergyAggregate:
                 component.series.latest_observation_at for component in components
             ),
             exclusions=merge_exclusions(entity_exclusions, combined_exclusions),
+            clamped_hour_count=clamped_hour_count,
         )
 
     def _combined_cause(
@@ -277,12 +298,17 @@ class EnergyAggregate:
             )
             for component in components
         ]
+        hint = (
+            "; set part to positive if only the positive part is wanted"
+            if reason == "combined_negative"
+            else ""
+        )
         return ExclusionCause.of(
             reason,
             f"The combined {self.label} energy is {described} "
             f"({_number(total)} kWh) in the hour starting "
             f"{hour_start.isoformat()}; check the add and subtract operations of "
-            "the configured entities.",
+            f"the configured entities{hint}.",
             None,
             points,
         )

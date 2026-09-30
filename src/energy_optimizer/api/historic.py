@@ -209,7 +209,7 @@ def _result(
 def load_household_load(context: HistoricReadContext) -> HistoricAssetResult:
     """Read household-load actuals through the established historic endpoint."""
     home_assistant = context.configuration.home_assistant
-    if home_assistant is None or home_assistant.household_load_entities is None:
+    if home_assistant is None or home_assistant.household_load is None:
         return _not_configured(
             "household_load",
             "no Home Assistant household-load entities are configured",
@@ -246,8 +246,8 @@ def load_grid_flow(context: HistoricReadContext) -> HistoricAssetResult:
     home_assistant = context.configuration.home_assistant
     if (
         home_assistant is None
-        or home_assistant.grid_import_entities is None
-        or home_assistant.grid_export_entities is None
+        or home_assistant.grid_import is None
+        or home_assistant.grid_export is None
     ):
         return _not_configured(
             "grid_flow",

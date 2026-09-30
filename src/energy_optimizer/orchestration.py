@@ -726,7 +726,7 @@ def _build_household_load_registration(
     home_assistant = configuration.home_assistant
     if (
         home_assistant is None
-        or home_assistant.household_load_entities is None
+        or home_assistant.household_load is None
         or "household_load" not in orchestration.sources
     ):
         return None
@@ -894,8 +894,8 @@ def _build_grid_flow_registration(
     home_assistant = configuration.home_assistant
     if (
         home_assistant is None
-        or home_assistant.grid_import_entities is None
-        or home_assistant.grid_export_entities is None
+        or home_assistant.grid_import is None
+        or home_assistant.grid_export is None
         or "grid_flow" not in orchestration.sources
     ):
         return None

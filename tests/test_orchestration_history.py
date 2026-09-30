@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -50,6 +50,7 @@ from energy_optimizer.providers.interfaces import (
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 from home_assistant_fixtures import (
     FakeHomeAssistant,
+    aggregate_settings,
     home_assistant_configuration_factory,
     plan_without_needs,
 )
@@ -82,7 +83,6 @@ RATES = {
 
 def energy(
     entity_id: str,
-    operation: str = "add",
     state_class: str = "total_increasing",
     **settings: Any,
 ) -> dict[str, Any]:
@@ -90,7 +90,6 @@ def energy(
         "entity_id": entity_id,
         "state_class": state_class,
         "unit": "kWh",
-        "operation": operation,
         **settings,
     }
 
@@ -98,34 +97,46 @@ def energy(
 # The entity mapping of config.example.yaml: household load and grid import share
 # sensor.grid_import_energy, and the efficiency legs repeat the battery and MPPT
 # counters. Together they make 15 history fetches for 10 distinct entities.
-HOUSEHOLD = [
-    energy("sensor.household_energy"),
-    energy("sensor.ev_energy", "subtract", "total"),
-    energy("sensor.grid_import_energy"),
-]
-GRID_IMPORT = [energy("sensor.grid_import_energy")]
-GRID_EXPORT = [energy("sensor.grid_export_energy")]
-EFFICIENCY = {
-    "battery": {
-        "energy_in": [energy("sensor.battery_energy_in")],
-        "energy_out": [energy("sensor.battery_energy_out")],
-    },
-    "inverter_charge": {
-        "energy_in": [energy("sensor.ac_into_inverter")],
-        "energy_out": [
-            energy("sensor.battery_energy_in"),
-            energy("sensor.mppt_energy", "subtract"),
-        ],
-    },
-    "inverter_discharge": {
-        "energy_in": [
-            energy("sensor.battery_energy_out"),
-            energy("sensor.battery_energy_in", "subtract"),
-            energy("sensor.mppt_energy"),
-        ],
-        "energy_out": [energy("sensor.inverter_to_ac")],
-    },
-}
+# Household load is household + grid import - EV; inverter charge out is battery
+# in - MPPT; inverter discharge in is battery out + MPPT - battery in.
+HOUSEHOLD = aggregate_settings(
+    add=[energy("sensor.household_energy"), energy("sensor.grid_import_energy")],
+    subtract=[energy("sensor.ev_energy", "total")],
+)
+GRID_IMPORT = aggregate_settings(add=[energy("sensor.grid_import_energy")])
+GRID_EXPORT = aggregate_settings(add=[energy("sensor.grid_export_energy")])
+
+
+def efficiency_legs(part: Literal["net", "positive"]) -> dict[str, Any]:
+    """The efficiency legs of the example; ``part`` applies to the two DC legs."""
+    return {
+        "battery": {
+            "energy_in": aggregate_settings(add=[energy("sensor.battery_energy_in")]),
+            "energy_out": aggregate_settings(add=[energy("sensor.battery_energy_out")]),
+        },
+        "inverter_charge": {
+            "energy_in": aggregate_settings(add=[energy("sensor.ac_into_inverter")]),
+            "energy_out": aggregate_settings(
+                add=[energy("sensor.battery_energy_in")],
+                subtract=[energy("sensor.mppt_energy")],
+                part=part,
+            ),
+        },
+        "inverter_discharge": {
+            "energy_in": aggregate_settings(
+                add=[
+                    energy("sensor.battery_energy_out"),
+                    energy("sensor.mppt_energy"),
+                ],
+                subtract=[energy("sensor.battery_energy_in")],
+                part=part,
+            ),
+            "energy_out": aggregate_settings(add=[energy("sensor.inverter_to_ac")]),
+        },
+    }
+
+
+EFFICIENCY = efficiency_legs("positive")
 SCHEDULES = {
     "household_load": DataSourceScheduleConfiguration(
         interval_seconds=3600, history_lookback_seconds=3600
@@ -153,10 +164,18 @@ def with_samples(
 
 def example_home_assistant(
     replaced: Mapping[str, Sequence[tuple[datetime, str]]] | None = None,
+    rates: Mapping[str, float] | None = None,
     **overrides: Any,
 ) -> FakeHomeAssistant:
-    """Serve every counter of the example; ``replaced`` overrides single samples."""
-    states = {entity: hourly_states(rate) for entity, rate in RATES.items()}
+    """Serve every counter of the example.
+
+    ``replaced`` overrides single samples and ``rates`` the hourly gain of whole
+    counters.
+    """
+    states = {
+        entity: hourly_states(rate)
+        for entity, rate in {**RATES, **(rates or {})}.items()
+    }
     states[SOC] = [
         (BASE + timedelta(hours=hour), str(40 + 10 * (hour % 5))) for hour in range(13)
     ]
@@ -173,18 +192,18 @@ def example_home_assistant(
 def runtime_configuration(
     tmp_path: Path,
     *,
-    household: list[dict[str, Any]] = HOUSEHOLD,
-    grid_import: list[dict[str, Any]] = GRID_IMPORT,
-    grid_export: list[dict[str, Any]] = GRID_EXPORT,
+    household: dict[str, Any] = HOUSEHOLD,
+    grid_import: dict[str, Any] = GRID_IMPORT,
+    grid_export: dict[str, Any] = GRID_EXPORT,
     efficiency: dict[str, Any] | None = EFFICIENCY,
     schedules: dict[str, DataSourceScheduleConfiguration] = SCHEDULES,
 ) -> Configuration:
     home_assistant: dict[str, Any] = {
         "base_url": "http://homeassistant.test:8123",
         "token": "test-token",
-        "household_load_entities": household,
-        "grid_import_entities": grid_import,
-        "grid_export_entities": grid_export,
+        "household_load": household,
+        "grid_import": grid_import,
+        "grid_export": grid_export,
         "timeout_seconds": 5,
     }
     if efficiency is not None:
@@ -229,6 +248,67 @@ def requested_ranges(
 
 def statuses(cycle: Any) -> dict[str, str]:
     return {run.source: run.status for run in cycle.provider_runs}
+
+
+@pytest.mark.parametrize("part", ["net", "positive"])
+def test_a_pv_surplus_hour_is_zero_for_the_positive_part_and_excluded_for_net(
+    tmp_path: Path, caplog: LogCaptureFixture, part: Literal["net", "positive"]
+) -> None:
+    """PV yield above the battery charge makes the AC-sourced charge negative.
+
+    On a DC-coupled system that is an ordinary hour: PV charged the battery and
+    the surplus was exported. The positive part imports it as no AC charging and
+    reports the clamp in the log, so the hour does not remove the full-charge
+    cycle it sits in. The net part treats the negative value as invalid data.
+    """
+    home_assistant = example_home_assistant(rates={"sensor.mppt_energy": 3})
+    store = ProviderDataStore(tmp_path)
+    client = home_assistant.client()
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration(tmp_path, efficiency=efficiency_legs(part)),
+        store,
+        home_assistant_client=client,
+    )
+    assert orchestrator is not None
+
+    try:
+        with caplog.at_level(logging.INFO):
+            cycle = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
+    finally:
+        client.close()
+
+    assert statuses(cycle)["battery_efficiency"] == "success"
+    history = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
+    assert history is not None
+    summary = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=home_assistant_history_aggregate" in record.getMessage()
+        and "label=battery efficiency inverter_charge output" in record.getMessage()
+    ]
+
+    if part == "positive":
+        # Hourly: battery in 2 - PV yield 3 = -1 kWh, imported as 0.
+        assert history.exclusions == ()
+        assert history.inverter_charge_energy_out_kwh == pytest.approx((0.0,) * 6)
+        # Battery out 2 + PV yield 3 - battery in 2 stays positive.
+        assert history.inverter_discharge_energy_in_kwh == pytest.approx((3.0,) * 6)
+        assert history.battery_energy_in_kwh == pytest.approx((2.0,) * 6)
+        (line,) = summary
+        assert "part=positive" in line
+        assert "clamped_hour_count=6" in line
+        assert "excluded_hour_count=0" in line
+    else:
+        assert history.inverter_charge_energy_out_kwh == (None,) * 6
+        assert history.battery_energy_in_kwh == (None,) * 6
+        assert {
+            cause.reason for item in history.exclusions for cause in item.causes
+        } == {"combined_negative"}
+        assert len(history.exclusions) == 6
+        (line,) = summary
+        assert "part=net" in line
+        assert "clamped_hour_count=0" in line
+        assert "excluded_hour_count=6" in line
 
 
 def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
@@ -375,8 +455,12 @@ def test_a_shared_entity_is_fetched_once_and_normalized_with_each_aggregates_lim
     )
     configuration = runtime_configuration(
         tmp_path,
-        household=[energy(shared, maximum_interval_energy_kwh=10)],
-        grid_import=[energy(shared, maximum_interval_energy_kwh=500)],
+        household=aggregate_settings(
+            add=[energy(shared, maximum_interval_energy_kwh=10)]
+        ),
+        grid_import=aggregate_settings(
+            add=[energy(shared, maximum_interval_energy_kwh=500)]
+        ),
         efficiency=None,
         schedules={
             "household_load": SCHEDULES["grid_flow"],
@@ -428,7 +512,7 @@ HOUSEHOLD_ONLY = {
 def household_configuration(tmp_path: Path, entity_id: str) -> Configuration:
     return runtime_configuration(
         tmp_path,
-        household=[energy(entity_id)],
+        household=aggregate_settings(add=[energy(entity_id)]),
         efficiency=None,
         schedules=HOUSEHOLD_ONLY,
     )

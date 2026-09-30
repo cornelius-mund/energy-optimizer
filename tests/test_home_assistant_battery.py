@@ -12,6 +12,7 @@ from energy_optimizer.providers.home_assistant_battery import (
 from energy_optimizer.providers.home_assistant_history import HomeAssistantError
 from energy_optimizer.providers.interfaces import BatteryEfficiencyData, SourceMetadata
 from home_assistant_fixtures import (
+    aggregate_settings,
     home_assistant_configuration_factory,
     home_assistant_importer_factory,
     home_assistant_state_payload,
@@ -422,9 +423,11 @@ def _calculated_mode_configuration() -> HomeAssistantConfiguration:
             "entity_id": f"sensor.{name}",
             "state_class": "total_increasing",
             "unit": "kWh",
-            "operation": "add",
         }
-        return {"energy_in": [entity], "energy_out": [entity]}
+        return {
+            "energy_in": aggregate_settings(add=[entity]),
+            "energy_out": aggregate_settings(add=[entity]),
+        }
 
     mapping: dict[str, object] = {
         name: value

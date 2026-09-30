@@ -41,6 +41,7 @@ from energy_optimizer.storage import (
     ProviderDataStoreError,
 )
 from home_assistant_fixtures import (
+    aggregate_settings,
     home_assistant_history_payload,
     home_assistant_jittery_total_readings,
     import_and_build,
@@ -54,9 +55,9 @@ PRICE_FORECAST_KEY = ProviderDataKey("electricity-prices", "awattar.de", "de")
 BATTERY_HISTORY_KEY = ProviderDataKey(
     "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
 )
-ENERGY_ENTITY = (
-    "{entity_id: %s, state_class: total_increasing, unit: kWh, operation: add}"
-)
+ENERGY_ENTITY = "{entity_id: %s, state_class: total_increasing, unit: kWh}"
+# An aggregation that adds up one entity.
+ENERGY_AGGREGATE = "{terms: [{operation: add, entities: [" + ENERGY_ENTITY + "]}]}"
 
 
 def hours(*offsets: int) -> list[datetime]:
@@ -123,15 +124,12 @@ def write_configuration(
             lines.append(f"  max_data_age_seconds: {home_assistant_max_age}")
     if household:
         lines += [
-            "  household_load_entities:",
-            f"    - {ENERGY_ENTITY % 'sensor.household_energy'}",
+            f"  household_load: {ENERGY_AGGREGATE % 'sensor.household_energy'}",
         ]
     if grid:
         lines += [
-            "  grid_import_entities:",
-            f"    - {ENERGY_ENTITY % 'sensor.grid_import'}",
-            "  grid_export_entities:",
-            f"    - {ENERGY_ENTITY % 'sensor.grid_export'}",
+            f"  grid_import: {ENERGY_AGGREGATE % 'sensor.grid_import'}",
+            f"  grid_export: {ENERGY_AGGREGATE % 'sensor.grid_export'}",
         ]
     if battery:
         lines += [
@@ -153,8 +151,8 @@ def write_configuration(
             for leg in ("battery", "inverter_charge", "inverter_discharge"):
                 lines += [
                     f"      {leg}:",
-                    f"        energy_in: [{ENERGY_ENTITY % f'sensor.{leg}_in'}]",
-                    f"        energy_out: [{ENERGY_ENTITY % f'sensor.{leg}_out'}]",
+                    f"        energy_in: {ENERGY_AGGREGATE % f'sensor.{leg}_in'}",
+                    f"        energy_out: {ENERGY_AGGREGATE % f'sensor.{leg}_out'}",
                 ]
     if battery_interval_seconds is not None:
         lines += [
@@ -592,22 +590,24 @@ def test_battery_history_imported_from_total_counters_with_a_dip_is_served(
         )
 
     leg = {
-        "energy_in": [
-            {
-                "entity_id": "sensor.charging_battery_energy",
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        "energy_out": [
-            {
-                "entity_id": "sensor.discharging_battery_energy",
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        "energy_in": aggregate_settings(
+            add=[
+                {
+                    "entity_id": "sensor.charging_battery_energy",
+                    "state_class": "total",
+                    "unit": "kWh",
+                }
+            ]
+        ),
+        "energy_out": aggregate_settings(
+            add=[
+                {
+                    "entity_id": "sensor.discharging_battery_energy",
+                    "state_class": "total",
+                    "unit": "kWh",
+                }
+            ]
+        ),
     }
     configuration = HomeAssistantConfiguration.model_validate(
         {

@@ -54,6 +54,7 @@ from energy_optimizer.providers.interfaces import (
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 from home_assistant_fixtures import (
     FakeHomeAssistant,
+    aggregate_settings,
     home_assistant_history_payload,
     home_assistant_jittery_total_readings,
     plan_without_needs,
@@ -636,14 +637,15 @@ def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -734,22 +736,24 @@ def grid_flow_runtime_configuration(tmp_path: Path) -> Configuration:
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "grid_import_entities": [
-                    {
-                        "entity_id": "sensor.grid_import",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
-                "grid_export_entities": [
-                    {
-                        "entity_id": "sensor.grid_export",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "grid_import": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.grid_import",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
+                "grid_export": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.grid_export",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -1222,9 +1226,11 @@ def test_configured_efficiency_orchestrator_persists_daily_calculation(
         "entity_id": "sensor.energy",
         "state_class": "total_increasing",
         "unit": "kWh",
-        "operation": "add",
     }
-    leg = {"energy_in": [energy_entity], "energy_out": [energy_entity]}
+    leg = {
+        "energy_in": aggregate_settings(add=[energy_entity]),
+        "energy_out": aggregate_settings(add=[energy_entity]),
+    }
     runtime_configuration = Configuration(
         time_resolution_minutes=60,
         grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
@@ -1326,9 +1332,11 @@ def test_configured_efficiency_orchestrator_fetches_only_missing_hours(
         "entity_id": "sensor.energy",
         "state_class": "total_increasing",
         "unit": "kWh",
-        "operation": "add",
     }
-    leg = {"energy_in": [energy_entity], "energy_out": [energy_entity]}
+    leg = {
+        "energy_in": aggregate_settings(add=[energy_entity]),
+        "energy_out": aggregate_settings(add=[energy_entity]),
+    }
     runtime_configuration = Configuration(
         time_resolution_minutes=60,
         grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
@@ -1512,9 +1520,11 @@ def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
         "entity_id": "sensor.energy",
         "state_class": "total_increasing",
         "unit": "kWh",
-        "operation": "add",
     }
-    leg = {"energy_in": [energy_entity], "energy_out": [energy_entity]}
+    leg = {
+        "energy_in": aggregate_settings(add=[energy_entity]),
+        "energy_out": aggregate_settings(add=[energy_entity]),
+    }
     store = ProviderDataStore(tmp_path)
     orchestrator = build_configured_orchestrator(
         efficiency_runtime_configuration(tmp_path, leg), store
@@ -1628,22 +1638,24 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
         RecordingEfficiencyImporter,
     )
     leg = {
-        "energy_in": [
-            {
-                "entity_id": "sensor.charging_battery_energy",
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        "energy_out": [
-            {
-                "entity_id": "sensor.discharging_battery_energy",
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        "energy_in": aggregate_settings(
+            add=[
+                {
+                    "entity_id": "sensor.charging_battery_energy",
+                    "state_class": "total",
+                    "unit": "kWh",
+                }
+            ]
+        ),
+        "energy_out": aggregate_settings(
+            add=[
+                {
+                    "entity_id": "sensor.discharging_battery_energy",
+                    "state_class": "total",
+                    "unit": "kWh",
+                }
+            ]
+        ),
     }
     store = ProviderDataStore(tmp_path)
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -1777,14 +1789,15 @@ def test_configured_home_assistant_failure_preserves_persisted_data(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -1858,14 +1871,15 @@ def test_configured_home_assistant_fetch_bootstraps_to_ten_year_limit(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -1940,14 +1954,15 @@ def test_configured_home_assistant_persists_short_bootstrap_history(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -2009,14 +2024,15 @@ def test_configured_home_assistant_fetch_starts_after_persisted_history(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -2090,14 +2106,15 @@ def test_configured_home_assistant_skips_when_all_completed_hours_are_persisted(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             }
         ),
@@ -2176,20 +2193,22 @@ def test_household_load_refresh_excludes_a_negative_combined_hour_and_moves_on(
             {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "test-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": add_entity,
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    },
-                    {
-                        "entity_id": subtract_entity,
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "subtract",
-                    },
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": add_entity,
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ],
+                    subtract=[
+                        {
+                            "entity_id": subtract_entity,
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ],
+                ),
                 "timeout_seconds": 5,
             }
         ),

@@ -43,21 +43,27 @@ persistence:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: test-token
-  household_load_entities:
-    - entity_id: sensor.household_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-  grid_import_entities:
-    - entity_id: sensor.grid_import
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-  grid_export_entities:
-    - entity_id: sensor.grid_export
-      state_class: total_increasing
-      unit: kWh
-      operation: add
+  household_load:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.household_energy
+            state_class: total_increasing
+            unit: kWh
+  grid_import:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.grid_import
+            state_class: total_increasing
+            unit: kWh
+  grid_export:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.grid_export
+            state_class: total_increasing
+            unit: kWh
   timeout_seconds: 10
 """,
         encoding="utf-8",

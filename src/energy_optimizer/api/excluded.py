@@ -150,7 +150,7 @@ def _read_household_load(
     end: datetime,
 ) -> _SourceRead:
     home_assistant = configuration.home_assistant
-    if home_assistant is None or home_assistant.household_load_entities is None:
+    if home_assistant is None or home_assistant.household_load is None:
         return _SourceRead(
             "not_configured", "no Home Assistant household-load entities are configured"
         )
@@ -180,8 +180,8 @@ def _read_grid_flow(
     home_assistant = configuration.home_assistant
     if (
         home_assistant is None
-        or home_assistant.grid_import_entities is None
-        or home_assistant.grid_export_entities is None
+        or home_assistant.grid_import is None
+        or home_assistant.grid_export is None
     ):
         return _SourceRead(
             "not_configured",

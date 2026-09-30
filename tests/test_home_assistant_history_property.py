@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
-from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
 from energy_optimizer.exclusions import ExcludedDataPoint, ExclusionCause
 from energy_optimizer.providers.home_assistant_energy import (
     EnergyAggregate,
@@ -25,18 +24,14 @@ from energy_optimizer.providers.home_assistant_history import (
 )
 from home_assistant_fixtures import (
     FakeHomeAssistant,
+    aggregate_configuration,
     home_assistant_configuration_factory,
 )
 
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 ENTITY_ID = "sensor.energy"
-ENTITY = HomeAssistantEnergyEntityConfiguration.model_validate(
-    {
-        "entity_id": ENTITY_ID,
-        "state_class": "total_increasing",
-        "unit": "kWh",
-        "operation": "add",
-    }
+AGGREGATION = aggregate_configuration(
+    add=[{"entity_id": ENTITY_ID, "state_class": "total_increasing", "unit": "kWh"}]
 )
 configuration = home_assistant_configuration_factory()
 
@@ -163,7 +158,7 @@ def test_a_window_of_the_shared_series_equals_an_independent_fetch_of_it(
 ) -> None:
     aggregates = [
         EnergyAggregate(
-            [ENTITY],
+            AGGREGATION,
             BASE + timedelta(hours=start_hour),
             BASE + timedelta(hours=start_hour + length_hours),
             lookback_seconds,

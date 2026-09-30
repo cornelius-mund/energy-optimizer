@@ -3,7 +3,7 @@
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -13,7 +13,7 @@ from energy_optimizer.config import (
     BatteryEfficiencyLegConfiguration,
     HomeAssistantBatteryEfficiencyConfiguration,
     HomeAssistantBatteryEntityConfiguration,
-    HomeAssistantEnergyEntityConfiguration,
+    HomeAssistantConfiguration,
 )
 from energy_optimizer.exclusions import (
     ExcludedDataPoint,
@@ -34,6 +34,8 @@ from energy_optimizer.providers.interfaces import (
 )
 from home_assistant_fixtures import (
     FakeHomeAssistant,
+    aggregate_configuration,
+    aggregate_settings,
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_jittery_total_readings,
@@ -43,30 +45,19 @@ from home_assistant_fixtures import (
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-def entity(
-    name: str, operation: str = "add", state_class: str = "total_increasing"
-) -> dict[str, object]:
+def entity(name: str, state_class: str = "total_increasing") -> dict[str, object]:
     return {
         "entity_id": f"sensor.{name}",
         "state_class": state_class,
         "unit": "kWh",
-        "operation": operation,
     }
 
 
 def calculation_configuration() -> HomeAssistantBatteryEfficiencyConfiguration:
     def leg(name: str) -> BatteryEfficiencyLegConfiguration:
         return BatteryEfficiencyLegConfiguration(
-            energy_in=[
-                HomeAssistantEnergyEntityConfiguration.model_validate(
-                    entity(f"{name}_in")
-                )
-            ],
-            energy_out=[
-                HomeAssistantEnergyEntityConfiguration.model_validate(
-                    entity(f"{name}_out")
-                )
-            ],
+            energy_in=aggregate_configuration(add=[entity(f"{name}_in")]),
+            energy_out=aggregate_configuration(add=[entity(f"{name}_out")]),
         )
 
     return HomeAssistantBatteryEfficiencyConfiguration(
@@ -416,10 +407,14 @@ def test_calculation_ignores_excluded_hours_in_the_soc_balance_check(
 
 
 def importer_configuration(state_class: str = "total_increasing") -> Any:
-    def leg(name: str) -> dict[str, list[dict[str, object]]]:
+    def leg(name: str) -> dict[str, dict[str, Any]]:
         return {
-            "energy_in": [entity(f"{name}_in", state_class=state_class)],
-            "energy_out": [entity(f"{name}_out", state_class=state_class)],
+            "energy_in": aggregate_settings(
+                add=[entity(f"{name}_in", state_class=state_class)]
+            ),
+            "energy_out": aggregate_settings(
+                add=[entity(f"{name}_out", state_class=state_class)]
+            ),
         }
 
     factory = home_assistant_configuration_factory(
@@ -989,10 +984,10 @@ def test_importer_excludes_a_negative_combined_hour_instead_of_clamping_it(
     fail, and a non-negative net value is imported as it is.
     """
 
-    def leg(name: str) -> dict[str, list[dict[str, object]]]:
+    def leg(name: str) -> dict[str, dict[str, Any]]:
         return {
-            "energy_in": [entity(f"{name}_in")],
-            "energy_out": [entity(f"{name}_out")],
+            "energy_in": aggregate_settings(add=[entity(f"{name}_in")]),
+            "energy_out": aggregate_settings(add=[entity(f"{name}_out")]),
         }
 
     configuration = home_assistant_configuration_factory(
@@ -1007,11 +1002,11 @@ def test_importer_excludes_a_negative_combined_hour_instead_of_clamping_it(
                 "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
                 "battery": leg("battery"),
                 "inverter_charge": {
-                    "energy_in": [entity("charge_in")],
-                    "energy_out": [
-                        entity("charging_battery_energy"),
-                        entity("pv_yield", "subtract"),
-                    ],
+                    "energy_in": aggregate_settings(add=[entity("charge_in")]),
+                    "energy_out": aggregate_settings(
+                        add=[entity("charging_battery_energy")],
+                        subtract=[entity("pv_yield")],
+                    ),
                 },
                 "inverter_discharge": leg("discharge"),
             },
@@ -1121,10 +1116,10 @@ def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
     PV produces, and would make an hour of PV alone negative.
     """
 
-    def leg(name: str) -> dict[str, list[dict[str, object]]]:
+    def leg(name: str) -> dict[str, dict[str, Any]]:
         return {
-            "energy_in": [entity(f"{name}_in")],
-            "energy_out": [entity(f"{name}_out")],
+            "energy_in": aggregate_settings(add=[entity(f"{name}_in")]),
+            "energy_out": aggregate_settings(add=[entity(f"{name}_out")]),
         }
 
     configuration = home_assistant_configuration_factory(
@@ -1140,12 +1135,11 @@ def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
                 "battery": leg("battery"),
                 "inverter_charge": leg("charge"),
                 "inverter_discharge": {
-                    "energy_in": [
-                        entity("battery_out"),
-                        entity("battery_in", "subtract"),
-                        entity("pv_yield"),
-                    ],
-                    "energy_out": [entity("discharge_out")],
+                    "energy_in": aggregate_settings(
+                        add=[entity("battery_out"), entity("pv_yield")],
+                        subtract=[entity("battery_in")],
+                    ),
+                    "energy_out": aggregate_settings(add=[entity("discharge_out")]),
                 },
             },
         }
@@ -1196,6 +1190,187 @@ def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
         (expected_discharge_in,)
     )
     assert data.inverter_discharge_energy_out_kwh == pytest.approx((0.1,))
+
+
+def _dc_coupled_configuration(
+    part: Literal["net", "positive"],
+) -> HomeAssistantConfiguration:
+    """Configure the DC-coupled legs of the example configuration.
+
+    ``part`` applies to the two legs whose net value goes negative: the
+    AC-sourced battery charge and the DC-bus input of the inverter discharge.
+    """
+
+    def leg(name: str) -> dict[str, dict[str, Any]]:
+        return {
+            "energy_in": aggregate_settings(add=[entity(f"{name}_in")]),
+            "energy_out": aggregate_settings(add=[entity(f"{name}_out")]),
+        }
+
+    return home_assistant_configuration_factory(
+        battery={
+            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+            "capacity": {"value": 10, "unit": "kWh"},
+            "minimum_soc": {"value": 1, "unit": "kWh"},
+            "maximum_soc": {"value": 10, "unit": "kWh"},
+            "maximum_charge": {"value": 4, "unit": "kW"},
+            "maximum_discharge": {"value": 4, "unit": "kW"},
+            "efficiency_calculation": {
+                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                "battery": leg("battery"),
+                "inverter_charge": {
+                    "energy_in": aggregate_settings(add=[entity("charge_in")]),
+                    "energy_out": aggregate_settings(
+                        add=[entity("battery_in")],
+                        subtract=[entity("pv_yield")],
+                        part=part,
+                    ),
+                },
+                "inverter_discharge": {
+                    "energy_in": aggregate_settings(
+                        add=[entity("battery_out"), entity("pv_yield")],
+                        subtract=[entity("battery_in")],
+                        part=part,
+                    ),
+                    "energy_out": aggregate_settings(add=[entity("discharge_out")]),
+                },
+            },
+        }
+    )()
+
+
+def _import_dc_coupled_history(
+    part: Literal["net", "positive"],
+) -> tuple[HomeAssistantConfiguration, BatteryEfficiencyHistoryData]:
+    """Import four hours of a DC-coupled battery that meet all three cases.
+
+    - Hour 0: the battery charges 4 kWh from the grid, so the inverter discharge
+      input ``battery_out + pv_yield - battery_in`` is negative.
+    - Hour 1: the battery discharges 0.9 kWh.
+    - Hour 2: the battery takes 1 kWh while PV yields 1.5 kWh, so the AC-sourced
+      charge ``battery_in - pv_yield`` is negative and the surplus is exported.
+    - Hour 3: nothing happens.
+
+    The battery is full at the start of hour 1 and again at the start of hour 3.
+    """
+    configuration = _dc_coupled_configuration(part)
+    counters = {
+        "sensor.battery_in": (0, 4.0, 4.0, 5.0, 5.0),
+        "sensor.battery_out": (0, 0, 0.9, 0.9, 0.9),
+        "sensor.pv_yield": (0, 0, 0, 1.5, 1.5),
+        "sensor.charge_in": (0, 4.4, 4.4, 4.4, 4.4),
+        "sensor.discharge_out": (0, 0, 0.8, 1.2, 1.2),
+        "sensor.soc": (60, 100, 90, 100, 100),
+    }
+    states = {
+        entity_id: [
+            (START + timedelta(hours=hour), str(value))
+            for hour, value in enumerate(values)
+        ]
+        for entity_id, values in counters.items()
+    }
+    home_assistant = FakeHomeAssistant(
+        states,
+        units={"sensor.soc": "%"},
+        state_classes={"sensor.soc": "measurement"},
+    )
+    client = home_assistant.client()
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
+    end = START + timedelta(hours=4)
+    try:
+        data = import_and_build(importer, client, START, end, now=end)
+    finally:
+        client.close()
+    return configuration, data
+
+
+def test_positive_part_imports_the_negative_dc_coupled_hours_as_zero(
+    caplog: LogCaptureFixture,
+) -> None:
+    """A negative net value is a legitimate zero for the positive part."""
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.providers"):
+        _, data = _import_dc_coupled_history("positive")
+
+    assert data.exclusions == ()
+    assert data.state_of_charge_percent == (60, 100, 90, 100, 100)
+    assert data.battery_energy_in_kwh == (4.0, 0.0, 1.0, 0.0)
+    assert data.battery_energy_out_kwh == (0.0, 0.9, 0.0, 0.0)
+    assert data.inverter_charge_energy_in_kwh == pytest.approx((4.4, 0.0, 0.0, 0.0))
+    # Hour 2: 1.0 - 1.5 kWh is negative, so no charge came from AC.
+    assert data.inverter_charge_energy_out_kwh == pytest.approx((4.0, 0.0, 0.0, 0.0))
+    # Hour 0: 0 + 0 - 4.0 kWh is negative, so nothing reached the inverter.
+    assert data.inverter_discharge_energy_in_kwh == pytest.approx((0.0, 0.9, 0.5, 0.0))
+    assert data.inverter_discharge_energy_out_kwh == pytest.approx((0.0, 0.8, 0.4, 0.0))
+
+    summaries = {
+        record.getMessage().split("label=")[1].split(" entity_count")[0]: record
+        for record in caplog.records
+        if "event=home_assistant_history_aggregate" in record.getMessage()
+    }
+    clamped = {
+        label: int(record.getMessage().split("clamped_hour_count=")[1].split(" ")[0])
+        for label, record in summaries.items()
+    }
+    assert clamped == {
+        "battery efficiency battery input": 0,
+        "battery efficiency battery output": 0,
+        "battery efficiency inverter_charge input": 0,
+        "battery efficiency inverter_charge output": 1,
+        "battery efficiency inverter_discharge input": 1,
+        "battery efficiency inverter_discharge output": 0,
+    }
+
+
+def test_net_part_excludes_the_negative_dc_coupled_hours_in_every_leg() -> None:
+    _, data = _import_dc_coupled_history("net")
+
+    for name in SIX_LEGS:
+        values = getattr(data, name)
+        assert values[0] is None and values[2] is None, name
+        assert values[1] is not None and values[3] is not None, name
+    assert [item.hour_start for item in data.exclusions] == [
+        START,
+        START + timedelta(hours=2),
+    ]
+    assert {cause.reason for item in data.exclusions for cause in item.causes} == {
+        "combined_negative"
+    }
+
+
+def test_positive_part_keeps_the_battery_cycle_that_holds_a_pv_surplus_hour() -> None:
+    """The reason for the positive part: the measured efficiency stays available.
+
+    Excluding the negative hours removes the full-charge cycle they sit in, so
+    the battery efficiency cannot be calculated and falls back to the default.
+    """
+    configuration, data = _import_dc_coupled_history("positive")
+    assert configuration.battery is not None
+    calculation = configuration.battery.efficiency_calculation
+    assert calculation is not None
+
+    result = calculate_battery_efficiency(data, calculation, capacity_kwh=10, now=START)
+
+    assert result.status == "ok"
+    assert result.complete_cycle_count == 1
+    assert result.battery_efficiency == pytest.approx(0.9)
+    assert result.inverter_charge_efficiency == pytest.approx(4.0 / 4.4)
+    assert result.inverter_discharge_efficiency == pytest.approx(1.2 / 1.4)
+    assert result.defaulted_components == ()
+
+    net_configuration, net_data = _import_dc_coupled_history("net")
+    assert net_configuration.battery is not None
+    net_calculation = net_configuration.battery.efficiency_calculation
+    assert net_calculation is not None
+    net_result = calculate_battery_efficiency(
+        net_data, net_calculation, capacity_kwh=10, now=START
+    )
+
+    assert net_result.complete_cycle_count == 0
+    assert net_result.status != "ok"
+    assert net_result.component_statuses is not None
+    assert net_result.component_statuses["battery_efficiency"] == "unavailable"
+    assert "battery_efficiency" in net_result.defaulted_components
+    assert net_result.battery_efficiency == 0.95
 
 
 def test_merge_extends_persisted_history_with_new_hours() -> None:

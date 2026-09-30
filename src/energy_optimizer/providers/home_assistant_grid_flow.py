@@ -53,6 +53,8 @@ class HomeAssistantGridFlowImporter:
             message="Home Assistant import times must include a timezone",
         )
         effective_end_time = end_time or latest_completed_hour(retrieved_at)
+        grid_import = self.configuration.grid_import
+        grid_export = self.configuration.grid_export
         logger.debug(
             "event=provider_fetch_started component=home_assistant operation=fetch "
             "data_type=grid_flow start_time=%s end_time=%s "
@@ -61,19 +63,19 @@ class HomeAssistantGridFlowImporter:
             start_time,
             end_time,
             history_lookback_seconds,
-            len(self.configuration.grid_import_entities or []),
-            len(self.configuration.grid_export_entities or []),
+            len(grid_import.entity_ids) if grid_import is not None else 0,
+            len(grid_export.entity_ids) if grid_export is not None else 0,
         )
         try:
             import_aggregate = EnergyAggregate(
-                self.configuration.grid_import_entities,
+                grid_import,
                 start_time,
                 effective_end_time,
                 history_lookback_seconds,
                 label="grid import",
             )
             export_aggregate = EnergyAggregate(
-                self.configuration.grid_export_entities,
+                grid_export,
                 start_time,
                 effective_end_time,
                 history_lookback_seconds,

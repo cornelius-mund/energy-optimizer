@@ -47,14 +47,15 @@ class HomeAssistantLoadImporter:
         Building reads the shared history that the caller imported for the
         declared needs; this importer makes no Home Assistant request itself.
         """
-        entities = self.configuration.household_load_entities
+        aggregation = self.configuration.household_load
+        entity_count = len(aggregation.entity_ids) if aggregation is not None else 0
         logger.debug(
             "event=provider_fetch_started component=home_assistant operation=fetch "
             "start_time=%s end_time=%s history_lookback_seconds=%s entity_count=%s",
             start_time,
             end_time,
             history_lookback_seconds,
-            len(entities or []),
+            entity_count,
         )
         retrieved_at = as_utc(
             now or datetime.now(timezone.utc),
@@ -64,7 +65,7 @@ class HomeAssistantLoadImporter:
         effective_end_time = end_time or latest_completed_hour(retrieved_at)
         try:
             aggregate = EnergyAggregate(
-                entities,
+                aggregation,
                 start_time,
                 effective_end_time,
                 history_lookback_seconds,
@@ -101,14 +102,15 @@ class HomeAssistantLoadImporter:
                 effective_end_time,
                 len(data.load_kw),
                 len(data.exclusions),
-                len(entities or []),
+                entity_count,
             )
             return data
 
         return HistoryPlan(needs=aggregate.needs(), build=build)
 
     def _log_failure(self, error: Exception) -> None:
-        entity_count = len(self.configuration.household_load_entities or [])
+        aggregation = self.configuration.household_load
+        entity_count = len(aggregation.entity_ids) if aggregation is not None else 0
         logger.error(
             "event=provider_fetch_failed component=home_assistant "
             "operation=fetch error_type=%s entity_count=%s",
