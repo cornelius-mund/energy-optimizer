@@ -8,8 +8,6 @@ from starlette.responses import RedirectResponse
 
 _app_module = import_module("energy_optimizer.api.app")
 app = cast(Any, _app_module.app)
-MAX_HORIZON_HOURS = cast(int, _app_module.MAX_HORIZON_HOURS)
-configured_frontend_directory = cast(Any, _app_module.configured_frontend_directory)
 
 # Keep this module-level compatibility hook usable by callers and tests that
 # replace the configured dashboard directory through ``energy_optimizer.api``.

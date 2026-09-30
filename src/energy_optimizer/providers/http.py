@@ -12,16 +12,11 @@ import httpx
 logger = logging.getLogger(__name__)
 
 ErrorFactory = Callable[[str], Exception]
-StatusErrorFactory = Callable[[int], Exception | None]
-StatusMessageFactory = Callable[[int], str]
 
 
 def home_assistant_headers(token: str) -> dict[str, str]:
     """Build the common authenticated Home Assistant request headers."""
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
 
 class JsonHttpClient:
@@ -40,7 +35,7 @@ class JsonHttpClient:
         timeout_message: str,
         transport_message: str,
         malformed_message: str,
-        status_error: StatusErrorFactory | None,
+        status_error: Callable[[int], Exception | None],
         log_event: str,
         component: str,
         operation: str,
@@ -57,10 +52,7 @@ class JsonHttpClient:
             try:
                 if self._client is not None:
                     response = self._client.get(
-                        url,
-                        headers=headers,
-                        params=params,
-                        timeout=timeout_seconds,
+                        url, headers=headers, params=params, timeout=timeout_seconds
                     )
                 else:
                     with httpx.Client(timeout=timeout_seconds) as client:
@@ -73,14 +65,9 @@ class JsonHttpClient:
                 raise error_factory(transport_message) from error
 
             status = response.status_code
-            if status_error is not None:
-                status_exception = status_error(response.status_code)
-                if status_exception is not None:
-                    raise status_exception
-            if response.is_error:
-                raise error_factory(
-                    f"HTTP {response.status_code} response from {component}"
-                )
+            status_exception = status_error(status)
+            if status_exception is not None:
+                raise status_exception
             try:
                 payload = response.json()
             except ValueError as error:
@@ -119,7 +106,7 @@ class JsonHttpClient:
         timeout_seconds: float,
         error_factory: ErrorFactory,
         not_found_message: str,
-        status_message: StatusMessageFactory,
+        status_message: Callable[[int], str],
         timeout_message: str,
         transport_message: str,
         malformed_message: str,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["HomeAssistantBatteryImporter", "HomeAssistantError"]
 
-DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE = DEFAULT_EFFICIENCY_RATIO
+_Records = dict[str, dict[str, Any]]
+_UNAVAILABLE_STATES = {"unknown", "unavailable"}
 
 
 class HomeAssistantBatteryImporter:
@@ -63,75 +64,56 @@ class HomeAssistantBatteryImporter:
             error_factory=HomeAssistantError,
             message="Home Assistant battery import times must include a timezone",
         )
-        mappings = self._mappings()
-        values = self._values()
+        configuration = self.battery_configuration
+        mappings = [
+            value
+            for value in (
+                configuration.state_of_charge,
+                configuration.capacity,
+                configuration.minimum_soc,
+                configuration.maximum_soc,
+                configuration.maximum_charge,
+                configuration.maximum_discharge,
+                configuration.battery_efficiency,
+            )
+            if isinstance(value, HomeAssistantBatteryEntityConfiguration)
+        ]
         logger.debug(
             "event=provider_fetch_started component=home_assistant operation=fetch "
             "data_type=battery entity_count=%s",
-            len({mapping.entity_id for mapping in mappings.values()}),
+            len({mapping.entity_id for mapping in mappings}),
         )
         records = self._fetch_records(mappings)
-        capacity = self._convert(
-            "capacity",
-            values["capacity"],
-            self._value("capacity", values["capacity"], records),
-        )
+        capacity = self._convert("capacity", configuration.capacity, records)
         if capacity <= 0:
             raise HomeAssistantError(
                 "Home Assistant battery capacity must be greater than zero"
             )
 
         state_of_charge = self._convert_soc(
-            "state_of_charge", values["state_of_charge"], records, capacity
+            "state_of_charge", configuration.state_of_charge, records, capacity
         )
-        minimum_soc = self._convert_soc(
-            "minimum_soc", values["minimum_soc"], records, capacity
-        )
-        maximum_soc = self._convert_soc(
-            "maximum_soc", values["maximum_soc"], records, capacity
-        )
-        initial_soc = state_of_charge
-        maximum_charge = self._convert(
-            "maximum_charge",
-            values["maximum_charge"],
-            self._value("maximum_charge", values["maximum_charge"], records),
-        )
-        maximum_discharge = self._convert(
-            "maximum_discharge",
-            values["maximum_discharge"],
-            self._value("maximum_discharge", values["maximum_discharge"], records),
-        )
-        battery_efficiency = self._efficiency_value(
-            "battery_efficiency",
-            values["battery_efficiency"],
-            records,
-            efficiency_data,
-            default=DEFAULT_BATTERY_EFFICIENCY_BEFORE_FIRST_CYCLE,
-        )
-        self._validate_values(
-            capacity=capacity,
-            minimum_soc=minimum_soc,
-            maximum_soc=maximum_soc,
-            initial_soc=initial_soc,
-            maximum_charge=maximum_charge,
-            maximum_discharge=maximum_discharge,
-            battery_efficiency=battery_efficiency,
-        )
-        latest_observation_at = min(
-            self._record_timestamp(records, name) for name in mappings
-        )
+        latest_observation_at = min(record["timestamp"] for record in records.values())
         data = BatteryData(
             schema_version="1",
             start_time=retrieved_at,
             interval_minutes=60,
             state_of_charge_kwh=(state_of_charge,),
             capacity_kwh=capacity,
-            minimum_soc_kwh=minimum_soc,
-            maximum_soc_kwh=maximum_soc,
-            initial_soc_kwh=initial_soc,
-            maximum_charge_kw=maximum_charge,
-            maximum_discharge_kw=maximum_discharge,
-            battery_efficiency=battery_efficiency,
+            minimum_soc_kwh=self._convert_soc(
+                "minimum_soc", configuration.minimum_soc, records, capacity
+            ),
+            maximum_soc_kwh=self._convert_soc(
+                "maximum_soc", configuration.maximum_soc, records, capacity
+            ),
+            initial_soc_kwh=state_of_charge,
+            maximum_charge_kw=self._convert(
+                "maximum_charge", configuration.maximum_charge, records
+            ),
+            maximum_discharge_kw=self._convert(
+                "maximum_discharge", configuration.maximum_discharge, records
+            ),
+            battery_efficiency=self._battery_efficiency(records, efficiency_data),
             unit="kWh",
             power_unit="kW",
             source=SourceMetadata(
@@ -140,46 +122,53 @@ class HomeAssistantBatteryImporter:
             retrieved_at=retrieved_at,
             latest_observation_at=latest_observation_at,
         )
+        _validate(data)
         logger.info(
             "event=provider_fetch_succeeded component=home_assistant operation=fetch "
             "data_type=battery entity_count=%s latest_observation_at=%s",
-            len({mapping.entity_id for mapping in mappings.values()}),
+            len(records),
             latest_observation_at,
         )
         return data
 
-    def is_fresh(
-        self,
-        data: BatteryData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
+    def is_fresh(self, data: BatteryData, *, now: datetime | None = None) -> bool:
         """Check whether the snapshot is within the configured age threshold."""
         return is_fresh(
-            data.latest_observation_at,
-            self.configuration.max_data_age_seconds,
-            now=now,
+            data.latest_observation_at, self.configuration.max_data_age_seconds, now=now
         )
 
     def _fetch_records(
-        self,
-        mappings: dict[str, HomeAssistantBatteryEntityConfiguration],
-    ) -> dict[str, dict[str, Any]]:
-        records: dict[str, dict[str, Any]] = {}
-        for entity_id in {mapping.entity_id for mapping in mappings.values()}:
+        self, mappings: list[HomeAssistantBatteryEntityConfiguration]
+    ) -> _Records:
+        records: _Records = {}
+        for entity_id in {mapping.entity_id for mapping in mappings}:
             payload = self._request(entity_id)
             if not isinstance(payload, dict):
                 raise HomeAssistantError(
                     f"Home Assistant battery state for {entity_id} must be a JSON "
                     "object"
                 )
-            reported_entity_id = payload.get("entity_id")
-            if reported_entity_id is not None and reported_entity_id != entity_id:
+            if payload.get("entity_id") not in (None, entity_id):
                 raise HomeAssistantError(
                     f"Home Assistant returned battery state for an unexpected entity "
                     f"instead of {entity_id}"
                 )
-            timestamp = self._parse_timestamp(payload, entity_id)
+            timestamp = parse_aware_timestamp(
+                payload.get("last_updated", payload.get("last_changed")),
+                error_factory=HomeAssistantError,
+                missing_message=(
+                    f"Home Assistant battery entity {entity_id} is missing an "
+                    "observation timestamp"
+                ),
+                invalid_message=lambda raw: (
+                    f"Home Assistant battery entity {entity_id} returned an invalid "
+                    f"observation timestamp: {raw!r}"
+                ),
+                naive_message=(
+                    f"Home Assistant battery entity {entity_id} observation timestamp "
+                    "must include a timezone"
+                ),
+            )
             attributes = payload.get("attributes", {})
             if not isinstance(attributes, dict):
                 raise HomeAssistantError(
@@ -189,13 +178,9 @@ class HomeAssistantBatteryImporter:
             state = payload.get("state")
             uses_state = any(
                 mapping.entity_id == entity_id and mapping.attribute is None
-                for mapping in mappings.values()
+                for mapping in mappings
             )
-            if (
-                uses_state
-                and isinstance(state, str)
-                and state.strip().lower() in {"unknown", "unavailable"}
-            ):
+            if uses_state and _is_unavailable(state):
                 raise HomeAssistantError(
                     f"Home Assistant battery entity {entity_id} is unavailable"
                 )
@@ -234,237 +219,131 @@ class HomeAssistantBatteryImporter:
             log_context=f"entity_id={entity_id}",
         )
 
-    def _mappings(self) -> dict[str, HomeAssistantBatteryEntityConfiguration]:
-        return {
-            name: value
-            for name, value in self._values().items()
-            if isinstance(value, HomeAssistantBatteryEntityConfiguration)
-        }
-
-    def _values(self) -> dict[str, BatteryConfigurationValue]:
-        configuration = self.battery_configuration
-        return {
-            "state_of_charge": configuration.state_of_charge,
-            "capacity": configuration.capacity,
-            "minimum_soc": configuration.minimum_soc,
-            "maximum_soc": configuration.maximum_soc,
-            "maximum_charge": configuration.maximum_charge,
-            "maximum_discharge": configuration.maximum_discharge,
-            "battery_efficiency": cast(
-                BatteryConfigurationValue, configuration.battery_efficiency
-            ),
-        }
-
-    def _value(
-        self,
-        name: str,
-        value: BatteryConfigurationValue,
-        records: dict[str, dict[str, Any]],
-    ) -> object:
-        if isinstance(value, BatteryConstantConfiguration):
-            return value.value
-
-        mapping = value
-        record = records[mapping.entity_id]
-        if mapping.attribute is None:
-            value = record["state"]
+    def _convert(
+        self, name: str, configuration: BatteryConfigurationValue, records: _Records
+    ) -> float:
+        raw_value: object
+        if isinstance(configuration, BatteryConstantConfiguration):
+            source = "configuration constant"
+            raw_value = configuration.value
         else:
-            attributes = record["attributes"]
-            if mapping.attribute not in attributes:
+            source = configuration.entity_id
+            record = records[source]
+            if configuration.attribute is None:
+                raw_value = record["state"]
+            elif configuration.attribute in record["attributes"]:
+                raw_value = record["attributes"][configuration.attribute]
+            else:
                 raise HomeAssistantError(
-                    f"Home Assistant battery entity {mapping.entity_id} is missing "
-                    f"attribute {mapping.attribute!r} for {name}"
+                    f"Home Assistant battery entity {source} is missing "
+                    f"attribute {configuration.attribute!r} for {name}"
                 )
-            value = attributes[mapping.attribute]
-        if isinstance(value, str) and value.strip().lower() in {
-            "unknown",
-            "unavailable",
-        }:
+            if _is_unavailable(raw_value):
+                raise HomeAssistantError(
+                    f"Home Assistant battery entity {source} has an unavailable "
+                    f"value for {name}"
+                )
+        non_numeric = (
+            f"Home Assistant battery entity {source} returned a non-numeric "
+            f"value for {name}"
+        )
+        if isinstance(raw_value, bool):
+            raise HomeAssistantError(non_numeric)
+        try:
+            number = float(raw_value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as error:
+            raise HomeAssistantError(non_numeric) from error
+        if not math.isfinite(number):
             raise HomeAssistantError(
-                f"Home Assistant battery entity {mapping.entity_id} has an unavailable "
+                f"Home Assistant battery entity {source} returned a non-finite "
                 f"value for {name}"
             )
-        return value
-
-    def _convert(
-        self,
-        name: str,
-        configuration: BatteryConfigurationValue,
-        raw_value: object,
-    ) -> float:
-        unit = configuration.unit
-        source = (
-            configuration.entity_id
-            if isinstance(configuration, HomeAssistantBatteryEntityConfiguration)
-            else "configuration constant"
-        )
-        number = self._number(raw_value, name, source)
-        if unit == "Wh" or unit == "W":
+        if configuration.unit in ("Wh", "W"):
             number /= 1000
-        elif unit == "%":
+        elif configuration.unit == "%":
             number /= 100
         return number
 
     def _convert_soc(
         self,
         name: str,
-        value: BatteryConfigurationValue,
-        records: dict[str, dict[str, Any]],
+        configuration: BatteryConfigurationValue,
+        records: _Records,
         capacity: float,
     ) -> float:
-        number = self._convert(name, value, self._value(name, value, records))
-        if value.unit == "%":
+        number = self._convert(name, configuration, records)
+        if configuration.unit == "%":
             number *= capacity
         return number
 
-    def _convert_efficiency(
-        self,
-        name: str,
-        value: BatteryConfigurationValue,
-        records: dict[str, dict[str, Any]],
+    def _battery_efficiency(
+        self, records: _Records, calculated: BatteryEfficiencyData | None
     ) -> float:
-        return self._convert(name, value, self._value(name, value, records))
-
-    def _efficiency_value(
-        self,
-        name: str,
-        value: BatteryConfigurationValue | None,
-        records: dict[str, dict[str, Any]],
-        calculated: BatteryEfficiencyData | None,
-        *,
-        default: float | None = None,
-    ) -> float:
-        """Resolve fixed values, then a completed calculation, then a default.
+        """Resolve a fixed value, then a completed calculation, then a default.
 
         A live battery snapshot must remain available even before the first
         complete measured efficiency cycle exists, so calculated mode falls
-        back to ``default`` (documented as 95%) instead of failing the whole
+        back to the default (documented as 95%) instead of failing the whole
         snapshot while measurement history is still accumulating.
         """
-        if value is not None:
-            return self._convert_efficiency(name, value, records)
-        if calculated is not None:
-            resolved = getattr(calculated, name)
-            if resolved is not None and name not in calculated.defaulted_components:
-                return float(resolved)
-        if default is not None:
-            if self.battery_configuration.efficiency_calculation is not None:
-                logger.info(
-                    "event=battery_efficiency_default_used "
-                    "component=home_assistant operation=fetch field=%s "
-                    "reason=calculation_not_ready default=%s",
-                    name,
-                    default,
-                )
-            return default
-        raise HomeAssistantError(f"Home Assistant battery {name} is not configured")
+        configured = self.battery_configuration.battery_efficiency
+        if configured is not None:
+            return self._convert("battery_efficiency", configured, records)
+        if (
+            calculated is not None
+            and calculated.battery_efficiency is not None
+            and "battery_efficiency" not in calculated.defaulted_components
+        ):
+            return float(calculated.battery_efficiency)
+        if self.battery_configuration.efficiency_calculation is not None:
+            logger.info(
+                "event=battery_efficiency_default_used "
+                "component=home_assistant operation=fetch field=%s "
+                "reason=calculation_not_ready default=%s",
+                "battery_efficiency",
+                DEFAULT_EFFICIENCY_RATIO,
+            )
+        return DEFAULT_EFFICIENCY_RATIO
 
-    def _record_timestamp(
-        self,
-        records: dict[str, dict[str, Any]],
-        name: str,
-    ) -> datetime:
-        mapping = self._mappings()[name]
-        timestamp = records[mapping.entity_id]["timestamp"]
-        if not isinstance(timestamp, datetime):
-            raise HomeAssistantError(
-                f"Home Assistant battery entity {mapping.entity_id} has an invalid "
-                "observation timestamp"
-            )
-        return timestamp
 
-    def _validate_values(
-        self,
-        *,
-        capacity: float,
-        minimum_soc: float,
-        maximum_soc: float,
-        initial_soc: float,
-        maximum_charge: float,
-        maximum_discharge: float,
-        battery_efficiency: float,
-    ) -> None:
-        values = {
-            "capacity": capacity,
-            "minimum_soc": minimum_soc,
-            "maximum_soc": maximum_soc,
-            "initial_soc": initial_soc,
-            "maximum_charge": maximum_charge,
-            "maximum_discharge": maximum_discharge,
-            "battery_efficiency": battery_efficiency,
-        }
-        for name, value in values.items():
-            if not math.isfinite(value):
-                raise HomeAssistantError(
-                    f"Home Assistant battery {name} must be finite"
-                )
-            if value < 0:
-                raise HomeAssistantError(
-                    f"Home Assistant battery {name} must be non-negative"
-                )
-        if maximum_charge <= 0:
-            raise HomeAssistantError(
-                "Home Assistant battery maximum_charge must be greater than zero"
-            )
-        if maximum_discharge <= 0:
-            raise HomeAssistantError(
-                "Home Assistant battery maximum_discharge must be greater than zero"
-            )
-        if minimum_soc > maximum_soc:
-            raise HomeAssistantError(
-                "Home Assistant battery minimum SOC exceeds maximum SOC"
-            )
-        if maximum_soc > capacity:
-            raise HomeAssistantError(
-                "Home Assistant battery maximum SOC exceeds capacity"
-            )
-        if not minimum_soc <= initial_soc <= maximum_soc:
-            raise HomeAssistantError(
-                "Home Assistant battery state of charge is outside configured SOC "
-                "limits"
-            )
-        if not 0 < battery_efficiency <= 1:
-            raise HomeAssistantError(
-                "Home Assistant battery efficiencies must be greater than zero and "
-                "no greater than one"
-            )
+def _is_unavailable(value: object) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _UNAVAILABLE_STATES
 
-    @staticmethod
-    def _number(value: object, name: str, entity_id: str) -> float:
-        if isinstance(value, bool):
-            raise HomeAssistantError(
-                f"Home Assistant battery entity {entity_id} returned a non-numeric "
-                f"value for {name}"
-            )
-        try:
-            number = float(value)  # type: ignore[arg-type]
-        except (TypeError, ValueError) as error:
-            raise HomeAssistantError(
-                f"Home Assistant battery entity {entity_id} returned a non-numeric "
-                f"value for {name}"
-            ) from error
-        if not math.isfinite(number):
-            raise HomeAssistantError(
-                f"Home Assistant battery entity {entity_id} returned a non-finite "
-                f"value for {name}"
-            )
-        return number
 
-    @staticmethod
-    def _parse_timestamp(payload: dict[str, Any], entity_id: str) -> datetime:
-        return parse_aware_timestamp(
-            payload.get("last_updated", payload.get("last_changed")),
-            error_factory=HomeAssistantError,
-            missing_message=(
-                f"Home Assistant battery entity {entity_id} is missing an "
-                "observation timestamp"
-            ),
-            invalid_message=lambda raw: (
-                f"Home Assistant battery entity {entity_id} returned an invalid "
-                f"observation timestamp: {raw!r}"
-            ),
-            naive_message=(
-                f"Home Assistant battery entity {entity_id} observation timestamp "
-                "must include a timezone"
-            ),
+def _validate(data: BatteryData) -> None:
+    values = {
+        "capacity": data.capacity_kwh,
+        "minimum_soc": data.minimum_soc_kwh,
+        "maximum_soc": data.maximum_soc_kwh,
+        "initial_soc": data.initial_soc_kwh,
+        "maximum_charge": data.maximum_charge_kw,
+        "maximum_discharge": data.maximum_discharge_kw,
+        "battery_efficiency": data.battery_efficiency,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value):
+            raise HomeAssistantError(f"Home Assistant battery {name} must be finite")
+        if value < 0:
+            raise HomeAssistantError(
+                f"Home Assistant battery {name} must be non-negative"
+            )
+    for name in ("maximum_charge", "maximum_discharge"):
+        if values[name] <= 0:
+            raise HomeAssistantError(
+                f"Home Assistant battery {name} must be greater than zero"
+            )
+    if data.minimum_soc_kwh > data.maximum_soc_kwh:
+        raise HomeAssistantError(
+            "Home Assistant battery minimum SOC exceeds maximum SOC"
+        )
+    if data.maximum_soc_kwh > data.capacity_kwh:
+        raise HomeAssistantError("Home Assistant battery maximum SOC exceeds capacity")
+    if not data.minimum_soc_kwh <= data.initial_soc_kwh <= data.maximum_soc_kwh:
+        raise HomeAssistantError(
+            "Home Assistant battery state of charge is outside configured SOC limits"
+        )
+    if not 0 < data.battery_efficiency <= 1:
+        raise HomeAssistantError(
+            "Home Assistant battery efficiencies must be greater than zero and "
+            "no greater than one"
         )

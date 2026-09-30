@@ -11,15 +11,13 @@ loses its value and becomes an excluded hour with the reason
 
 from __future__ import annotations
 
+from collections.abc import Container
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import TypeVar, cast
+from functools import partial
+from typing import cast
 
-from energy_optimizer.exclusions import (
-    ExclusionCause,
-    HourExclusion,
-    merge_exclusions,
-)
+from energy_optimizer.exclusions import ExclusionCause, HourExclusion, merge_exclusions
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyHistoryData,
     GridFlowData,
@@ -28,16 +26,17 @@ from energy_optimizer.providers.interfaces import (
 )
 
 _HOUR = timedelta(hours=1)
-ModelT = TypeVar("ModelT")
 
 
-def legacy_exclusion(hour_start: datetime, quality: IntervalQuality) -> HourExclusion:
+def legacy_exclusion(
+    hour_start: datetime, reason: str | None, entity_id: str | None
+) -> HourExclusion:
     """Describe one hour that an earlier version flagged as suspect."""
     detail = ", ".join(
         part
         for part in (
-            f"reason {quality.reason}" if quality.reason else None,
-            f"entity {quality.entity_id}" if quality.entity_id else None,
+            f"reason {reason}" if reason else None,
+            f"entity {entity_id}" if entity_id else None,
         )
         if part
     )
@@ -46,15 +45,11 @@ def legacy_exclusion(hour_start: datetime, quality: IntervalQuality) -> HourExcl
     )
     return HourExclusion(
         hour_start,
-        (
-            ExclusionCause.of(
-                "flagged_by_earlier_version", message, quality.entity_id, []
-            ),
-        ),
+        (ExclusionCause.of("flagged_by_earlier_version", message, entity_id, []),),
     )
 
 
-def upgrade_legacy_quality(data: ModelT) -> ModelT:
+def upgrade_legacy_quality[ModelT](data: ModelT) -> ModelT:
     """Convert suspect quality of persisted history into excluded hours."""
     if isinstance(data, HouseholdLoadData):
         return cast(ModelT, _upgrade_household_load(data))
@@ -66,32 +61,34 @@ def upgrade_legacy_quality(data: ModelT) -> ModelT:
 
 
 def _suspect_hours(
-    quality: tuple[IntervalQuality, ...],
-    start_time: datetime,
-    count: int,
-) -> list[HourExclusion]:
-    """Return one exclusion per hour that the legacy quality flags as suspect."""
+    quality: tuple[IntervalQuality, ...], start_time: datetime, count: int
+) -> dict[int, HourExclusion]:
+    """Return the exclusion of every hour index that the legacy quality flags."""
     if len(quality) != count:
         raise ValueError("persisted interval quality is misaligned")
-    return [
-        legacy_exclusion(start_time + index * _HOUR, item)
+    return {
+        index: legacy_exclusion(start_time + index * _HOUR, item.reason, item.entity_id)
         for index, item in enumerate(quality)
         if item.status == "suspect"
-    ]
+    }
+
+
+def _drop(
+    values: tuple[float | None, ...], indices: Container[int]
+) -> tuple[float | None, ...]:
+    return tuple(
+        None if index in indices else value for index, value in enumerate(values)
+    )
 
 
 def _upgrade_household_load(data: HouseholdLoadData) -> HouseholdLoadData:
     if not data.quality:
         return data
     legacy = _suspect_hours(data.quality, data.start_time, len(data.load_kw))
-    excluded = {item.hour_start for item in legacy}
     return replace(
         data,
-        load_kw=tuple(
-            None if data.start_time + index * _HOUR in excluded else value
-            for index, value in enumerate(data.load_kw)
-        ),
-        exclusions=merge_exclusions(data.exclusions, legacy),
+        load_kw=_drop(data.load_kw, legacy),
+        exclusions=merge_exclusions(data.exclusions, legacy.values()),
         quality=(),
     )
 
@@ -100,19 +97,11 @@ def _upgrade_grid_flow(data: GridFlowData) -> GridFlowData:
     if not data.quality:
         return data
     legacy = _suspect_hours(data.quality, data.start_time, len(data.import_kw))
-    excluded = {item.hour_start for item in legacy}
-
-    def drop(values: tuple[float | None, ...]) -> tuple[float | None, ...]:
-        return tuple(
-            None if data.start_time + index * _HOUR in excluded else value
-            for index, value in enumerate(values)
-        )
-
     return replace(
         data,
-        import_kw=drop(data.import_kw),
-        export_kw=drop(data.export_kw),
-        exclusions=merge_exclusions(data.exclusions, legacy),
+        import_kw=_drop(data.import_kw, legacy),
+        export_kw=_drop(data.export_kw, legacy),
+        exclusions=merge_exclusions(data.exclusions, legacy.values()),
         quality=(),
     )
 
@@ -124,14 +113,8 @@ def _upgrade_efficiency_history(
         return data
     count = len(data.battery_energy_in_kwh)
     legacy = _suspect_hours(data.quality, data.start_time, count)
-    excluded = {int((item.hour_start - data.start_time) / _HOUR) for item in legacy}
-
-    def drop(values: tuple[float | None, ...]) -> tuple[float | None, ...]:
-        return tuple(
-            None if index in excluded else value for index, value in enumerate(values)
-        )
-
-    boundaries = excluded | {index + 1 for index in excluded}
+    boundaries = legacy.keys() | {index + 1 for index in legacy}
+    drop = partial(_drop, indices=legacy)
     return replace(
         data,
         battery_energy_in_kwh=drop(data.battery_energy_in_kwh),
@@ -140,13 +123,7 @@ def _upgrade_efficiency_history(
         inverter_charge_energy_out_kwh=drop(data.inverter_charge_energy_out_kwh),
         inverter_discharge_energy_in_kwh=drop(data.inverter_discharge_energy_in_kwh),
         inverter_discharge_energy_out_kwh=drop(data.inverter_discharge_energy_out_kwh),
-        state_of_charge_percent=tuple(
-            None if index in boundaries else value
-            for index, value in enumerate(data.state_of_charge_percent)
-        ),
-        exclusions=merge_exclusions(data.exclusions, legacy),
+        state_of_charge_percent=_drop(data.state_of_charge_percent, boundaries),
+        exclusions=merge_exclusions(data.exclusions, legacy.values()),
         quality=(),
     )
-
-
-__all__ = ["legacy_exclusion", "upgrade_legacy_quality"]

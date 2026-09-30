@@ -15,13 +15,13 @@ from energy_optimizer.providers.home_assistant_history import (
     HistoryPlan,
     HomeAssistantError,
     HomeAssistantHistory,
+    as_import_utc,
 )
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_SOURCE_ID,
     HouseholdLoadData,
     SourceMetadata,
 )
-from energy_optimizer.providers.normalization import as_utc
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +57,19 @@ class HomeAssistantLoadImporter:
             history_lookback_seconds,
             entity_count,
         )
-        retrieved_at = as_utc(
-            now or datetime.now(timezone.utc),
-            error_factory=HomeAssistantError,
-            message="Home Assistant import times must include a timezone",
-        )
+        retrieved_at = as_import_utc(now or datetime.now(timezone.utc))
         effective_end_time = end_time or latest_completed_hour(retrieved_at)
+
+        def log_failure(error: Exception) -> None:
+            logger.error(
+                "event=provider_fetch_failed component=home_assistant "
+                "operation=fetch error_type=%s entity_count=%s error=%s",
+                error.__class__.__name__,
+                entity_count,
+                error,
+                exc_info=(None if isinstance(error, HomeAssistantError) else True),
+            )
+
         try:
             aggregate = EnergyAggregate(
                 aggregation,
@@ -72,14 +79,14 @@ class HomeAssistantLoadImporter:
                 label="household-load",
             )
         except Exception as error:
-            self._log_failure(error)
+            log_failure(error)
             raise
 
         def build(history: HomeAssistantHistory) -> HouseholdLoadData:
             try:
                 series = aggregate.build(history)
             except Exception as error:
-                self._log_failure(error)
+                log_failure(error)
                 raise
             data = HouseholdLoadData(
                 schema_version="1",
@@ -108,27 +115,7 @@ class HomeAssistantLoadImporter:
 
         return HistoryPlan(needs=aggregate.needs(), build=build)
 
-    def _log_failure(self, error: Exception) -> None:
-        aggregation = self.configuration.household_load
-        entity_count = len(aggregation.entity_ids) if aggregation is not None else 0
-        logger.error(
-            "event=provider_fetch_failed component=home_assistant "
-            "operation=fetch error_type=%s entity_count=%s error=%s",
-            error.__class__.__name__,
-            entity_count,
-            error,
-            exc_info=(None if isinstance(error, HomeAssistantError) else True),
-        )
-
-    def is_fresh(
-        self,
-        data: HouseholdLoadData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Check whether a poll result is within the configured age threshold."""
+    def is_fresh(self, data: HouseholdLoadData, *, now: datetime | None = None) -> bool:
         return is_fresh(
-            data.latest_observation_at,
-            self.configuration.max_data_age_seconds,
-            now=now,
+            data.latest_observation_at, self.configuration.max_data_age_seconds, now=now
         )

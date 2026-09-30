@@ -24,17 +24,10 @@ def parse_aware_timestamp(
         timestamp = datetime.fromisoformat(value)
     except ValueError as error:
         raise error_factory(invalid_message(value)) from error
-    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        raise error_factory(naive_message)
-    return timestamp.astimezone(timezone.utc)
+    return as_utc(timestamp, error_factory=error_factory, message=naive_message)
 
 
-def as_utc(
-    value: datetime,
-    *,
-    error_factory: ErrorFactory,
-    message: str,
-) -> datetime:
+def as_utc(value: datetime, *, error_factory: ErrorFactory, message: str) -> datetime:
     """Require a timezone-aware datetime and return it in UTC."""
     if value.tzinfo is None or value.utcoffset() is None:
         raise error_factory(message)
@@ -59,20 +52,17 @@ def is_fresh(
         error_factory=error_factory,
         message=now_message,
     )
-    observed = (
-        as_utc(
+    if max_data_age_seconds is not None:
+        observed_at = as_utc(
             observed_at,
             error_factory=error_factory,
             message=observed_message or now_message,
         )
-        if max_data_age_seconds is not None
-        else observed_at
-    )
     if expires_at is not None and current >= expires_at:
         return False
     return (
         max_data_age_seconds is None
-        or (current - observed).total_seconds() < max_data_age_seconds
+        or (current - observed_at).total_seconds() < max_data_age_seconds
     )
 
 
@@ -114,10 +104,7 @@ def _has_subhour_component(value: datetime) -> bool:
 
 
 def validate_finite_non_negative(
-    value: object,
-    *,
-    error_factory: ErrorFactory,
-    label: str,
+    value: object, *, error_factory: ErrorFactory, label: str
 ) -> float:
     """Convert one numeric provider value and reject unsafe generation values."""
     if isinstance(value, bool):

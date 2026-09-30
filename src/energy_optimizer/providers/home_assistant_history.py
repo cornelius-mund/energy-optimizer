@@ -19,10 +19,11 @@ from __future__ import annotations
 import logging
 import math
 from bisect import bisect_left, bisect_right
-from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Hashable, Iterable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from operator import attrgetter
 from time import perf_counter
 from typing import Any, Generic, Literal, TypeVar, cast
 from urllib.parse import quote
@@ -48,6 +49,15 @@ ComputedT = TypeVar("ComputedT")
 
 class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant energy data cannot be imported safely."""
+
+
+def as_import_utc(value: datetime) -> datetime:
+    """Require a timezone-aware import time and return it in UTC."""
+    return as_utc(
+        value,
+        error_factory=HomeAssistantError,
+        message="Home Assistant import times must include a timezone",
+    )
 
 
 class HomeAssistantAuthenticationError(HomeAssistantError):
@@ -80,16 +90,8 @@ class HistoryNeed:
     end_time: datetime
 
     def __post_init__(self) -> None:
-        for name in ("start_time", "end_time"):
-            object.__setattr__(
-                self,
-                name,
-                as_utc(
-                    getattr(self, name),
-                    error_factory=HomeAssistantError,
-                    message="Home Assistant import times must include a timezone",
-                ),
-            )
+        object.__setattr__(self, "start_time", as_import_utc(self.start_time))
+        object.__setattr__(self, "end_time", as_import_utc(self.end_time))
         if self.end_time <= self.start_time:
             raise HomeAssistantError(
                 f"Home Assistant history range for {self.entity_id} must end after "
@@ -121,7 +123,6 @@ class HistorySample:
 
     @property
     def recorded_at(self) -> datetime:
-        """Return when Home Assistant recorded this state."""
         return self.observed_at or self.timestamp
 
 
@@ -147,8 +148,8 @@ class HistorySeries:
         invalid state in force is carried like any other, so a valid state is
         never carried across an outage.
         """
-        first = bisect_left(self.samples, start_time, key=_sample_timestamp)
-        last = bisect_right(self.samples, end_time, key=_sample_timestamp)
+        first = bisect_left(self.samples, start_time, key=attrgetter("timestamp"))
+        last = bisect_right(self.samples, end_time, key=attrgetter("timestamp"))
         inside = self.samples[first:last]
         if first > 0 and (not inside or inside[0].timestamp > start_time):
             in_force = self.samples[first - 1]
@@ -161,10 +162,6 @@ class HistorySeries:
                 *inside,
             )
         return inside
-
-
-def _sample_timestamp(sample: HistorySample) -> datetime:
-    return sample.timestamp
 
 
 class HomeAssistantHistory:
@@ -277,7 +274,9 @@ class HomeAssistantHistoryImporter:
         statistics = _ImportStatistics()
         invalid_sample_count = 0
         entities = list(ranges.items())
-        with self._shared_client() as client:
+        with (
+            nullcontext(self._client) if self._client is not None else httpx.Client()
+        ) as client:
             http = JsonHttpClient(client)
             for position, (entity_id, (kind, start_time, end_time)) in enumerate(
                 entities
@@ -316,15 +315,6 @@ class HomeAssistantHistoryImporter:
         )
         return HomeAssistantHistory(series, failures)
 
-    @contextmanager
-    def _shared_client(self) -> Iterator[httpx.Client]:
-        """Yield the one HTTP client used for the whole import."""
-        if self._client is not None:
-            yield self._client
-            return
-        with httpx.Client() as client:
-            yield client
-
     @staticmethod
     def _entity_failure(entity_id: str, error: Exception) -> Exception:
         """Turn any import failure into one that names its entity."""
@@ -342,7 +332,6 @@ class HomeAssistantHistoryImporter:
         return failure
 
     def _record_failure(self, entity_id: str, error: Exception) -> Exception:
-        """Name and log the failure of one entity."""
         failure = self._entity_failure(entity_id, error)
         logger.warning(
             "event=home_assistant_history_entity_failed component=home_assistant "
@@ -420,8 +409,11 @@ class HomeAssistantHistoryImporter:
         start_time: datetime,
         end_time: datetime,
     ) -> Any:
+        base_url = str(self.configuration.base_url).rstrip("/")
         return http.get_home_assistant_json(
-            self._history_url(start_time, end_time, entity_id),
+            f"{base_url}/api/history/period/{quote(start_time.isoformat(), safe='')}"
+            f"?end_time={quote(end_time.isoformat(), safe='')}"
+            f"&filter_entity_id={quote(entity_id, safe='')}",
             token=self.configuration.token.get_secret_value(),
             timeout_seconds=self.configuration.timeout_seconds,
             error_factory=HomeAssistantError,
@@ -456,16 +448,6 @@ class HomeAssistantHistoryImporter:
             ),
         )
 
-    def _history_url(
-        self, start_time: datetime, end_time: datetime, entity_id: str
-    ) -> str:
-        base_url = str(self.configuration.base_url).rstrip("/")
-        return (
-            f"{base_url}/api/history/period/{quote(start_time.isoformat(), safe='')}"
-            f"?end_time={quote(end_time.isoformat(), safe='')}"
-            f"&filter_entity_id={quote(entity_id, safe='')}"
-        )
-
 
 def _merge_needs(
     needs: Iterable[HistoryNeed],
@@ -473,11 +455,9 @@ def _merge_needs(
     """Merge the needs per entity into one range: earliest start, latest end."""
     merged: dict[str, tuple[HistoryKind, datetime, datetime]] = {}
     for need in needs:
-        existing = merged.get(need.entity_id)
-        if existing is None:
-            merged[need.entity_id] = (need.kind, need.start_time, need.end_time)
-            continue
-        kind, start_time, end_time = existing
+        kind, start_time, end_time = merged.get(
+            need.entity_id, (need.kind, need.start_time, need.end_time)
+        )
         if kind != need.kind:
             raise HistoryPlanError(
                 f"Home Assistant entity {need.entity_id} is planned as both {kind} "
@@ -493,16 +473,12 @@ def _merge_needs(
 
 def _parse_payload(payload: Any, entity_id: str) -> list[dict[str, Any]]:
     """Return the records of one entity series; an empty chunk is valid."""
-    if not isinstance(payload, list):
+    if not isinstance(payload, list) or len(payload) > 1:
         raise HomeAssistantError(
             f"Home Assistant history for {entity_id} must contain one entity series"
         )
-    if not payload or (len(payload) == 1 and not payload[0]):
+    if not payload or not payload[0]:
         return []
-    if len(payload) != 1:
-        raise HomeAssistantError(
-            f"Home Assistant history for {entity_id} must contain one entity series"
-        )
     series = payload[0]
     if not isinstance(series, list):
         raise HomeAssistantError(
@@ -592,7 +568,7 @@ def _clean_counter_sample(
         unit,
         state_class,
         last_reset,
-        _raw_state(state),
+        None if state is None else str(state),
         invalid,
     )
 
@@ -622,18 +598,11 @@ def _clean_state_records(
                 unit if isinstance(unit, str) else None,
                 None,
                 None,
-                _raw_state(state),
+                None if state is None else str(state),
                 invalid,
             )
         )
     return tuple(samples)
-
-
-def _raw_state(state: Any) -> str | None:
-    """Return the state as reported, always as text."""
-    if state is None or isinstance(state, str):
-        return state
-    return str(state)
 
 
 def _classify_state(

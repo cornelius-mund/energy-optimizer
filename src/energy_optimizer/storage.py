@@ -9,20 +9,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
-from typing import TypeVar, cast
+from typing import cast
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
 from energy_optimizer.history_merge import merge_grid_flow_history
-from energy_optimizer.household_load_store import (
-    HouseholdLoadHistory,
-    HouseholdLoadStore,
+from energy_optimizer.household_load_records import (
     bounded_household_load,
     encode_household_records,
     household_load_records,
     merge_household_load_history,
 )
+from energy_optimizer.household_load_store import HouseholdLoadStore
 from energy_optimizer.legacy_quality import upgrade_legacy_quality
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
@@ -45,13 +44,22 @@ class ProviderDataKey:
 
     def digest(self) -> str:
         """Return a stable filename component for this provider identity."""
-        identity = "\0".join(
-            (self.data_type, self.provider, self.entity_id or "")
-        ).encode()
-        return hashlib.sha256(identity).hexdigest()
+        identity = "\0".join((self.data_type, self.provider, self.entity_id or ""))
+        return hashlib.sha256(identity.encode()).hexdigest()
 
 
-ModelT = TypeVar("ModelT")
+def _log_save_failed(
+    key: ProviderDataKey, error_type: str, *, exc_info: bool = False
+) -> None:
+    logger.error(
+        "event=persistence_save_failed component=storage operation=save "
+        "data_type=%s provider=%s entity_id=%s error_type=%s",
+        key.data_type,
+        key.provider,
+        key.entity_id,
+        error_type,
+        exc_info=exc_info,
+    )
 
 
 def _record_count(model: object) -> int | str:
@@ -80,11 +88,8 @@ class ProviderDataStore:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
-    def save(
-        self,
-        key: ProviderDataKey,
-        adapter: TypeAdapter[ModelT],
-        data: object,
+    def save[ModelT](
+        self, key: ProviderDataKey, adapter: TypeAdapter[ModelT], data: object
     ) -> ModelT:
         """Validate and atomically save one normalized provider data model."""
         logger.debug(
@@ -97,98 +102,18 @@ class ProviderDataStore:
         try:
             model = adapter.validate_python(data)
         except ValidationError as error:
-            logger.error(
-                "event=persistence_save_failed component=storage operation=save "
-                "data_type=%s provider=%s entity_id=%s error_type=ValidationError",
-                key.data_type,
-                key.provider,
-                key.entity_id,
-            )
+            _log_save_failed(key, "ValidationError")
             raise ProviderDataStoreError(
                 "normalized provider data failed validation before storage"
             ) from error
 
         if isinstance(model, HouseholdLoadData) and key.data_type == "household-load":
-            return cast(
+            model = cast(
                 ModelT,
-                self._save_household_load(key, bounded_household_load(model)),
+                self._household_load_store().save(key, bounded_household_load(model)),
             )
-
-        if isinstance(model, GridFlowData) and key.data_type == "grid-flow":
-            try:
-                model = cast(
-                    ModelT,
-                    merge_grid_flow_history(
-                        cast(GridFlowData | None, self.load(key, adapter)), model
-                    ),
-                )
-            except ProviderDataStoreError:
-                logger.error(
-                    "event=persistence_save_failed component=storage operation=save "
-                    "data_type=%s provider=%s entity_id=%s error_type=HistoryError",
-                    key.data_type,
-                    key.provider,
-                    key.entity_id,
-                )
-                raise
-
-        payload = adapter.dump_json(model, indent=2) + b"\n"
-        primary_path, backup_path = self._paths(key)
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            logger.error(
-                "event=persistence_save_failed component=storage operation=save "
-                "data_type=%s provider=%s entity_id=%s error_type=OSError",
-                key.data_type,
-                key.provider,
-                key.entity_id,
-            )
-            raise ProviderDataStoreError(
-                f"could not create normalized provider-data directory "
-                f"{self.directory}: {error}"
-            ) from error
-
-        current = self._read_valid(primary_path, adapter)
-        backup = self._read_valid(backup_path, adapter)
-        if current is not None:
-            try:
-                self._atomic_write(backup_path, current[0])
-            except ProviderDataStoreError:
-                logger.error(
-                    "event=persistence_save_failed component=storage operation=save "
-                    "data_type=%s provider=%s entity_id=%s error_type=WriteError",
-                    key.data_type,
-                    key.provider,
-                    key.entity_id,
-                    exc_info=True,
-                )
-                raise
-        elif backup is None:
-            try:
-                self._atomic_write(backup_path, payload)
-            except ProviderDataStoreError:
-                logger.error(
-                    "event=persistence_save_failed component=storage operation=save "
-                    "data_type=%s provider=%s entity_id=%s error_type=WriteError",
-                    key.data_type,
-                    key.provider,
-                    key.entity_id,
-                    exc_info=True,
-                )
-                raise
-        try:
-            self._atomic_write(primary_path, payload)
-        except ProviderDataStoreError:
-            logger.error(
-                "event=persistence_save_failed component=storage operation=save "
-                "data_type=%s provider=%s entity_id=%s error_type=WriteError",
-                key.data_type,
-                key.provider,
-                key.entity_id,
-                exc_info=True,
-            )
-            raise
+        else:
+            model = self._save_json(key, adapter, model)
         logger.info(
             "event=persistence_succeeded component=storage operation=save "
             "data_type=%s provider=%s entity_id=%s record_count=%s",
@@ -199,36 +124,48 @@ class ProviderDataStore:
         )
         return model
 
-    def _save_household_load(
-        self,
-        key: ProviderDataKey,
-        incoming: HouseholdLoadData,
-    ) -> HouseholdLoadData:
-        """Delegate household-load persistence to its focused store."""
-        merged = self._household_load_store().save(key, incoming)
-        logger.info(
-            "event=persistence_succeeded component=storage operation=save "
-            "data_type=%s provider=%s entity_id=%s record_count=%s",
-            key.data_type,
-            key.provider,
-            key.entity_id,
-            len(merged.load_kw),
-        )
-        return merged
+    def _save_json[ModelT](
+        self, key: ProviderDataKey, adapter: TypeAdapter[ModelT], model: ModelT
+    ) -> ModelT:
+        """Replace the primary file, keeping a valid previous version as backup."""
+        if isinstance(model, GridFlowData) and key.data_type == "grid-flow":
+            try:
+                model = cast(
+                    ModelT,
+                    merge_grid_flow_history(
+                        cast(GridFlowData | None, self.load(key, adapter)), model
+                    ),
+                )
+            except ProviderDataStoreError:
+                _log_save_failed(key, "HistoryError")
+                raise
 
-    def _compact_household_load(
-        self,
-        key: ProviderDataKey,
-        previous: HouseholdLoadData,
-        current: HouseholdLoadData,
-    ) -> None:
-        """Delegate household-load compaction to its focused store."""
-        self._household_load_store().compact(key, previous, current)
+        payload = adapter.dump_json(model, indent=2) + b"\n"
+        primary_path, backup_path = self._paths(key)
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            _log_save_failed(key, "OSError")
+            raise ProviderDataStoreError(
+                f"could not create normalized provider-data directory "
+                f"{self.directory}: {error}"
+            ) from error
 
-    def load(
-        self,
-        key: ProviderDataKey,
-        adapter: TypeAdapter[ModelT],
+        current = self._read_valid(primary_path, adapter)
+        backup = self._read_valid(backup_path, adapter)
+        try:
+            if current is not None:
+                self._atomic_write(backup_path, current[0])
+            elif backup is None:
+                self._atomic_write(backup_path, payload)
+            self._atomic_write(primary_path, payload)
+        except ProviderDataStoreError:
+            _log_save_failed(key, "WriteError", exc_info=True)
+            raise
+        return model
+
+    def load[ModelT](
+        self, key: ProviderDataKey, adapter: TypeAdapter[ModelT]
     ) -> ModelT | None:
         """Load and validate a normalized model, recovering a damaged primary."""
         logger.debug(
@@ -240,7 +177,7 @@ class ProviderDataStore:
         )
         if key.data_type == "household-load":
             load_started_at = perf_counter()
-            history = self._load_household_history(key)
+            history = self._household_load_store().load_history(key)
             # Household-load history is read on every refresh and API request, so
             # its timing detail stays at DEBUG to keep INFO output bounded.
             logger.debug(
@@ -302,10 +239,7 @@ class ProviderDataStore:
         )
 
     def load_household_load_range(
-        self,
-        key: ProviderDataKey,
-        start_time: datetime,
-        end_time: datetime,
+        self, key: ProviderDataKey, start_time: datetime, end_time: datetime
     ) -> HouseholdLoadData | None:
         """Load retained household-load points within a half-open range."""
         if key.data_type != "household-load":
@@ -324,24 +258,13 @@ class ProviderDataStore:
         )
 
     def _paths(self, key: ProviderDataKey) -> tuple[Path, Path]:
-        filename = f"{key.data_type}-{key.digest()}"
         extension = ".ndjson" if key.data_type == "household-load" else ".json"
-        return (
-            self.directory / f"{filename}{extension}",
-            self.directory / f"{filename}{extension}.bak",
-        )
-
-    def _load_household_history(
-        self,
-        key: ProviderDataKey,
-    ) -> HouseholdLoadHistory | None:
-        """Delegate household-load recovery to its focused store."""
-        return self._household_load_store().load_history(key)
+        filename = f"{key.data_type}-{key.digest()}{extension}"
+        return self.directory / filename, self.directory / f"{filename}.bak"
 
     @staticmethod
-    def _read_valid(
-        path: Path,
-        adapter: TypeAdapter[ModelT],
+    def _read_valid[ModelT](
+        path: Path, adapter: TypeAdapter[ModelT]
     ) -> tuple[bytes, ModelT] | None:
         try:
             payload = path.read_bytes()
@@ -379,10 +302,7 @@ class ProviderDataStore:
             finally:
                 os.close(directory_fd)
         except OSError as error:
-            try:
-                temporary_path.unlink()
-            except FileNotFoundError:
-                pass
+            temporary_path.unlink(missing_ok=True)
             raise ProviderDataStoreError(
                 f"could not atomically write normalized provider data to {path}: "
                 f"{error}"

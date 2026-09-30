@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol
+from typing import Literal
 
 from energy_optimizer.exclusions import HourExclusion
 
@@ -65,8 +65,6 @@ class HouseholdLoadData:
 
 @dataclass(frozen=True)
 class PvGenerationData:
-    """Normalized hourly PV-generation forecast from a provider."""
-
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
@@ -102,8 +100,6 @@ class GridFlowData:
 
 @dataclass(frozen=True)
 class BatteryData:
-    """Normalized current battery state and capabilities from a provider."""
-
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
@@ -154,8 +150,6 @@ class BatteryEfficiencyHistoryData:
 
 @dataclass(frozen=True)
 class BatteryEfficiencyData:
-    """Calculated efficiency components and their measurement diagnostics."""
-
     schema_version: Literal["1"]
     status: Literal["ok", "insufficient_data", "invalid"]
     inverter_charge_efficiency: float | None
@@ -179,8 +173,6 @@ class BatteryEfficiencyData:
 
 @dataclass(frozen=True)
 class ElectricityPriceData:
-    """Normalized hourly electricity prices from a market provider."""
-
     schema_version: Literal["1"]
     timestamps: tuple[datetime, ...]
     interval_minutes: Literal[60]
@@ -190,104 +182,3 @@ class ElectricityPriceData:
     source: SourceMetadata
     retrieved_at: datetime
     expires_at: datetime
-
-
-class HouseholdLoadProvider(Protocol):
-    """Retrieve normalized household-load data for a requested period."""
-
-    def fetch(
-        self,
-        start_time: datetime,
-        end_time: datetime | None = None,
-        history_lookback_seconds: float = 0,
-        *,
-        now: datetime | None = None,
-    ) -> HouseholdLoadData:
-        """Fetch hourly household load for the requested half-open period."""
-
-    def is_fresh(
-        self,
-        data: HouseholdLoadData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Report whether data is within the configured polling age threshold."""
-
-
-class PvForecastProvider(Protocol):
-    """Retrieve normalized hourly PV generation forecasts."""
-
-    def fetch(
-        self,
-        start_time: datetime,
-        end_time: datetime | None = None,
-        *,
-        now: datetime | None = None,
-    ) -> PvGenerationData:
-        """Fetch a forecast for the requested half-open period."""
-
-    def is_fresh(
-        self,
-        data: PvGenerationData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Report whether the forecast is still usable."""
-
-
-class GridFlowProvider(Protocol):
-    """Retrieve normalized hourly grid import and export data."""
-
-    def fetch(
-        self,
-        start_time: datetime,
-        end_time: datetime | None = None,
-        history_lookback_seconds: float = 0,
-        *,
-        now: datetime | None = None,
-    ) -> GridFlowData:
-        """Fetch hourly grid flow for the requested half-open period."""
-
-    def is_fresh(
-        self,
-        data: GridFlowData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Report whether data is within the configured polling age threshold."""
-
-
-class BatteryProvider(Protocol):
-    """Retrieve normalized current battery state and capabilities."""
-
-    def fetch(self, *, now: datetime | None = None) -> BatteryData:
-        """Fetch the current battery state and capabilities."""
-
-    def is_fresh(
-        self,
-        data: BatteryData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Report whether data is within the configured polling age threshold."""
-
-
-class ElectricityPriceProvider(Protocol):
-    """Retrieve normalized hourly electricity prices."""
-
-    def fetch(
-        self,
-        start_time: datetime,
-        end_time: datetime | None = None,
-        *,
-        now: datetime | None = None,
-    ) -> ElectricityPriceData:
-        """Fetch prices for the requested half-open period."""
-
-    def is_fresh(
-        self,
-        data: ElectricityPriceData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Report whether prices remain usable."""

@@ -7,14 +7,13 @@ only read persisted data; a source that is absent, empty, or corrupt is reported
 with its status and never hides the exclusions of the other sources.
 """
 
-from __future__ import annotations
-
-from dataclasses import asdict
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from typing import Callable, Literal
 
 from fastapi import Request
 
+from energy_optimizer.api.historic import HistoricReadContext
 from energy_optimizer.api.routers.context import (
     BATTERY_EFFICIENCY_HISTORY_ADAPTER,
     GRID_FLOW_ADAPTER,
@@ -28,63 +27,41 @@ from energy_optimizer.api.schemas import (
     ExcludedHoursSummary,
     ExclusionCause,
 )
-from energy_optimizer.config import Configuration
 from energy_optimizer.exclusions import HourExclusion, exclusion_summary
-from energy_optimizer.storage import (
-    ProviderDataKey,
-    ProviderDataStore,
-    ProviderDataStoreError,
-)
+from energy_optimizer.storage import ProviderDataKey, ProviderDataStoreError
 
 ExcludedSource = Literal["household_load", "grid_flow", "battery_efficiency"]
-SourceStatus = Literal["available", "not_configured", "unavailable", "invalid"]
-_SOURCE_ORDER: tuple[ExcludedSource, ...] = (
-    "household_load",
-    "grid_flow",
-    "battery_efficiency",
-)
 
 
+@dataclass(frozen=True)
 class _SourceRead:
     """The outcome of reading one source's exclusions."""
 
-    def __init__(
-        self,
-        status: SourceStatus,
-        reason: str | None = None,
-        exclusions: tuple[HourExclusion, ...] = (),
-    ) -> None:
-        self.status = status
-        self.reason = reason
-        self.exclusions = exclusions
+    status: Literal["available", "not_configured", "unavailable", "invalid"]
+    reason: str | None = None
+    exclusions: tuple[HourExclusion, ...] = ()
 
 
 def read_excluded_hours(
     request: Request, start: datetime, end: datetime
 ) -> ExcludedHoursResponse:
     """Return every excluded hour of every source in the half-open range."""
-    configuration: Configuration = request.app.state.configuration
-    store: ProviderDataStore | None = request.app.state.provider_data_store
-    request_id = str(getattr(request.state, "request_id", "none"))
-    readers: dict[ExcludedSource, Callable[[], _SourceRead]] = {
-        "household_load": lambda: _read_household_load(
-            configuration, store, start, end
-        ),
-        "grid_flow": lambda: _read_grid_flow(configuration, store, start, end),
-        "battery_efficiency": lambda: _read_battery_efficiency(
-            configuration, store, start, end
-        ),
+    context = HistoricReadContext(request, start, end, datetime.now(timezone.utc))
+    readers: dict[ExcludedSource, Callable[[HistoricReadContext], _SourceRead]] = {
+        "household_load": _read_household_load,
+        "grid_flow": _read_grid_flow,
+        "battery_efficiency": _read_battery_efficiency,
     }
     reads: dict[ExcludedSource, _SourceRead] = {}
-    for source in _SOURCE_ORDER:
+    for source, reader in readers.items():
         try:
-            reads[source] = readers[source]()
+            reads[source] = reader(context)
         except (ProviderDataStoreError, ValueError) as error:
             logger.warning(
                 "event=dashboard_excluded_hours_invalid component=dashboard "
                 "operation=read source=%s request_id=%s error_type=%s error=%s",
                 source,
-                request_id,
+                context.request_id,
                 error.__class__.__name__,
                 error,
             )
@@ -95,12 +72,8 @@ def read_excluded_hours(
             )
 
     hours = sorted(
-        (
-            (item.hour_start, _SOURCE_ORDER.index(source), source, item)
-            for source, read in reads.items()
-            for item in read.exclusions
-        ),
-        key=lambda entry: (entry[0], entry[1]),
+        ((source, item) for source, read in reads.items() for item in read.exclusions),
+        key=lambda entry: entry[1].hour_start,
     )
     return ExcludedHoursResponse(
         schema_version="1",
@@ -125,35 +98,33 @@ def read_excluded_hours(
         ],
         hours=[
             ExcludedHour(
-                hour_start=hour_start,
+                hour_start=item.hour_start,
                 source=source,
                 causes=[
                     ExclusionCause.model_validate(asdict(cause))
                     for cause in item.causes
                 ],
             )
-            for hour_start, _, source, item in hours
+            for source, item in hours
         ],
     )
 
 
 def _in_range(
-    exclusions: tuple[HourExclusion, ...], start: datetime, end: datetime
+    exclusions: tuple[HourExclusion, ...], context: HistoricReadContext
 ) -> tuple[HourExclusion, ...]:
-    return tuple(item for item in exclusions if start <= item.hour_start < end)
+    return tuple(
+        item for item in exclusions if context.start <= item.hour_start < context.end
+    )
 
 
-def _read_household_load(
-    configuration: Configuration,
-    store: ProviderDataStore | None,
-    start: datetime,
-    end: datetime,
-) -> _SourceRead:
-    home_assistant = configuration.home_assistant
+def _read_household_load(context: HistoricReadContext) -> _SourceRead:
+    home_assistant = context.configuration.home_assistant
     if home_assistant is None or home_assistant.household_load is None:
         return _SourceRead(
             "not_configured", "no Home Assistant household-load entities are configured"
         )
+    store = context.store
     if store is None:
         return _SourceRead(
             "unavailable", "household-load data persistence is not configured"
@@ -161,23 +132,18 @@ def _read_household_load(
     key = ProviderDataKey(
         "household-load", "home-assistant", home_assistant.household_load_source_id
     )
-    data = store.load_household_load_range(key, start, end)
+    data = store.load_household_load_range(key, context.start, context.end)
     if data is None and store.load(key, HOUSEHOLD_LOAD_ADAPTER) is None:
         return _SourceRead(
             "unavailable", "no persisted household-load data is available yet"
         )
     return _SourceRead(
-        "available", exclusions=_in_range(data.exclusions, start, end) if data else ()
+        "available", exclusions=_in_range(data.exclusions, context) if data else ()
     )
 
 
-def _read_grid_flow(
-    configuration: Configuration,
-    store: ProviderDataStore | None,
-    start: datetime,
-    end: datetime,
-) -> _SourceRead:
-    home_assistant = configuration.home_assistant
+def _read_grid_flow(context: HistoricReadContext) -> _SourceRead:
+    home_assistant = context.configuration.home_assistant
     if (
         home_assistant is None
         or home_assistant.grid_import is None
@@ -187,6 +153,7 @@ def _read_grid_flow(
             "not_configured",
             "no Home Assistant grid import and export entities are configured",
         )
+    store = context.store
     if store is None:
         return _SourceRead(
             "unavailable", "grid-flow data persistence is not configured"
@@ -201,16 +168,11 @@ def _read_grid_flow(
         return _SourceRead(
             "unavailable", "no persisted grid-flow data is available yet"
         )
-    return _SourceRead("available", exclusions=_in_range(data.exclusions, start, end))
+    return _SourceRead("available", exclusions=_in_range(data.exclusions, context))
 
 
-def _read_battery_efficiency(
-    configuration: Configuration,
-    store: ProviderDataStore | None,
-    start: datetime,
-    end: datetime,
-) -> _SourceRead:
-    home_assistant = configuration.home_assistant
+def _read_battery_efficiency(context: HistoricReadContext) -> _SourceRead:
+    home_assistant = context.configuration.home_assistant
     battery = home_assistant.battery if home_assistant is not None else None
     if battery is None or battery.efficiency_calculation is None:
         return _SourceRead(
@@ -218,15 +180,14 @@ def _read_battery_efficiency(
             "battery efficiency history is retained only when "
             "battery.efficiency_calculation is configured",
         )
+    store = context.store
     if store is None:
         return _SourceRead(
             "unavailable", "battery efficiency data persistence is not configured"
         )
     data = store.load(
         ProviderDataKey(
-            "battery-efficiency-history",
-            "home-assistant",
-            "battery_efficiency_history",
+            "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
         ),
         BATTERY_EFFICIENCY_HISTORY_ADAPTER,
     )
@@ -234,4 +195,4 @@ def _read_battery_efficiency(
         return _SourceRead(
             "unavailable", "no persisted battery efficiency history is available yet"
         )
-    return _SourceRead("available", exclusions=_in_range(data.exclusions, start, end))
+    return _SourceRead("available", exclusions=_in_range(data.exclusions, context))

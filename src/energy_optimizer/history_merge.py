@@ -6,7 +6,11 @@ import math
 from datetime import datetime, timedelta
 
 from energy_optimizer.exclusions import HourExclusion, history_unavailable_exclusions
-from energy_optimizer.household_load_records import as_utc
+from energy_optimizer.household_load_records import (
+    as_utc,
+    index_exclusions,
+    require_contiguous_hours,
+)
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     ElectricityPriceData,
@@ -17,6 +21,7 @@ from energy_optimizer.storage_errors import ProviderDataStoreError
 # All retained histories share the household-load ten-year limit.
 HISTORY_RETENTION_HOURS = HOUSEHOLD_LOAD_MAX_VALUES
 _HOUR = timedelta(hours=1)
+type GridFlowPoint = tuple[float | None, float | None, HourExclusion | None]
 
 
 def _require_hourly_start(value: datetime, label: str) -> datetime:
@@ -27,9 +32,7 @@ def _require_hourly_start(value: datetime, label: str) -> datetime:
     return timestamp
 
 
-def grid_flow_points(
-    data: GridFlowData,
-) -> dict[datetime, tuple[float | None, float | None, HourExclusion | None]]:
+def grid_flow_points(data: GridFlowData) -> dict[datetime, GridFlowPoint]:
     """Validate and index one normalized hourly grid-flow series.
 
     Import and export are excluded together: an hour has both values or neither,
@@ -45,15 +48,8 @@ def grid_flow_points(
             "grid-flow import and export must contain the same non-zero number "
             "of values"
         )
-    exclusions: dict[datetime, HourExclusion] = {}
-    for item in data.exclusions:
-        timestamp = as_utc(item.hour_start)
-        if timestamp in exclusions:
-            raise ProviderDataStoreError(
-                "grid-flow history has two exclusions for one hour"
-            )
-        exclusions[timestamp] = item
-    points: dict[datetime, tuple[float | None, float | None, HourExclusion | None]] = {}
+    exclusions = index_exclusions(data.exclusions, "grid-flow")
+    points: dict[datetime, GridFlowPoint] = {}
     for index, (imported, exported) in enumerate(zip(data.import_kw, data.export_kw)):
         timestamp = start + index * _HOUR
         if imported is None or exported is None:
@@ -82,8 +78,7 @@ def grid_flow_points(
 
 
 def merge_grid_flow_history(
-    existing: GridFlowData | None,
-    incoming: GridFlowData,
+    existing: GridFlowData | None, incoming: GridFlowData
 ) -> GridFlowData:
     """Merge hourly grid-flow data, preferring incoming values, within retention.
 
@@ -112,17 +107,11 @@ def merge_grid_flow_history(
             points[item.hour_start] = (None, None, item)
     points.update(incoming_points)
     ordered = sorted(points.items())[-HISTORY_RETENTION_HOURS:]
-    timestamps = [timestamp for timestamp, _ in ordered]
-    if any(
-        later - earlier != _HOUR for earlier, later in zip(timestamps, timestamps[1:])
-    ):
-        raise ProviderDataStoreError(
-            "grid-flow history must contain contiguous hourly timestamps"
-        )
+    require_contiguous_hours(ordered, "grid-flow")
     previous = [existing] if existing is not None else []
     return GridFlowData(
         schema_version=incoming.schema_version,
-        start_time=timestamps[0],
+        start_time=ordered[0][0],
         interval_minutes=60,
         import_kw=tuple(point[0] for _, point in ordered),
         export_kw=tuple(point[1] for _, point in ordered),
@@ -156,9 +145,7 @@ def price_points(data: ElectricityPriceData) -> dict[datetime, tuple[float, floa
     as_utc(data.expires_at)
     points: dict[datetime, tuple[float, float]] = {}
     for timestamp, imported, exported in zip(
-        data.timestamps,
-        data.import_price_eur_per_kwh,
-        data.export_price_eur_per_kwh,
+        data.timestamps, data.import_price_eur_per_kwh, data.export_price_eur_per_kwh
     ):
         if not (math.isfinite(imported) and math.isfinite(exported)):
             raise ProviderDataStoreError("electricity prices must be finite")
@@ -170,8 +157,7 @@ def price_points(data: ElectricityPriceData) -> dict[datetime, tuple[float, floa
 
 
 def merge_price_history(
-    existing: ElectricityPriceData | None,
-    incoming: ElectricityPriceData,
+    existing: ElectricityPriceData | None, incoming: ElectricityPriceData
 ) -> ElectricityPriceData:
     """Merge hourly market prices, preferring the newest retrieval per hour.
 

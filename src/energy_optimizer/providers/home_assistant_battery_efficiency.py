@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
+from typing import Any, NamedTuple
 
 from energy_optimizer.config import (
     HomeAssistantBatteryEfficiencyConfiguration,
-    HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
 )
 from energy_optimizer.exclusions import (
@@ -44,13 +45,26 @@ from energy_optimizer.providers.interfaces import (
     EfficiencyComponentStatus,
     SourceMetadata,
 )
-from energy_optimizer.providers.normalization import (
-    align_to_next_hour,
-    as_utc,
-)
+from energy_optimizer.providers.normalization import align_to_next_hour, as_utc
 
-logger = logging.getLogger(__name__)
 _HOUR = timedelta(hours=1)
+# The fields of ``BatteryEfficiencyHistoryData`` that hold one energy leg, named
+# as the leg is in warnings, followed by the state of charge at the hour boundaries.
+_ENERGY_FIELDS = {
+    "battery input": "battery_energy_in_kwh",
+    "battery output": "battery_energy_out_kwh",
+    "charge input": "inverter_charge_energy_in_kwh",
+    "charge output": "inverter_charge_energy_out_kwh",
+    "discharge input": "inverter_discharge_energy_in_kwh",
+    "discharge output": "inverter_discharge_energy_out_kwh",
+}
+_SERIES_FIELDS = (*_ENERGY_FIELDS.values(), "state_of_charge_percent")
+_COMPONENTS = (
+    "battery_efficiency",
+    "inverter_charge_efficiency",
+    "inverter_discharge_efficiency",
+    "round_trip_efficiency",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +83,17 @@ class _StateOfCharge:
     exclusions: tuple[HourExclusion, ...]
 
 
+class _Component(NamedTuple):
+    """One efficiency component: its status, an optional warning and its ratio.
+
+    The ratio is the default one unless the component could be calculated.
+    """
+
+    status: EfficiencyComponentStatus
+    warning: str | None = None
+    efficiency: float = DEFAULT_EFFICIENCY_RATIO
+
+
 class HomeAssistantBatteryEfficiencyImporter:
     """Declare and build the aligned measured history the calculator needs."""
 
@@ -84,19 +109,15 @@ class HomeAssistantBatteryEfficiencyImporter:
         self.efficiency_configuration = configuration.battery.efficiency_calculation
 
     def plan(
-        self,
-        start_time: datetime,
-        end_time: datetime,
-        *,
-        now: datetime | None = None,
+        self, start_time: datetime, end_time: datetime, *, now: datetime | None = None
     ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
         """Declare all configured expressions for one complete history range.
 
         Building reads the shared history that the caller imported for the
         declared needs; this importer makes no Home Assistant request itself.
         """
-        start = self._as_utc(start_time)
-        end = self._as_utc(end_time)
+        start = _as_utc(start_time)
+        end = _as_utc(end_time)
         if start.minute or start.second or start.microsecond:
             raise HomeAssistantError(
                 "calculated battery efficiency history must start on an hour"
@@ -107,187 +128,123 @@ class HomeAssistantBatteryEfficiencyImporter:
             )
 
         configuration = self.efficiency_configuration
-        legs = {
-            "battery": configuration.battery,
-            "inverter_charge": configuration.inverter_charge,
-            "inverter_discharge": configuration.inverter_discharge,
-        }
-        aggregates = {
-            name: (
-                EnergyAggregate(
-                    leg.energy_in,
-                    start,
-                    end,
-                    label=f"battery efficiency {name} input",
-                ),
-                EnergyAggregate(
-                    leg.energy_out,
-                    start,
-                    end,
-                    label=f"battery efficiency {name} output",
-                ),
+        aggregates = [
+            EnergyAggregate(
+                energy, start, end, label=f"battery efficiency {name} {role}"
             )
-            for name, leg in legs.items()
-        }
+            for name, leg in (
+                ("battery", configuration.battery),
+                ("inverter_charge", configuration.inverter_charge),
+                ("inverter_discharge", configuration.inverter_discharge),
+            )
+            for role, energy in (("input", leg.energy_in), ("output", leg.energy_out))
+        ]
         # The state-of-charge series reads one value per boundary, so the closing
         # boundary of the last hour is the requested end itself.
-        needs = tuple(
-            need
-            for pair in aggregates.values()
-            for aggregate in pair
-            for need in aggregate.needs()
-        ) + (HistoryNeed(configuration.state_of_charge.entity_id, "state", start, end),)
+        needs = (
+            *(need for aggregate in aggregates for need in aggregate.needs()),
+            HistoryNeed(configuration.state_of_charge.entity_id, "state", start, end),
+        )
 
         def build(history: HomeAssistantHistory) -> BatteryEfficiencyHistoryData:
-            series = {
-                name: (
-                    energy_in.build(history),
-                    energy_out.build(history),
-                )
-                for name, (energy_in, energy_out) in aggregates.items()
-            }
+            series = [aggregate.build(history) for aggregate in aggregates]
             soc = _state_of_charge_series(
-                history, configuration.state_of_charge, start, end
+                history, configuration.state_of_charge.entity_id, start, end
             )
-            aligned_start, aligned_end, aligned, exclusions = self._align_history(
-                series, soc, end
-            )
-            retrieved_at = self._as_utc(now or datetime.now(timezone.utc))
-            latest_observation_at = min(
-                [
-                    item.latest_observation_at
-                    for pair in series.values()
-                    for item in pair
-                ]
-                + [soc.latest_observation_at]
-            )
-            return BatteryEfficiencyHistoryData(
-                schema_version="1",
-                start_time=aligned_start,
-                interval_minutes=60,
-                battery_energy_in_kwh=aligned["battery_in"],
-                battery_energy_out_kwh=aligned["battery_out"],
-                inverter_charge_energy_in_kwh=aligned["charge_in"],
-                inverter_charge_energy_out_kwh=aligned["charge_out"],
-                inverter_discharge_energy_in_kwh=aligned["discharge_in"],
-                inverter_discharge_energy_out_kwh=aligned["discharge_out"],
-                state_of_charge_percent=aligned["soc"],
-                unit="kWh",
-                source=SourceMetadata(
-                    provider="home-assistant",
-                    entity_id=BATTERY_EFFICIENCY_HISTORY_SOURCE_ID,
-                ),
-                retrieved_at=retrieved_at,
-                latest_observation_at=min(latest_observation_at, aligned_end),
-                exclusions=exclusions,
-            )
+            return _align_history(series, soc, end, now)
 
         return HistoryPlan(needs=needs, build=build)
 
-    def is_fresh(
-        self,
-        data: BatteryEfficiencyHistoryData,
-        *,
-        now: datetime | None = None,
-    ) -> bool:
-        """Apply the configured Home Assistant freshness threshold."""
-        current = self._as_utc(now or datetime.now(timezone.utc))
-        max_age = self.configuration.max_data_age_seconds
-        return (
-            max_age is None
-            or (current - self._as_utc(data.latest_observation_at)).total_seconds()
-            <= max_age
+
+def _as_utc(value: datetime) -> datetime:
+    return as_utc(
+        value,
+        error_factory=HomeAssistantError,
+        message="Home Assistant efficiency times must include a timezone",
+    )
+
+
+def _align_history(
+    energy: list[HomeAssistantEnergySeries],
+    soc: _StateOfCharge,
+    requested_end: datetime,
+    now: datetime | None,
+) -> BatteryEfficiencyHistoryData:
+    """Align all legs and the state of charge and exclude hours across them.
+
+    An hour excluded in any energy leg or in the state of charge is excluded
+    in every component, so the efficiency ratios never mix valid and invalid
+    legs. A state-of-charge value next to an excluded hour is dropped too.
+    """
+    start = max([item.start_time for item in energy] + [soc.start_time])
+    end = min(
+        [item.start_time + timedelta(hours=len(item.values_kw)) for item in energy]
+        + [soc.start_time + timedelta(hours=len(soc.values) - 1), requested_end]
+    )
+    count = int((end - start).total_seconds() // 3600)
+    if count <= 0:
+        raise HomeAssistantError(
+            "battery efficiency histories have no aligned intervals"
         )
 
-    def _align_history(
-        self,
-        series: dict[str, tuple[HomeAssistantEnergySeries, HomeAssistantEnergySeries]],
-        soc: _StateOfCharge,
-        requested_end: datetime,
-    ) -> tuple[
-        datetime,
-        datetime,
-        dict[str, tuple[float | None, ...]],
-        tuple[HourExclusion, ...],
-    ]:
-        """Align all legs and the state of charge and exclude hours across them.
+    sources: list[HomeAssistantEnergySeries | _StateOfCharge] = [*energy, soc]
+    exclusions = merge_exclusions(
+        item
+        for source in sources
+        for item in source.exclusions
+        if start <= item.hour_start < end
+    )
+    excluded = {int((item.hour_start - start) / _HOUR) for item in exclusions}
 
-        An hour excluded in any energy leg or in the state of charge is excluded
-        in every component, so the efficiency ratios never mix valid and invalid
-        legs. A state-of-charge value next to an excluded hour is dropped too.
-        """
-        energy = [value for pair in series.values() for value in pair]
-        starts = [item.start_time for item in energy] + [soc.start_time]
-        ends = [
-            item.start_time + timedelta(hours=len(item.values_kw)) for item in energy
-        ]
-        ends.append(soc.start_time + timedelta(hours=len(soc.values) - 1))
-        start = max(starts)
-        end = min(min(ends), requested_end)
-        count = int((end - start).total_seconds() // 3600)
-        if count <= 0:
+    def values(item: HomeAssistantEnergySeries) -> tuple[float | None, ...]:
+        result = item.values_from(start, count)
+        if len(result) != count:
             raise HomeAssistantError(
-                "battery efficiency histories have no aligned intervals"
+                "battery efficiency energy histories are misaligned"
             )
+        return _exclude(result, excluded)
 
-        sources: list[HomeAssistantEnergySeries | _StateOfCharge] = [*energy, soc]
-        exclusions = merge_exclusions(
-            *(
-                [item for item in source.exclusions if start <= item.hour_start < end]
-                for source in sources
-            )
+    soc_offset = int((start - soc.start_time).total_seconds() // 3600)
+    soc_values = soc.values[soc_offset : soc_offset + count + 1]
+    if len(soc_values) != count + 1:
+        raise HomeAssistantError(
+            "battery efficiency state-of-charge history is misaligned"
         )
-        excluded = {int((item.hour_start - start) / _HOUR) for item in exclusions}
-
-        def values(item: HomeAssistantEnergySeries) -> tuple[float | None, ...]:
-            offset = int((start - item.start_time).total_seconds() // 3600)
-            result = item.values_kw[offset : offset + count]
-            if len(result) != count:
-                raise HomeAssistantError(
-                    "battery efficiency energy histories are misaligned"
-                )
-            return tuple(
-                None if index in excluded else value
-                for index, value in enumerate(result)
-            )
-
-        soc_offset = int((start - soc.start_time).total_seconds() // 3600)
-        soc_values = soc.values[soc_offset : soc_offset + count + 1]
-        if len(soc_values) != count + 1:
-            raise HomeAssistantError(
-                "battery efficiency state-of-charge history is misaligned"
-            )
-        adjacent = _soc_indexes_of(excluded)
-        return (
-            start,
-            start + timedelta(hours=count),
-            {
-                "battery_in": values(series["battery"][0]),
-                "battery_out": values(series["battery"][1]),
-                "charge_in": values(series["inverter_charge"][0]),
-                "charge_out": values(series["inverter_charge"][1]),
-                "discharge_in": values(series["inverter_discharge"][0]),
-                "discharge_out": values(series["inverter_discharge"][1]),
-                "soc": tuple(
-                    None if index in adjacent else value
-                    for index, value in enumerate(soc_values)
-                ),
-            },
-            exclusions,
-        )
-
-    @staticmethod
-    def _as_utc(value: datetime) -> datetime:
-        return as_utc(
-            value,
-            error_factory=HomeAssistantError,
-            message="Home Assistant efficiency times must include a timezone",
-        )
+    # Hour ``i`` lies between the boundaries ``i`` and ``i + 1``, so an excluded
+    # hour drops both.
+    adjacent = excluded | {index + 1 for index in excluded}
+    battery_in, battery_out, charge_in, charge_out, discharge_in, discharge_out = (
+        values(item) for item in energy
+    )
+    retrieved_at = _as_utc(now or datetime.now(timezone.utc))
+    latest_observation_at = min(
+        [item.latest_observation_at for item in energy]
+        + [soc.latest_observation_at, start + count * _HOUR]
+    )
+    return BatteryEfficiencyHistoryData(
+        schema_version="1",
+        start_time=start,
+        interval_minutes=60,
+        battery_energy_in_kwh=battery_in,
+        battery_energy_out_kwh=battery_out,
+        inverter_charge_energy_in_kwh=charge_in,
+        inverter_charge_energy_out_kwh=charge_out,
+        inverter_discharge_energy_in_kwh=discharge_in,
+        inverter_discharge_energy_out_kwh=discharge_out,
+        state_of_charge_percent=_exclude(soc_values, adjacent),
+        unit="kWh",
+        source=SourceMetadata(
+            provider="home-assistant", entity_id=BATTERY_EFFICIENCY_HISTORY_SOURCE_ID
+        ),
+        retrieved_at=retrieved_at,
+        latest_observation_at=latest_observation_at,
+        exclusions=exclusions,
+    )
 
 
 def _state_of_charge_series(
     history: HomeAssistantHistory,
-    mapping: HomeAssistantBatteryEntityConfiguration,
+    entity_id: str,
     start_time: datetime,
     end_time: datetime,
 ) -> _StateOfCharge:
@@ -299,10 +256,10 @@ def _state_of_charge_series(
     the hours in which it is in force are excluded and the values at their
     boundaries are ``None``.
     """
-    entity_id = mapping.entity_id
-    records: dict[datetime, HistorySample] = {}
-    for sample in history.window(entity_id, "state", start_time, end_time):
-        records[sample.timestamp] = sample
+    records = {
+        sample.timestamp: sample
+        for sample in history.window(entity_id, "state", start_time, end_time)
+    }
     if not records:
         raise HomeAssistantError(
             f"Home Assistant returned no usable state-of-charge history for {entity_id}"
@@ -355,18 +312,13 @@ def _state_of_charge_series(
     # recorded exactly on a boundary is in force there, like the counter
     # observations that close the hour before it.
     values: list[float | None] = []
-    last_sample: HistorySample | None = None
+    last_sample = ordered[0][1]
     next_index = 0
     for index in range(hours + 1):
         boundary = effective_start + timedelta(hours=index)
         while next_index < len(ordered) and ordered[next_index][0] <= boundary:
             last_sample = ordered[next_index][1]
             next_index += 1
-        if last_sample is None:  # pragma: no cover - effective_start guarantees this
-            raise HomeAssistantError(
-                "Home Assistant returned no state-of-charge observation "
-                f"at or before {boundary.isoformat()} for {entity_id}"
-            )
         values.append(
             None if _state_of_charge_reason(last_sample) else last_sample.value
         )
@@ -381,6 +333,15 @@ def _state_of_charge_series(
             HourExclusion(effective_start + hour * _HOUR, cap_data_points(causes))
             for hour, causes in sorted(causes_by_hour.items())
         ),
+    )
+
+
+def _exclude(
+    values: tuple[float | None, ...], indexes: set[int]
+) -> tuple[float | None, ...]:
+    """Blank the values at the given positions."""
+    return tuple(
+        None if index in indexes else value for index, value in enumerate(values)
     )
 
 
@@ -407,9 +368,8 @@ def merge_battery_efficiency_history(
     """
     if existing is None:
         return bound_battery_efficiency_history(incoming)
-    expected_start = existing.start_time + timedelta(
-        hours=len(existing.battery_energy_in_kwh)
-    )
+    existing_hours = len(existing.battery_energy_in_kwh)
+    expected_start = existing.start_time + existing_hours * _HOUR
     gap_hours, remainder = divmod(incoming.start_time - expected_start, _HOUR)
     if gap_hours < 0 or remainder:
         raise HomeAssistantError(
@@ -422,7 +382,7 @@ def merge_battery_efficiency_history(
         if gap_hours
         else ()
     )
-    unavailable: tuple[float | None, ...] = (None,) * gap_hours
+    unavailable = (None,) * gap_hours
     # The incoming SoC series repeats the boundary sample already recorded as the
     # existing series' last value; keep it only once. Over a gap, the boundaries
     # of the missing hours are all unknown, including the two that touch a valid
@@ -433,84 +393,40 @@ def merge_battery_efficiency_history(
         if gap_hours
         else incoming.state_of_charge_percent
     )
-    merged = replace(
-        incoming,
-        start_time=existing.start_time,
-        battery_energy_in_kwh=(
-            existing.battery_energy_in_kwh
-            + unavailable
-            + incoming.battery_energy_in_kwh
-        ),
-        battery_energy_out_kwh=(
-            existing.battery_energy_out_kwh
-            + unavailable
-            + incoming.battery_energy_out_kwh
-        ),
-        inverter_charge_energy_in_kwh=(
-            existing.inverter_charge_energy_in_kwh
-            + unavailable
-            + incoming.inverter_charge_energy_in_kwh
-        ),
-        inverter_charge_energy_out_kwh=(
-            existing.inverter_charge_energy_out_kwh
-            + unavailable
-            + incoming.inverter_charge_energy_out_kwh
-        ),
-        inverter_discharge_energy_in_kwh=(
-            existing.inverter_discharge_energy_in_kwh
-            + unavailable
-            + incoming.inverter_discharge_energy_in_kwh
-        ),
-        inverter_discharge_energy_out_kwh=(
-            existing.inverter_discharge_energy_out_kwh
-            + unavailable
-            + incoming.inverter_discharge_energy_out_kwh
-        ),
-        state_of_charge_percent=state_of_charge,
-        exclusions=merge_exclusions(existing.exclusions, gap, incoming.exclusions),
-    )
     # A full import drops the state of charge around every excluded hour. The
     # incoming series cannot know that the last persisted hour is excluded, and
     # that hour brackets the boundary value the two series share.
-    seam = len(existing.battery_energy_in_kwh)
     if any(
-        item.hour_start == merged.start_time + (seam - 1) * _HOUR
+        item.hour_start == existing.start_time + (existing_hours - 1) * _HOUR
         for item in existing.exclusions
     ):
-        merged = replace(
-            merged,
-            state_of_charge_percent=tuple(
-                None if index == seam else value
-                for index, value in enumerate(merged.state_of_charge_percent)
-            ),
+        state_of_charge = _exclude(state_of_charge, {existing_hours})
+    return bound_battery_efficiency_history(
+        replace(
+            incoming,
+            start_time=existing.start_time,
+            **{
+                name: getattr(existing, name) + unavailable + getattr(incoming, name)
+                for name in _ENERGY_FIELDS.values()
+            },
+            state_of_charge_percent=state_of_charge,
+            exclusions=merge_exclusions(existing.exclusions, gap, incoming.exclusions),
         )
-    return bound_battery_efficiency_history(merged)
+    )
 
 
 def bound_battery_efficiency_history(
-    data: BatteryEfficiencyHistoryData,
-    max_hours: int = HOUSEHOLD_LOAD_MAX_VALUES,
+    data: BatteryEfficiencyHistoryData, max_hours: int = HOUSEHOLD_LOAD_MAX_VALUES
 ) -> BatteryEfficiencyHistoryData:
     """Trim retained battery-efficiency history to the bounded retention window."""
-    count = len(data.battery_energy_in_kwh)
-    if count <= max_hours:
+    offset = len(data.battery_energy_in_kwh) - max_hours
+    if offset <= 0:
         return data
-    offset = count - max_hours
-    new_start = data.start_time + timedelta(hours=offset)
+    new_start = data.start_time + offset * _HOUR
     return replace(
         data,
         start_time=new_start,
-        battery_energy_in_kwh=data.battery_energy_in_kwh[offset:],
-        battery_energy_out_kwh=data.battery_energy_out_kwh[offset:],
-        inverter_charge_energy_in_kwh=data.inverter_charge_energy_in_kwh[offset:],
-        inverter_charge_energy_out_kwh=data.inverter_charge_energy_out_kwh[offset:],
-        inverter_discharge_energy_in_kwh=(
-            data.inverter_discharge_energy_in_kwh[offset:]
-        ),
-        inverter_discharge_energy_out_kwh=(
-            data.inverter_discharge_energy_out_kwh[offset:]
-        ),
-        state_of_charge_percent=data.state_of_charge_percent[offset:],
+        **{name: getattr(data, name)[offset:] for name in _SERIES_FIELDS},
         exclusions=tuple(
             item for item in data.exclusions if item.hour_start >= new_start
         ),
@@ -531,50 +447,14 @@ def calculate_battery_efficiency(
         message="efficiency calculation times must include a timezone",
     )
     history = _select_history(history, configuration.history_start)
-    arrays = {
-        "battery input": history.battery_energy_in_kwh,
-        "battery output": history.battery_energy_out_kwh,
-        "charge input": history.inverter_charge_energy_in_kwh,
-        "charge output": history.inverter_charge_energy_out_kwh,
-        "discharge input": history.inverter_discharge_energy_in_kwh,
-        "discharge output": history.inverter_discharge_energy_out_kwh,
-    }
-    count = len(history.battery_energy_in_kwh)
-    warnings: list[str] = []
-    component_statuses: dict[str, EfficiencyComponentStatus] = {}
-    if (
-        any(len(values) != count for values in arrays.values())
-        or len(history.state_of_charge_percent) != count + 1
-    ):
+    problem = _history_problem(history)
+    if problem is not None:
         return _result(
             history,
             retrieved_at,
             "invalid",
-            warnings=("efficiency histories are not aligned",),
-            component_statuses=_all_component_statuses("invalid"),
-        )
-    for name, values in arrays.items():
-        if any(
-            value is not None and (not math.isfinite(value) or value < 0)
-            for value in values
-        ):
-            return _result(
-                history,
-                retrieved_at,
-                "invalid",
-                warnings=(f"{name} contains negative or non-finite values",),
-                component_statuses=_all_component_statuses("invalid"),
-            )
-    if any(
-        value is not None and (not math.isfinite(value) or value < 0)
-        for value in history.state_of_charge_percent
-    ):
-        return _result(
-            history,
-            retrieved_at,
-            "invalid",
-            warnings=("state-of-charge history contains invalid values",),
-            component_statuses=_all_component_statuses("invalid"),
+            warnings=(problem,),
+            component_statuses=dict.fromkeys(_COMPONENTS, "invalid"),
         )
 
     full_indices: list[int] = []
@@ -591,11 +471,8 @@ def calculate_battery_efficiency(
     # and is not used.
     cycles = [
         (left, right)
-        for left, right in zip(full_indices, full_indices[1:])
-        if right > left
-        and all(
-            value is not None for value in history.battery_energy_in_kwh[left:right]
-        )
+        for left, right in pairwise(full_indices)
+        if None not in history.battery_energy_in_kwh[left:right]
     ]
     battery_in = sum(
         _total(history.battery_energy_in_kwh[left:right]) for left, right in cycles
@@ -604,150 +481,114 @@ def calculate_battery_efficiency(
         _total(history.battery_energy_out_kwh[left:right]) for left, right in cycles
     )
     charge_in = _total(history.inverter_charge_energy_in_kwh)
-    charge_out = _total(history.inverter_charge_energy_out_kwh)
     discharge_in = _total(history.inverter_discharge_energy_in_kwh)
-    discharge_out = _total(history.inverter_discharge_energy_out_kwh)
-    invalid = False
-    battery_efficiency: float | None = None
-    charge_efficiency: float | None = None
-    discharge_efficiency: float | None = None
-    if not cycles:
-        component_statuses["battery_efficiency"] = "unavailable"
-        warnings.append(
+    components = {
+        "battery_efficiency": _component(
+            "battery",
+            battery_in,
+            battery_out,
+            configuration.minimum_battery_throughput_kwh,
+        )
+        if cycles
+        else _Component(
+            "unavailable",
             "battery efficiency is unavailable: no complete full-SoC battery cycle "
-            f"is available; using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
-        )
-    elif battery_in <= 0:
-        invalid = True
-        component_statuses["battery_efficiency"] = "invalid"
-        warnings.append(
-            "battery efficiency is invalid: zero throughput denominator; using "
-            f"default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
-        )
-    elif battery_in < configuration.minimum_battery_throughput_kwh:
-        component_statuses["battery_efficiency"] = "defaulted"
-        warnings.append(
-            "battery efficiency uses default efficiency ratio "
-            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {battery_in:.3f} kWh is below "
-            "the configured minimum"
-        )
-    else:
-        try:
-            battery_efficiency = _ratio(battery_out, battery_in, "battery")
-            component_statuses["battery_efficiency"] = "calculated"
-        except ValueError as error:
-            invalid = True
-            component_statuses["battery_efficiency"] = "invalid"
-            warnings.append(str(error))
-
-    if charge_in <= 0:
-        invalid = True
-        component_statuses["inverter_charge_efficiency"] = "invalid"
-        warnings.append(
-            "inverter charge efficiency is invalid: zero throughput denominator; "
-            f"using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
-        )
-    elif charge_in < configuration.minimum_inverter_charge_throughput_kwh:
-        component_statuses["inverter_charge_efficiency"] = "defaulted"
-        warnings.append(
-            "inverter charge efficiency uses default efficiency ratio "
-            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {charge_in:.3f} kWh is below "
-            "the configured minimum"
-        )
-    else:
-        try:
-            charge_efficiency = _ratio(charge_out, charge_in, "inverter charge")
-            component_statuses["inverter_charge_efficiency"] = "calculated"
-        except ValueError as error:
-            invalid = True
-            component_statuses["inverter_charge_efficiency"] = "invalid"
-            warnings.append(str(error))
-
-    if discharge_in <= 0:
-        invalid = True
-        component_statuses["inverter_discharge_efficiency"] = "invalid"
-        warnings.append(
-            "inverter discharge efficiency is invalid: zero throughput denominator; "
-            f"using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}"
-        )
-    elif discharge_in < configuration.minimum_inverter_discharge_throughput_kwh:
-        component_statuses["inverter_discharge_efficiency"] = "defaulted"
-        warnings.append(
-            "inverter discharge efficiency uses default efficiency ratio "
-            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {discharge_in:.3f} kWh is below "
-            "the configured minimum"
-        )
-    else:
-        try:
-            discharge_efficiency = _ratio(
-                discharge_out, discharge_in, "inverter discharge"
-            )
-            component_statuses["inverter_discharge_efficiency"] = "calculated"
-        except ValueError as error:
-            invalid = True
-            component_statuses["inverter_discharge_efficiency"] = "invalid"
-            warnings.append(str(error))
-
-    round_trip_efficiency = (
-        (
-            battery_efficiency
-            if battery_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        )
-        * (
-            charge_efficiency
-            if charge_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        )
-        * (
-            discharge_efficiency
-            if discharge_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        )
-    )
-    component_statuses["round_trip_efficiency"] = "invalid" if invalid else "calculated"
-    if not invalid and any(
-        status in {"defaulted", "unavailable"}
-        for name, status in component_statuses.items()
-        if name != "round_trip_efficiency"
-    ):
+            f"is available; using default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}",
+        ),
+        "inverter_charge_efficiency": _component(
+            "inverter charge",
+            charge_in,
+            _total(history.inverter_charge_energy_out_kwh),
+            configuration.minimum_inverter_charge_throughput_kwh,
+        ),
+        "inverter_discharge_efficiency": _component(
+            "inverter discharge",
+            discharge_in,
+            _total(history.inverter_discharge_energy_out_kwh),
+            configuration.minimum_inverter_discharge_throughput_kwh,
+        ),
+    }
+    efficiencies = {name: part.efficiency for name, part in components.items()}
+    component_statuses = {name: part.status for name, part in components.items()}
+    warnings = [
+        part.warning for part in components.values() if part.warning is not None
+    ]
+    # Without an invalid component, a component that is not calculated uses the
+    # default ratio, so the round trip is calculated with defaults.
+    if "invalid" in component_statuses.values():
+        status = "invalid"
+        component_statuses["round_trip_efficiency"] = "invalid"
+    elif any(value != "calculated" for value in component_statuses.values()):
+        status = "insufficient_data"
         component_statuses["round_trip_efficiency"] = "calculated_with_defaults"
         warnings.append(
             "complete round-trip efficiency is calculated using one or more "
             "default component ratios"
         )
-    status = (
-        "invalid"
-        if invalid
-        else (
-            "insufficient_data"
-            if any(
-                value is None
-                for value in (
-                    battery_efficiency,
-                    charge_efficiency,
-                    discharge_efficiency,
-                )
-            )
-            else "ok"
-        )
-    )
+    else:
+        status = "ok"
+        component_statuses["round_trip_efficiency"] = "calculated"
     _check_state_of_charge_balance(history, configuration, capacity_kwh, warnings)
     return _result(
         history,
         retrieved_at,
         status,
-        inverter_charge_efficiency=charge_efficiency,
-        inverter_discharge_efficiency=discharge_efficiency,
-        battery_efficiency=battery_efficiency,
-        round_trip_efficiency=round_trip_efficiency,
+        **efficiencies,
+        round_trip_efficiency=math.prod(efficiencies.values()),
         battery_throughput_kwh=battery_in,
         charge_throughput_kwh=charge_in,
         discharge_throughput_kwh=discharge_in,
         complete_cycle_count=len(cycles),
-        warnings=tuple(dict.fromkeys(warnings)),
+        warnings=warnings,
         component_statuses=component_statuses,
     )
+
+
+def _history_problem(history: BatteryEfficiencyHistoryData) -> str | None:
+    """Return why a persisted history cannot be calculated from, or ``None``."""
+    legs = {label: getattr(history, field) for label, field in _ENERGY_FIELDS.items()}
+    count = len(history.battery_energy_in_kwh)
+    if (
+        any(len(values) != count for values in legs.values())
+        or len(history.state_of_charge_percent) != count + 1
+    ):
+        return "efficiency histories are not aligned"
+    for label, values in legs.items():
+        if _has_invalid_value(values):
+            return f"{label} contains negative or non-finite values"
+    if _has_invalid_value(history.state_of_charge_percent):
+        return "state-of-charge history contains invalid values"
+    return None
+
+
+def _has_invalid_value(values: tuple[float | None, ...]) -> bool:
+    return any(
+        value is not None and (not math.isfinite(value) or value < 0)
+        for value in values
+    )
+
+
+def _component(
+    label: str, energy_in: float, energy_out: float, minimum_kwh: float
+) -> _Component:
+    """Calculate one efficiency ratio, or explain why the default applies."""
+    if energy_in <= 0:
+        return _Component(
+            "invalid",
+            f"{label} efficiency is invalid: zero throughput denominator; using "
+            f"default efficiency ratio {DEFAULT_EFFICIENCY_RATIO}",
+        )
+    if energy_in < minimum_kwh:
+        return _Component(
+            "defaulted",
+            f"{label} efficiency uses default efficiency ratio "
+            f"{DEFAULT_EFFICIENCY_RATIO}: throughput {energy_in:.3f} kWh is below "
+            "the configured minimum",
+        )
+    ratio = energy_out / energy_in
+    if not math.isfinite(ratio) or ratio < 0:
+        return _Component("invalid", f"{label} efficiency is non-finite or negative")
+    return _Component("calculated", efficiency=min(ratio, 1.0))
 
 
 def _check_state_of_charge_balance(
@@ -808,75 +649,25 @@ def _check_state_of_charge_balance(
         )
 
 
-def _soc_indexes_of(excluded_hours: set[int]) -> set[int]:
-    """Return the state-of-charge values that bracket the excluded hours.
-
-    Hour ``i`` lies between ``state_of_charge_percent[i]`` and
-    ``state_of_charge_percent[i + 1]``, so an excluded hour drops both.
-    """
-    return excluded_hours | {index + 1 for index in excluded_hours}
-
-
 def _total(values: tuple[float | None, ...]) -> float:
     """Sum the hours that have a value; excluded hours contribute nothing."""
     return sum(value for value in values if value is not None)
 
 
-def _ratio(numerator: float, denominator: float, label: str) -> float:
-    if denominator <= 0:
-        raise ValueError(f"{label} efficiency has a zero throughput denominator")
-    value = numerator / denominator
-    if not math.isfinite(value) or value < 0:
-        raise ValueError(f"{label} efficiency is non-finite or negative")
-    return min(value, 1.0)
-
-
 def _select_history(
-    history: BatteryEfficiencyHistoryData,
-    history_start: datetime | None,
+    history: BatteryEfficiencyHistoryData, history_start: datetime | None
 ) -> BatteryEfficiencyHistoryData:
     """Apply the configured inclusive start without introducing a rolling window."""
     if history_start is None:
         return history
-    selected_start = max(
-        history.start_time,
-        history_start.astimezone(timezone.utc),
-    )
+    selected_start = max(history.start_time, history_start.astimezone(timezone.utc))
     offset = int((selected_start - history.start_time).total_seconds() // 3600)
     count = len(history.battery_energy_in_kwh) - offset
     if count <= 0:
-        return replace(
-            history,
-            start_time=selected_start,
-            battery_energy_in_kwh=(),
-            battery_energy_out_kwh=(),
-            inverter_charge_energy_in_kwh=(),
-            inverter_charge_energy_out_kwh=(),
-            inverter_discharge_energy_in_kwh=(),
-            inverter_discharge_energy_out_kwh=(),
-            state_of_charge_percent=(),
-            exclusions=(),
-        )
-    return replace(
-        history,
-        start_time=history.start_time + timedelta(hours=offset),
-        battery_energy_in_kwh=history.battery_energy_in_kwh[offset:],
-        battery_energy_out_kwh=history.battery_energy_out_kwh[offset:],
-        inverter_charge_energy_in_kwh=history.inverter_charge_energy_in_kwh[offset:],
-        inverter_charge_energy_out_kwh=history.inverter_charge_energy_out_kwh[offset:],
-        inverter_discharge_energy_in_kwh=history.inverter_discharge_energy_in_kwh[
-            offset:
-        ],
-        inverter_discharge_energy_out_kwh=history.inverter_discharge_energy_out_kwh[
-            offset:
-        ],
-        state_of_charge_percent=history.state_of_charge_percent[offset:],
-        exclusions=tuple(
-            item
-            for item in history.exclusions
-            if item.hour_start >= history.start_time + timedelta(hours=offset)
-        ),
-    )
+        empty: dict[str, Any] = dict.fromkeys(_SERIES_FIELDS, ())
+        return replace(history, start_time=selected_start, **empty, exclusions=())
+    # Keep the last ``count`` hours: those from the selected start on.
+    return bound_battery_efficiency_history(history, count)
 
 
 def _result(
@@ -884,56 +675,25 @@ def _result(
     retrieved_at: datetime,
     status: str,
     *,
-    inverter_charge_efficiency: float | None = None,
-    inverter_discharge_efficiency: float | None = None,
-    battery_efficiency: float | None = None,
-    round_trip_efficiency: float | None = None,
+    inverter_charge_efficiency: float = DEFAULT_EFFICIENCY_RATIO,
+    inverter_discharge_efficiency: float = DEFAULT_EFFICIENCY_RATIO,
+    battery_efficiency: float = DEFAULT_EFFICIENCY_RATIO,
+    round_trip_efficiency: float = DEFAULT_EFFICIENCY_RATIO,
     battery_throughput_kwh: float = 0.0,
     charge_throughput_kwh: float = 0.0,
     discharge_throughput_kwh: float = 0.0,
     complete_cycle_count: int = 0,
-    warnings: tuple[str, ...] = (),
-    component_statuses: dict[str, EfficiencyComponentStatus] | None = None,
+    warnings: Iterable[str],
+    component_statuses: dict[str, EfficiencyComponentStatus],
 ) -> BatteryEfficiencyData:
     """Build a consistently shaped result for valid and unusable histories."""
-    components = {
-        "inverter_charge_efficiency": inverter_charge_efficiency,
-        "inverter_discharge_efficiency": inverter_discharge_efficiency,
-        "battery_efficiency": battery_efficiency,
-        "round_trip_efficiency": round_trip_efficiency,
-    }
-    resolved_statuses = component_statuses or {
-        name: "calculated" if value is not None else "defaulted"
-        for name, value in components.items()
-    }
-    defaulted_components = tuple(
-        name
-        for name, status in resolved_statuses.items()
-        if status in {"defaulted", "unavailable", "invalid"}
-    )
     return BatteryEfficiencyData(
         schema_version="1",
         status=status,  # type: ignore[arg-type]
-        inverter_charge_efficiency=(
-            inverter_charge_efficiency
-            if inverter_charge_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        ),
-        inverter_discharge_efficiency=(
-            inverter_discharge_efficiency
-            if inverter_discharge_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        ),
-        battery_efficiency=(
-            battery_efficiency
-            if battery_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        ),
-        round_trip_efficiency=(
-            round_trip_efficiency
-            if round_trip_efficiency is not None
-            else DEFAULT_EFFICIENCY_RATIO
-        ),
+        inverter_charge_efficiency=inverter_charge_efficiency,
+        inverter_discharge_efficiency=inverter_discharge_efficiency,
+        battery_efficiency=battery_efficiency,
+        round_trip_efficiency=round_trip_efficiency,
         history_start=history.start_time,
         history_end=history.start_time
         + timedelta(hours=len(history.battery_energy_in_kwh)),
@@ -948,21 +708,13 @@ def _result(
         retrieved_at=retrieved_at,
         latest_observation_at=history.latest_observation_at,
         warnings=tuple(dict.fromkeys(warnings)),
-        defaulted_components=defaulted_components,
-        component_statuses=resolved_statuses,
+        defaulted_components=tuple(
+            name
+            for name, component_status in component_statuses.items()
+            if component_status in {"defaulted", "unavailable", "invalid"}
+        ),
+        component_statuses=component_statuses,
     )
-
-
-def _all_component_statuses(
-    status: EfficiencyComponentStatus,
-) -> dict[str, EfficiencyComponentStatus]:
-    """Apply one validation status when no component can be calculated."""
-    return {
-        "battery_efficiency": status,
-        "inverter_charge_efficiency": status,
-        "inverter_discharge_efficiency": status,
-        "round_trip_efficiency": status,
-    }
 
 
 __all__ = [

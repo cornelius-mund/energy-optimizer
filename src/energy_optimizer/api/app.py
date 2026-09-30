@@ -17,15 +17,13 @@ from energy_optimizer.api.routers import provider as provider_routes
 
 app = FastAPI(title="Energy Optimizer", version=__version__, lifespan=lifespan)
 DEFAULT_FRONTEND_DIRECTORY = Path(__file__).parents[3] / "frontend"
-MAX_HORIZON_HOURS = schemas.MAX_HORIZON_HOURS
 
 
 def configured_frontend_directory() -> Path:
     """Return the dashboard directory for source and installed deployments."""
     return Path(
         os.environ.get(
-            "ENERGY_OPTIMIZER_FRONTEND_DIRECTORY",
-            str(DEFAULT_FRONTEND_DIRECTORY),
+            "ENERGY_OPTIMIZER_FRONTEND_DIRECTORY", str(DEFAULT_FRONTEND_DIRECTORY)
         )
     )
 
@@ -49,8 +47,6 @@ if FRONTEND_DIRECTORY.is_dir():
 def __getattr__(name: str) -> Any:
     """Preserve the former app-module route and schema exports."""
     for module in (core_routes, provider_routes, dashboard_routes, schemas):
-        try:
+        if hasattr(module, name):
             return getattr(module, name)
-        except AttributeError:
-            continue
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

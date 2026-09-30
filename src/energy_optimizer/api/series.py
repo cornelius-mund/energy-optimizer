@@ -1,14 +1,9 @@
 """Shared timestamp alignment for dashboard forecast series."""
 
-from __future__ import annotations
-
 from datetime import datetime, timedelta
-from typing import TypeVar
-
-ValueT = TypeVar("ValueT")
 
 
-def align_hourly_values(
+def align_hourly_values[ValueT](
     values_by_timestamp: dict[datetime, ValueT],
     start: datetime,
     end: datetime,

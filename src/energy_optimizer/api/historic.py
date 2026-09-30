@@ -6,12 +6,10 @@ Loaders only read persisted normalized provider data; forecasts and optimizer
 plans are served by other dashboard scenarios and are never mixed in here.
 """
 
-from __future__ import annotations
-
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable, Literal, TypeVar
+from typing import Callable, Literal
 
 from fastapi import HTTPException, Request
 from pydantic import TypeAdapter
@@ -22,7 +20,12 @@ from energy_optimizer.api.routers.context import (
     GRID_FLOW_ADAPTER,
     logger,
 )
-from energy_optimizer.api.routers.provider import historic_household_load
+from energy_optimizer.api.routers.provider import (
+    Freshness,
+    api_source,
+    historic_household_load,
+    polling_freshness,
+)
 from energy_optimizer.api.schemas import DashboardSeries, SourceMetadata
 from energy_optimizer.api.series import align_hourly_values
 from energy_optimizer.config import Configuration
@@ -40,9 +43,7 @@ from energy_optimizer.storage import (
 AssetStatus = Literal[
     "available", "empty", "stale", "not_configured", "unavailable", "invalid"
 ]
-Freshness = Literal["fresh", "stale", "unknown"]
 _HOUR = timedelta(hours=1)
-ModelT = TypeVar("ModelT")
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,6 @@ class HistoricReadContext:
 
     @property
     def configuration(self) -> Configuration:
-        """Return the validated application configuration."""
         configuration: Configuration = self.request.app.state.configuration
         return configuration
 
@@ -78,23 +78,10 @@ class HistoricReadContext:
 
     @property
     def request_id(self) -> str:
-        """Return the request identifier used to correlate diagnostics."""
         return str(getattr(self.request.state, "request_id", "none"))
 
 
 HistoricAssetLoader = Callable[[HistoricReadContext], HistoricAssetResult]
-
-
-def _polling_freshness(
-    latest_observation_at: datetime,
-    max_age_seconds: float | None,
-    now: datetime,
-) -> Freshness:
-    """Assess polling freshness without invalidating historical actuals."""
-    if max_age_seconds is None:
-        return "unknown"
-    age_seconds = (now - latest_observation_at).total_seconds()
-    return "fresh" if age_seconds <= max_age_seconds else "stale"
 
 
 def _not_configured(asset: str, reason: str) -> HistoricAssetResult:
@@ -120,7 +107,7 @@ def _invalid(
     return HistoricAssetResult(asset, "invalid", reason=reason)
 
 
-def _load(
+def _load[ModelT](
     context: HistoricReadContext,
     asset: str,
     key: ProviderDataKey,
@@ -172,7 +159,7 @@ def _series(
         timestamps=[timestamp for timestamp, _ in selected],
         values=[value for _, value in selected],
         unit=unit,
-        source=SourceMetadata(provider=source.provider, entity_id=source.entity_id),
+        source=api_source(source),
         requested_start_time=context.start,
         requested_end_time=context.end,
         available_start_time=available_start,
@@ -211,8 +198,7 @@ def load_household_load(context: HistoricReadContext) -> HistoricAssetResult:
     home_assistant = context.configuration.home_assistant
     if home_assistant is None or home_assistant.household_load is None:
         return _not_configured(
-            "household_load",
-            "no Home Assistant household-load entities are configured",
+            "household_load", "no Home Assistant household-load entities are configured"
         )
     if context.store is None:
         return _unavailable(
@@ -274,7 +260,7 @@ def load_grid_flow(context: HistoricReadContext) -> HistoricAssetResult:
             "persisted grid-flow data is invalid and is withheld",
             error,
         )
-    freshness = _polling_freshness(
+    freshness = polling_freshness(
         data.latest_observation_at, home_assistant.max_data_age_seconds, context.now
     )
     directions = (
@@ -335,7 +321,7 @@ def load_electricity_prices(context: HistoricReadContext) -> HistoricAssetResult
         for timestamp, point in all_points.items()
         if timestamp < completed_end
     }
-    freshness = _polling_freshness(
+    freshness = polling_freshness(
         data.retrieved_at, awattar.max_data_age_seconds, context.now
     )
     series = [
@@ -404,9 +390,7 @@ def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
         context,
         "battery",
         ProviderDataKey(
-            "battery-efficiency-history",
-            "home-assistant",
-            "battery_efficiency_history",
+            "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
         ),
         BATTERY_EFFICIENCY_HISTORY_ADAPTER,
         "battery state history",
@@ -428,7 +412,7 @@ def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
         if orchestration is not None
         else None
     )
-    freshness = _polling_freshness(
+    freshness = polling_freshness(
         data.latest_observation_at,
         schedule.interval_seconds * 2 if schedule is not None else None,
         context.now,
@@ -450,7 +434,6 @@ def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
 
 def load_pv_generation(context: HistoricReadContext) -> HistoricAssetResult:
     """Report PV actuals as absent; Forecast.Solar only supplies forecasts."""
-    del context
     return _not_configured(
         "pv_generation",
         "no historic PV-generation importer is available; PV forecasts are served "
@@ -460,7 +443,6 @@ def load_pv_generation(context: HistoricReadContext) -> HistoricAssetResult:
 
 def load_electric_vehicle(context: HistoricReadContext) -> HistoricAssetResult:
     """Report electric-vehicle history as absent until an importer exists."""
-    del context
     return _not_configured(
         "electric_vehicle", "no electric-vehicle importer is available"
     )
@@ -468,7 +450,6 @@ def load_electric_vehicle(context: HistoricReadContext) -> HistoricAssetResult:
 
 def load_heat_pump(context: HistoricReadContext) -> HistoricAssetResult:
     """Report heat-pump history as absent until an importer exists."""
-    del context
     return _not_configured("heat_pump", "no heat-pump importer is available")
 
 

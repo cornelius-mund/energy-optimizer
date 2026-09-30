@@ -64,28 +64,26 @@ def _timezone_name_error(name: str) -> str | None:
     return None
 
 
-class GridConfiguration(BaseModel):
-    """Limits for energy exchanged with the grid, in kW."""
+class _StrictModel(BaseModel):
+    """Base of the settings models: unknown keys are rejected."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class GridConfiguration(_StrictModel):
+    """Limits for energy exchanged with the grid, in kW."""
 
     maximum_import_kw: float = Field(gt=0)
     maximum_export_kw: float = Field(gt=0)
 
 
-class SolverConfiguration(BaseModel):
-    """Optimization solver settings."""
-
-    model_config = ConfigDict(extra="forbid")
-
+class SolverConfiguration(_StrictModel):
     name: str = Field(min_length=1)
     time_limit_seconds: float = Field(gt=0)
 
 
-class HomeAssistantEnergyEntityConfiguration(BaseModel):
+class HomeAssistantEnergyEntityConfiguration(_StrictModel):
     """Configuration for one Home Assistant cumulative-energy entity."""
-
-    model_config = ConfigDict(extra="forbid")
 
     entity_id: str = Field(min_length=1, max_length=255)
     state_class: Literal["total", "total_increasing"]
@@ -95,20 +93,16 @@ class HomeAssistantEnergyEntityConfiguration(BaseModel):
     maximum_interval_energy_kwh: float = Field(default=100, gt=0)
 
 
-class HomeAssistantBatteryEntityConfiguration(BaseModel):
+class HomeAssistantBatteryEntityConfiguration(_StrictModel):
     """Configuration for one instantaneous Home Assistant battery value."""
-
-    model_config = ConfigDict(extra="forbid")
 
     entity_id: str = Field(min_length=1, max_length=255)
     unit: Literal["%", "Wh", "kWh", "W", "kW", "ratio"]
     attribute: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class BatteryConstantConfiguration(BaseModel):
+class BatteryConstantConfiguration(_StrictModel):
     """A static battery value that does not require a Home Assistant entity."""
-
-    model_config = ConfigDict(extra="forbid")
 
     value: float = Field(allow_inf_nan=False)
     unit: Literal["%", "Wh", "kWh", "W", "kW", "ratio"]
@@ -127,16 +121,14 @@ type BatteryConfigurationValue = (
 )
 
 
-class EnergyTermConfiguration(BaseModel):
+class EnergyTermConfiguration(_StrictModel):
     """Cumulative-energy entities that share one sign in an aggregation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     operation: Literal["add", "subtract"]
     entities: list[HomeAssistantEnergyEntityConfiguration] = Field(min_length=1)
 
 
-class EnergyAggregateConfiguration(BaseModel):
+class EnergyAggregateConfiguration(_StrictModel):
     """One signed hourly energy aggregation built from cumulative counters.
 
     The hourly value is the sum of the energy of every ``add`` entity minus the
@@ -145,8 +137,6 @@ class EnergyAggregateConfiguration(BaseModel):
     with ``positive`` it is a legitimate zero, because only the positive part of
     the sum is wanted.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     part: Literal["net", "positive"] = "net"
     terms: list[EnergyTermConfiguration] = Field(min_length=1)
@@ -173,10 +163,8 @@ class EnergyAggregateConfiguration(BaseModel):
         return self
 
 
-class BatteryEfficiencyLegConfiguration(BaseModel):
+class BatteryEfficiencyLegConfiguration(_StrictModel):
     """Signed cumulative-energy aggregations making up one efficiency leg."""
-
-    model_config = ConfigDict(extra="forbid")
 
     energy_in: EnergyAggregateConfiguration
     energy_out: EnergyAggregateConfiguration
@@ -192,11 +180,7 @@ class BatteryEfficiencyLegConfiguration(BaseModel):
         return self
 
 
-class HomeAssistantBatteryEfficiencyConfiguration(BaseModel):
-    """Configuration for measured battery and inverter efficiency components."""
-
-    model_config = ConfigDict(extra="forbid")
-
+class HomeAssistantBatteryEfficiencyConfiguration(_StrictModel):
     battery: BatteryEfficiencyLegConfiguration
     inverter_charge: BatteryEfficiencyLegConfiguration
     inverter_discharge: BatteryEfficiencyLegConfiguration
@@ -224,10 +208,8 @@ class HomeAssistantBatteryEfficiencyConfiguration(BaseModel):
         return self
 
 
-class HomeAssistantBatteryConfiguration(BaseModel):
+class HomeAssistantBatteryConfiguration(_StrictModel):
     """Home Assistant battery state and static capability configuration."""
-
-    model_config = ConfigDict(extra="forbid")
 
     state_of_charge: HomeAssistantBatteryEntityConfiguration
     capacity: BatteryConfigurationValue
@@ -262,12 +244,11 @@ class HomeAssistantBatteryConfiguration(BaseModel):
     @model_validator(mode="after")
     def validate_mapping_units(self) -> "HomeAssistantBatteryConfiguration":
         """Require units compatible with each normalized battery field."""
-        energy_fields = {
+        for name, value in {
             "state_of_charge": self.state_of_charge,
             "minimum_soc": self.minimum_soc,
             "maximum_soc": self.maximum_soc,
-        }
-        for name, value in energy_fields.items():
+        }.items():
             if value.unit not in {"%", "Wh", "kWh"}:
                 raise ValueError(
                     f"battery.{name} must use %, Wh, or kWh; got {value.unit}"
@@ -280,24 +261,16 @@ class HomeAssistantBatteryConfiguration(BaseModel):
         }.items():
             if value.unit not in {"W", "kW"}:
                 raise ValueError(f"battery.{name} must use W or kW")
-        efficiency_values: dict[str, BatteryConfigurationValue | None] = {
-            "battery_efficiency": self.battery_efficiency,
-        }
-        for name, efficiency_value in efficiency_values.items():
-            if efficiency_value is None:
-                continue
-            if efficiency_value.unit not in {"%", "ratio"}:
-                raise ValueError(f"battery.{name} must use % or ratio")
-        if self.efficiency_calculation is not None:
-            for name, fixed_value in (("battery_efficiency", self.battery_efficiency),):
-                if fixed_value is not None:
-                    logger.warning(
-                        "event=configuration_efficiency_precedence "
-                        "component=configuration field=battery.%s "
-                        "precedence=fixed_over_calculated",
-                        name,
-                    )
-        if self.efficiency_calculation is None and self.battery_efficiency is None:
+        efficiency = self.battery_efficiency
+        if efficiency is not None and efficiency.unit not in {"%", "ratio"}:
+            raise ValueError("battery.battery_efficiency must use % or ratio")
+        if self.efficiency_calculation is not None and efficiency is not None:
+            logger.warning(
+                "event=configuration_efficiency_precedence "
+                "component=configuration field=battery.battery_efficiency "
+                "precedence=fixed_over_calculated"
+            )
+        if self.efficiency_calculation is None and efficiency is None:
             raise ValueError(
                 "battery.battery_efficiency must be configured unless "
                 "efficiency_calculation is configured"
@@ -330,16 +303,15 @@ class HomeAssistantBatteryConfiguration(BaseModel):
             if constant.unit == "%" and constant.value > 100:
                 raise ValueError(f"battery.{name} percentage must not exceed 100")
 
-        for name in ("battery_efficiency",):
-            constant = constants.get(name)
-            if constant is None:
-                continue
+        constant = constants.get("battery_efficiency")
+        if constant is not None:
             normalized = (
                 constant.value / 100 if constant.unit == "%" else constant.value
             )
             if not 0 < normalized <= 1:
                 raise ValueError(
-                    f"battery.{name} must be greater than zero and no greater than one"
+                    "battery.battery_efficiency must be greater than zero and no "
+                    "greater than one"
                 )
 
         capacity = self._constant_energy(constants.get("capacity"))
@@ -356,8 +328,7 @@ class HomeAssistantBatteryConfiguration(BaseModel):
 
     @staticmethod
     def _constant_energy(
-        value: BatteryConstantConfiguration | None,
-        capacity: float | None = None,
+        value: BatteryConstantConfiguration | None, capacity: float | None = None
     ) -> float | None:
         if value is None:
             return None
@@ -366,10 +337,8 @@ class HomeAssistantBatteryConfiguration(BaseModel):
         return value.value / 1000 if value.unit == "Wh" else value.value
 
 
-class HomeAssistantConfiguration(BaseModel):
+class HomeAssistantConfiguration(_StrictModel):
     """Connection and energy mappings for Home Assistant."""
-
-    model_config = ConfigDict(extra="forbid")
 
     base_url: AnyHttpUrl
     token: SecretStr
@@ -383,30 +352,22 @@ class HomeAssistantConfiguration(BaseModel):
     @model_validator(mode="after")
     def validate_grid_and_battery_mappings(self) -> "HomeAssistantConfiguration":
         """Require grid import and export together and check battery mappings."""
-
-        grid_aggregates = (self.grid_import, self.grid_export)
-        if any(aggregate is not None for aggregate in grid_aggregates) and not all(
-            aggregate is not None for aggregate in grid_aggregates
-        ):
+        if (self.grid_import is None) != (self.grid_export is None):
             raise ValueError("grid_import and grid_export must be configured together")
 
         if self.battery is not None:
-            battery_values = (
-                self.battery.state_of_charge,
-                self.battery.capacity,
-                self.battery.minimum_soc,
-                self.battery.maximum_soc,
-                self.battery.maximum_charge,
-                self.battery.maximum_discharge,
-                self.battery.battery_efficiency,
-            )
-            battery_mappings = tuple(
-                value
-                for value in battery_values
-                if isinstance(value, HomeAssistantBatteryEntityConfiguration)
-            )
             mapping_keys = [
-                (mapping.entity_id, mapping.attribute) for mapping in battery_mappings
+                (value.entity_id, value.attribute)
+                for value in (
+                    self.battery.state_of_charge,
+                    self.battery.capacity,
+                    self.battery.minimum_soc,
+                    self.battery.maximum_soc,
+                    self.battery.maximum_charge,
+                    self.battery.maximum_discharge,
+                    self.battery.battery_efficiency,
+                )
+                if isinstance(value, HomeAssistantBatteryEntityConfiguration)
             ]
             if len(mapping_keys) != len(set(mapping_keys)):
                 raise ValueError(
@@ -431,10 +392,10 @@ class HomeAssistantConfiguration(BaseModel):
         return BATTERY_SOURCE_ID
 
 
-class ForecastSolarConfiguration(BaseModel):
+class ForecastSolarConfiguration(_StrictModel):
     """Free public Forecast.Solar installation and request settings."""
 
-    model_config = ConfigDict(extra="forbid", validate_default=True)
+    model_config = ConfigDict(validate_default=True)
 
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
@@ -451,10 +412,10 @@ class ForecastSolarConfiguration(BaseModel):
         return PV_GENERATION_SOURCE_ID
 
 
-class AwattarConfiguration(BaseModel):
+class AwattarConfiguration(_StrictModel):
     """German aWATTar market-data request and freshness settings."""
 
-    model_config = ConfigDict(extra="forbid", validate_default=True)
+    model_config = ConfigDict(validate_default=True)
 
     base_url: AnyHttpUrl = AnyHttpUrl("https://api.awattar.de/v1/marketdata")
     timeout_seconds: float = Field(default=10, gt=0, le=120)
@@ -466,10 +427,8 @@ class AwattarConfiguration(BaseModel):
         return "de"
 
 
-class PersistenceConfiguration(BaseModel):
+class PersistenceConfiguration(_StrictModel):
     """Filesystem location for normalized provider data."""
-
-    model_config = ConfigDict(extra="forbid")
 
     directory: Path = Field(
         default=Path("/var/lib/energy-optimizer/provider-data"),
@@ -477,20 +436,16 @@ class PersistenceConfiguration(BaseModel):
     )
 
 
-class DataSourceScheduleConfiguration(BaseModel):
+class DataSourceScheduleConfiguration(_StrictModel):
     """Polling and provider-history settings for one data source."""
-
-    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     interval_seconds: float = Field(gt=0)
     history_lookback_seconds: float = Field(default=0, ge=0)
 
 
-class OptimizationTriggerConfiguration(BaseModel):
+class OptimizationTriggerConfiguration(_StrictModel):
     """Settings controlling automatic plan-generation triggers."""
-
-    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     required_sources: list[str] = Field(default_factory=list)
@@ -506,10 +461,8 @@ class OptimizationTriggerConfiguration(BaseModel):
         return values
 
 
-class OrchestrationConfiguration(BaseModel):
+class OrchestrationConfiguration(_StrictModel):
     """Runtime settings for scheduled provider retrieval and plan triggers."""
-
-    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     startup_fetch: bool = True
@@ -545,10 +498,8 @@ class OrchestrationConfiguration(BaseModel):
         return self
 
 
-class Configuration(BaseModel):
+class Configuration(_StrictModel):
     """Validated settings needed to start the service."""
-
-    model_config = ConfigDict(extra="forbid")
 
     time_resolution_minutes: int = Field(gt=0)
     timezone: str = Field(
@@ -584,11 +535,8 @@ class Configuration(BaseModel):
         return self
 
     def is_configured_household_load_source(
-        self,
-        provider: str,
-        entity_id: str | None,
+        self, provider: str, entity_id: str | None
     ) -> bool:
-        """Return whether a source identifies the configured load provider."""
         return (
             self.home_assistant is not None
             and self.home_assistant.household_load is not None
@@ -597,11 +545,8 @@ class Configuration(BaseModel):
         )
 
     def is_configured_grid_flow_source(
-        self,
-        provider: str,
-        entity_id: str | None,
+        self, provider: str, entity_id: str | None
     ) -> bool:
-        """Return whether a source identifies the configured grid-flow provider."""
         return (
             self.home_assistant is not None
             and self.home_assistant.grid_import is not None
@@ -610,18 +555,14 @@ class Configuration(BaseModel):
             and entity_id == self.home_assistant.grid_flow_source_id
         )
 
-    def is_configured_battery_source(
-        self,
-        provider: str,
-        entity_id: str | None,
-    ) -> bool:
-        """Return whether a source identifies the configured battery provider."""
-        return (
-            self.home_assistant is not None
-            and self.home_assistant.battery is not None
-            and provider == "home-assistant"
-            and entity_id == self.home_assistant.battery_source_id
-        )
+
+def _log_load_failure(path: Path, error_type: str) -> None:
+    logger.error(
+        "event=configuration_load_failed component=configuration operation=load "
+        "path=%s error_type=%s",
+        path,
+        error_type,
+    )
 
 
 def load_configuration(path: Path) -> Configuration:
@@ -636,39 +577,25 @@ def load_configuration(path: Path) -> Configuration:
         path,
     )
     if not path.is_file():
-        logger.error(
-            "event=configuration_load_failed component=configuration operation=load "
-            "path=%s error_type=ConfigurationError",
-            path,
-        )
+        _log_load_failure(path, "ConfigurationError")
         raise ConfigurationError(f"Configuration file not found: {path}")
 
     try:
         with path.open(encoding="utf-8") as configuration_file:
             document: Any = yaml.safe_load(configuration_file)
     except yaml.YAMLError as error:
-        message = f"Invalid YAML in configuration file {path}: {error}"
-        logger.error(
-            "event=configuration_load_failed component=configuration operation=load "
-            "path=%s error_type=YAMLError",
-            path,
-        )
-        raise ConfigurationError(message) from error
+        _log_load_failure(path, "YAMLError")
+        raise ConfigurationError(
+            f"Invalid YAML in configuration file {path}: {error}"
+        ) from error
     except OSError as error:
-        message = f"Could not read configuration file {path}: {error}"
-        logger.error(
-            "event=configuration_load_failed component=configuration operation=load "
-            "path=%s error_type=OSError",
-            path,
-        )
-        raise ConfigurationError(message) from error
+        _log_load_failure(path, "OSError")
+        raise ConfigurationError(
+            f"Could not read configuration file {path}: {error}"
+        ) from error
 
     if not isinstance(document, dict):
-        logger.error(
-            "event=configuration_load_failed component=configuration operation=load "
-            "path=%s error_type=ConfigurationError",
-            path,
-        )
+        _log_load_failure(path, "ConfigurationError")
         raise ConfigurationError(
             f"Configuration file {path} must contain a YAML mapping at the top level"
         )
@@ -680,13 +607,10 @@ def load_configuration(path: Path) -> Configuration:
             f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
             for issue in error.errors()
         )
-        message = f"Invalid configuration in {path}: {details}"
-        logger.error(
-            "event=configuration_load_failed component=configuration operation=load "
-            "path=%s error_type=ValidationError",
-            path,
-        )
-        raise ConfigurationError(message) from error
+        _log_load_failure(path, "ValidationError")
+        raise ConfigurationError(
+            f"Invalid configuration in {path}: {details}"
+        ) from error
     logger.info(
         "event=configuration_loaded component=configuration operation=load "
         "path=%s persistence_enabled=%s orchestration_enabled=%s "

@@ -3,17 +3,22 @@
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 
 from energy_optimizer.api import historic
 from energy_optimizer.api.excluded import read_excluded_hours
 from energy_optimizer.api.routers.context import (
+    BATTERY_EFFICIENCY_ADAPTER,
     ELECTRICITY_PRICE_ADAPTER,
     PV_GENERATION_ADAPTER,
     logger,
 )
+from energy_optimizer.api.routers.provider import (
+    Freshness,
+    api_source,
+    validated_utc_range,
+)
 from energy_optimizer.api.schemas import (
-    MAX_HORIZON_HOURS,
     DashboardAssetAvailability,
     DashboardDataResponse,
     DashboardMetric,
@@ -21,68 +26,25 @@ from energy_optimizer.api.schemas import (
     DashboardSeries,
     DashboardSettingsResponse,
     ExcludedHoursResponse,
-    SourceMetadata,
 )
 from energy_optimizer.api.series import align_hourly_values
-from energy_optimizer.api.validation import require_aware_timestamps
+from energy_optimizer.providers.awattar import AwattarImporter
+from energy_optimizer.providers.forecast_solar import ForecastSolarImporter
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     ElectricityPriceData,
     PvGenerationData,
-)
-from energy_optimizer.providers.interfaces import (
-    SourceMetadata as ProviderSourceMetadata,
 )
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStoreError
 
 router = APIRouter()
 
 
-def _dashboard_source(data: object) -> SourceMetadata:
-    """Map normalized provider identity to the dashboard response model."""
-    source = getattr(data, "source", None)
-    if not isinstance(source, ProviderSourceMetadata):
-        raise ProviderDataStoreError("normalized dashboard data has no source identity")
-    return SourceMetadata(provider=source.provider, entity_id=source.entity_id)
-
-
-def _dashboard_range(
-    start_time: datetime,
-    end_time: datetime,
-) -> tuple[datetime, datetime]:
-    """Validate and normalize one dashboard half-open hourly range."""
-    try:
-        require_aware_timestamps([start_time, end_time])
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail="start_time and end_time must include a timezone",
-        )
-    start = start_time.astimezone(timezone.utc)
-    end = end_time.astimezone(timezone.utc)
-    if (
-        start.minute
-        or start.second
-        or start.microsecond
-        or end.minute
-        or end.second
-        or end.microsecond
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail="dashboard range boundaries must be aligned to the hour",
-        )
-    if end <= start:
-        raise HTTPException(
-            status_code=422,
-            detail="end_time must be later than start_time",
-        )
-    if end - start > timedelta(hours=MAX_HORIZON_HOURS):
-        raise HTTPException(
-            status_code=422,
-            detail=f"requested range must not exceed {MAX_HORIZON_HOURS} hours",
-        )
-    return start, end
+def _has_coverage_gap(item: DashboardSeries, start: datetime, end: datetime) -> bool:
+    """Tell whether a series' available range misses part of the requested range."""
+    return (
+        item.available_start_time is not None and item.available_start_time > start
+    ) or (item.available_end_time is not None and item.available_end_time < end)
 
 
 def _dashboard_response(
@@ -96,16 +58,9 @@ def _dashboard_response(
     metrics: list[DashboardMetric] | None = None,
 ) -> DashboardDataResponse:
     """Build the common envelope from explicit series states."""
+    status: Literal["validated", "partial", "stale", "empty", "unavailable", "invalid"]
     if not series:
-        status: Literal[
-            "validated",
-            "partial",
-            "stale",
-            "empty",
-            "unavailable",
-            "invalid",
-            "infeasible",
-        ] = (
+        status = (
             "invalid"
             if any("invalid" in diagnostic for diagnostic in diagnostics)
             else ("unavailable" if diagnostics else "empty")
@@ -115,17 +70,8 @@ def _dashboard_response(
     elif any(not item.timestamps for item in series):
         status = "empty"
     elif (
-        check_coverage
-        and any(
-            (
-                item.available_start_time is not None
-                and item.available_start_time > start
-            )
-            or (item.available_end_time is not None and item.available_end_time < end)
-            for item in series
-        )
-        or any(item.missing_intervals for item in series)
-    ):
+        check_coverage and any(_has_coverage_gap(item, start, end) for item in series)
+    ) or any(item.missing_intervals for item in series):
         status = "partial"
     else:
         status = "validated"
@@ -160,18 +106,14 @@ def _actual_status(
     if all(value is None for item in series for value in item.values):
         return "empty"
     if any(item.missing_intervals for item in series) or any(
-        (item.available_start_time is not None and item.available_start_time > start)
-        or (item.available_end_time is not None and item.available_end_time < end)
-        for item in series
+        _has_coverage_gap(item, start, end) for item in series
     ):
         return "partial"
     return "validated"
 
 
 def _actual_dashboard_data(
-    request: Request,
-    start: datetime,
-    end: datetime,
+    request: Request, start: datetime, end: datetime
 ) -> DashboardDataResponse:
     """Return every available historic actual series with per-asset availability."""
     context = historic.HistoricReadContext(
@@ -216,19 +158,16 @@ def _actual_dashboard_data(
 
 
 def _pv_dashboard_series(
-    data: PvGenerationData,
-    start: datetime,
-    end: datetime,
-    freshness: Literal["fresh", "stale", "unknown"],
+    data: PvGenerationData, start: datetime, end: datetime, freshness: Freshness
 ) -> DashboardSeries:
     """Map a persisted PV forecast to the common series shape."""
     timestamps = [
         data.start_time + timedelta(hours=index)
         for index in range(len(data.generation_kw))
     ]
-    values_by_timestamp = dict(zip(timestamps, data.generation_kw))
-    selected = align_hourly_values(values_by_timestamp, start, end)
-    available_end = data.start_time + timedelta(hours=len(data.generation_kw))
+    selected = align_hourly_values(
+        dict(zip(timestamps, data.generation_kw)), start, end
+    )
     return DashboardSeries(
         id="pv_generation_forecast",
         data_type="pv_generation",
@@ -236,11 +175,11 @@ def _pv_dashboard_series(
         timestamps=[timestamp for timestamp, _ in selected],
         values=[value for _, value in selected],
         unit=data.unit,
-        source=_dashboard_source(data),
+        source=api_source(data.source),
         requested_start_time=start,
         requested_end_time=end,
         available_start_time=data.start_time,
-        available_end_time=available_end,
+        available_end_time=data.start_time + timedelta(hours=len(data.generation_kw)),
         retrieved_at=data.retrieved_at,
         generated_at=data.generated_at,
         published_at=data.published_at,
@@ -255,7 +194,7 @@ def _price_dashboard_series(
     start: datetime,
     end: datetime,
     direction: Literal["import", "export"],
-    freshness: Literal["fresh", "stale", "unknown"],
+    freshness: Freshness,
 ) -> DashboardSeries | None:
     """Map one normalized price direction to a forecast series."""
     values = (
@@ -269,8 +208,7 @@ def _price_dashboard_series(
         raise ProviderDataStoreError(
             f"persisted {direction}-price forecast values are misaligned"
         )
-    values_by_timestamp = dict(zip(data.timestamps, values))
-    selected = align_hourly_values(values_by_timestamp, start, end)
+    selected = align_hourly_values(dict(zip(data.timestamps, values)), start, end)
     return DashboardSeries(
         id=f"{direction}_price_forecast",
         data_type=f"{direction}_price",
@@ -278,7 +216,7 @@ def _price_dashboard_series(
         timestamps=[timestamp for timestamp, _ in selected],
         values=[value for _, value in selected],
         unit=data.unit,
-        source=_dashboard_source(data),
+        source=api_source(data.source),
         requested_start_time=start,
         requested_end_time=end,
         available_start_time=data.timestamps[0],
@@ -291,19 +229,14 @@ def _price_dashboard_series(
 
 
 def _battery_efficiency_dashboard_series(
-    data: BatteryEfficiencyData,
-    start: datetime,
-    end: datetime,
-    name: str,
+    data: BatteryEfficiencyData, start: datetime, end: datetime, name: str
 ) -> DashboardSeries:
     """Map one calculated efficiency component to a scalar actual series."""
-    value = getattr(data, name)
     timestamp = (
         data.history_end - timedelta(hours=1)
         if data.history_end is not None
         else data.latest_observation_at
     )
-    in_range = value is not None
     if data.component_statuses is not None:
         component_status = data.component_statuses.get(name, "calculated")
     elif name in data.defaulted_components:
@@ -323,10 +256,10 @@ def _battery_efficiency_dashboard_series(
         id=f"{name}_actual",
         data_type="battery_efficiency",
         scenario_kind="actual",
-        timestamps=[timestamp] if in_range else [],
-        values=[value] if in_range else [],
+        timestamps=[timestamp],
+        values=[getattr(data, name)],
         unit="ratio",
-        source=_dashboard_source(data),
+        source=api_source(data.source),
         requested_start_time=start,
         requested_end_time=end,
         available_start_time=data.history_start,
@@ -334,16 +267,13 @@ def _battery_efficiency_dashboard_series(
         retrieved_at=data.retrieved_at,
         freshness="unknown",
         validation_status=validation_status,
-        missing_intervals=[] if in_range else [timestamp],
         is_default=name in data.defaulted_components,
         calculation_status=component_status,
     )
 
 
 def _efficiency_dashboard_data(
-    request: Request,
-    start: datetime,
-    end: datetime,
+    request: Request, start: datetime, end: datetime
 ) -> DashboardDataResponse:
     """Return the latest calculated efficiency components for the dashboard."""
     store = request.app.state.provider_data_store
@@ -351,13 +281,7 @@ def _efficiency_dashboard_data(
         return _dashboard_response(
             start, end, [], ["battery efficiency persistence is not configured"]
         )
-    from energy_optimizer.api.routers.context import BATTERY_EFFICIENCY_ADAPTER
-
-    key = ProviderDataKey(
-        data_type="battery-efficiency",
-        provider="home-assistant",
-        entity_id="battery_efficiency",
-    )
+    key = ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency")
     try:
         data = store.load(key, BATTERY_EFFICIENCY_ADAPTER)
     except ProviderDataStoreError:
@@ -372,10 +296,10 @@ def _efficiency_dashboard_data(
             start, end, [], ["battery efficiency data is unavailable"]
         )
     names = (
-        ("battery_efficiency", "Battery round-trip efficiency"),
-        ("inverter_charge_efficiency", "Inverter charge efficiency"),
-        ("inverter_discharge_efficiency", "Inverter discharge efficiency"),
-        ("round_trip_efficiency", "Complete round-trip efficiency"),
+        "battery_efficiency",
+        "inverter_charge_efficiency",
+        "inverter_discharge_efficiency",
+        "round_trip_efficiency",
     )
     diagnostics = list(data.warnings)
     if data.status == "invalid":
@@ -389,7 +313,7 @@ def _efficiency_dashboard_data(
         end,
         [
             _battery_efficiency_dashboard_series(data, start, end, name)
-            for name, label in names
+            for name in names
             if getattr(data, name) is not None
         ],
         diagnostics,
@@ -424,9 +348,7 @@ def _efficiency_dashboard_data(
 
 
 def _forecast_dashboard_data(
-    request: Request,
-    start: datetime,
-    end: datetime,
+    request: Request, start: datetime, end: datetime
 ) -> DashboardDataResponse:
     """Load the latest coherent persisted forecast series."""
     configuration = request.app.state.configuration
@@ -458,12 +380,8 @@ def _forecast_dashboard_data(
         if data is None:
             diagnostics.append("PV forecast data is unavailable")
         else:
-            from energy_optimizer.providers.forecast_solar import ForecastSolarImporter
-
             importer = ForecastSolarImporter(configuration.forecast_solar)
-            freshness: Literal["fresh", "stale", "unknown"] = (
-                "fresh" if importer.is_fresh(data) else "stale"
-            )
+            freshness: Freshness = "fresh" if importer.is_fresh(data) else "stale"
             series.append(_pv_dashboard_series(data, start, end, freshness))
 
     if configuration.awattar is not None:
@@ -482,16 +400,12 @@ def _forecast_dashboard_data(
         if data is None:
             diagnostics.append("electricity-price forecast data is unavailable")
         else:
-            from energy_optimizer.providers.awattar import AwattarImporter
-
             price_importer = AwattarImporter(configuration.awattar)
-            price_freshness: Literal["fresh", "stale", "unknown"] = (
-                "fresh" if price_importer.is_fresh(data) else "stale"
-            )
+            freshness = "fresh" if price_importer.is_fresh(data) else "stale"
             for direction in ("import", "export"):
                 try:
                     direction_series = _price_dashboard_series(
-                        data, start, end, direction, price_freshness
+                        data, start, end, direction, freshness
                     )
                 except ProviderDataStoreError:
                     diagnostics.append(
@@ -535,7 +449,7 @@ def dashboard_data(
     lists in `assets` why any asset contributed no series. Absent, stale, or
     corrupt assets never invalidate the series of other assets.
     """
-    start, end = _dashboard_range(start_time, end_time)
+    start, end = validated_utc_range(start_time, end_time, hour_aligned=True)
     if scenario_kind == "forecast":
         return _forecast_dashboard_data(request, start, end)
     if scenario_kind == "plan":
@@ -551,10 +465,7 @@ def dashboard_data(
     return _actual_dashboard_data(request, start, end)
 
 
-@router.get(
-    "/api/v1/dashboard/excluded-hours",
-    response_model=ExcludedHoursResponse,
-)
+@router.get("/api/v1/dashboard/excluded-hours", response_model=ExcludedHoursResponse)
 def excluded_hours(
     request: Request,
     start_time: datetime = Query(description="Inclusive timezone-aware range start"),
@@ -571,14 +482,11 @@ def excluded_hours(
     and no data points. A source that is not configured, has no persisted history
     yet, or is corrupt is reported in `sources` and never hides the other sources.
     """
-    start, end = _dashboard_range(start_time, end_time)
+    start, end = validated_utc_range(start_time, end_time, hour_aligned=True)
     return read_excluded_hours(request, start, end)
 
 
-@router.get(
-    "/api/v1/dashboard/settings",
-    response_model=DashboardSettingsResponse,
-)
+@router.get("/api/v1/dashboard/settings", response_model=DashboardSettingsResponse)
 def dashboard_settings(request: Request) -> DashboardSettingsResponse:
     """Return the configured time zone in which the dashboard shows times.
 
@@ -590,9 +498,7 @@ def dashboard_settings(request: Request) -> DashboardSettingsResponse:
 
 
 @router.get(
-    "/api/v1/forecast",
-    response_model=DashboardDataResponse,
-    include_in_schema=False,
+    "/api/v1/forecast", response_model=DashboardDataResponse, include_in_schema=False
 )
 def forecast_data(
     request: Request,
@@ -600,5 +506,5 @@ def forecast_data(
     end_time: datetime = Query(description="Exclusive timezone-aware range end"),
 ) -> DashboardDataResponse:
     """Return forecast data through the dashboard forecast read path."""
-    start, end = _dashboard_range(start_time, end_time)
+    start, end = validated_utc_range(start_time, end_time, hour_aligned=True)
     return _forecast_dashboard_data(request, start, end)

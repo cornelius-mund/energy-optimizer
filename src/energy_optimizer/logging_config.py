@@ -1,7 +1,5 @@
 """Logging configuration for the Energy Optimizer service."""
 
-from __future__ import annotations
-
 import logging
 import os
 import re
@@ -19,16 +17,9 @@ LOG_LEVELS: Final[dict[str, int]] = {
     "CRITICAL": logging.CRITICAL,
     "NOTSET": logging.NOTSET,
 }
-LOG_LEVEL_NAMES: Final[tuple[str, ...]] = tuple(LOG_LEVELS)
 _HANDLER_MARKER = "_energy_optimizer_handler"
-_LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S%z"
 _EVENT_PREFIX = re.compile(r"^event=(\S+)")
-_NORMALIZED_LOGGERS: Final[tuple[str, ...]] = (
-    "uvicorn",
-    "uvicorn.error",
-    "httpx",
-    "httpcore",
-)
+_NORMALIZED_LOGGERS: Final = ("uvicorn", "uvicorn.error", "httpx", "httpcore")
 
 
 class _SuppressHttpxRequestLog(logging.Filter):
@@ -45,7 +36,7 @@ class ConsistentFormatter(logging.Formatter):
     """Render every physical log line with the same level and timestamp."""
 
     def __init__(self) -> None:
-        super().__init__(fmt="%(message)s", datefmt=_LOG_DATE_FORMAT)
+        super().__init__(fmt="%(message)s", datefmt="%Y-%m-%dT%H:%M:%S%z")
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         """Render timestamps in UTC so container output is deterministic."""
@@ -68,20 +59,13 @@ def resolve_log_level(value: str | None = None) -> int:
     ``value`` is primarily useful for tests and callers that already read their
     environment. Runtime callers use ``ENERGY_OPTIMIZER_LOG_LEVEL`` directly.
     """
-    configured = (
-        (
-            value
-            if value is not None
-            else os.environ.get("ENERGY_OPTIMIZER_LOG_LEVEL", "INFO")
-        )
-        .strip()
-        .upper()
-    )
+    if value is None:
+        value = os.environ.get("ENERGY_OPTIMIZER_LOG_LEVEL", "INFO")
+    configured = value.strip().upper()
     if configured not in LOG_LEVELS:
-        supported = ", ".join(LOG_LEVEL_NAMES)
         raise ConfigurationError(
             "Invalid ENERGY_OPTIMIZER_LOG_LEVEL "
-            f"{configured!r}; expected one of: {supported}"
+            f"{configured!r}; expected one of: {', '.join(LOG_LEVELS)}"
         )
     return LOG_LEVELS[configured]
 
@@ -90,21 +74,16 @@ def _configure_logging(level: int) -> int:
     root = logging.getLogger()
     root.setLevel(level)
 
-    handlers = [
-        candidate
-        for candidate in root.handlers
-        if getattr(candidate, _HANDLER_MARKER, False)
-    ]
+    handlers = [h for h in root.handlers if getattr(h, _HANDLER_MARKER, False)]
     handler = handlers[0] if handlers else None
     for duplicate in handlers[1:]:
         root.removeHandler(duplicate)
         duplicate.close()
 
     external_handlers = [
-        candidate
-        for candidate in root.handlers
-        if not getattr(candidate, _HANDLER_MARKER, False)
-        and _is_external_handler(candidate)
+        h
+        for h in root.handlers
+        if not getattr(h, _HANDLER_MARKER, False) and _is_external_handler(h)
     ]
     if external_handlers:
         if handler is not None:
@@ -113,10 +92,8 @@ def _configure_logging(level: int) -> int:
         for external_handler in external_handlers:
             external_handler.setFormatter(ConsistentFormatter())
     else:
-        if (
-            handler is None
-            or not isinstance(handler, logging.StreamHandler)
-            or handler.stream is not sys.stdout
+        if not (
+            isinstance(handler, logging.StreamHandler) and handler.stream is sys.stdout
         ):
             if handler is not None:
                 root.removeHandler(handler)
@@ -156,8 +133,9 @@ def _is_external_handler(handler: logging.Handler) -> bool:
     They observe records but are not service destinations, so treating them as
     an external logging configuration would disable the normal stdout fallback.
     """
-    return not isinstance(handler, logging.NullHandler) and not (
-        handler.__class__.__module__ == "_pytest.logging"
+    return (
+        not isinstance(handler, logging.NullHandler)
+        and handler.__class__.__module__ != "_pytest.logging"
     )
 
 
