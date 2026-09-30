@@ -11,14 +11,14 @@ has a time span, and every hour that overlaps that span is excluded and keeps th
 cause with its exact data points. Excluded hours have no value.
 """
 
-from __future__ import annotations
-
 import logging
 import math
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from operator import attrgetter
 from time import perf_counter
+from typing import cast
 
 from energy_optimizer.config import (
     EnergyAggregateConfiguration,
@@ -37,10 +37,10 @@ from energy_optimizer.providers.home_assistant_history import (
     HistorySample,
     HomeAssistantError,
     HomeAssistantHistory,
+    as_import_utc,
 )
 from energy_optimizer.providers.normalization import (
     align_to_next_hour,
-    as_utc,
     validate_hourly_period,
 )
 from energy_optimizer.providers.normalization import is_fresh as check_freshness
@@ -81,11 +81,14 @@ class HomeAssistantEnergySeries:
     exclusions: tuple[HourExclusion, ...] = ()
     clamped_hour_count: int = 0
 
+    def values_from(self, start: datetime, count: int) -> tuple[float | None, ...]:
+        """Return the hourly values from ``start`` on, at most ``count`` of them."""
+        offset = int((start - self.start_time).total_seconds() // 3600)
+        return self.values_kw[offset : offset + count]
+
 
 @dataclass(frozen=True, slots=True)
 class _Observation:
-    """A valid counter observation."""
-
     timestamp: datetime
     value: float
     last_reset: datetime | None
@@ -130,11 +133,24 @@ class EnergyAggregate:
         part only: then the negative sum is a legitimate zero and is counted
         instead of excluded.
         """
-        self.start_time = _as_utc(start_time)
-        self.end_time = _as_utc(end_time)
-        _validate_period(
-            self.start_time, self.end_time, history_lookback_seconds, label
+        self.start_time = as_import_utc(start_time)
+        self.end_time = as_import_utc(end_time)
+        validate_hourly_period(
+            self.start_time,
+            self.end_time,
+            error_factory=HomeAssistantError,
+            start_message=f"{label} start_time must be aligned to the hour",
+            end_message=f"{label} end_time must be aligned to the hour",
+            order_message=f"{label} end_time must be after start_time",
+            whole_hours_message=(
+                f"{label} requested period must contain whole hourly intervals"
+            ),
+            check_end_alignment=False,
         )
+        if not math.isfinite(history_lookback_seconds) or history_lookback_seconds < 0:
+            raise HomeAssistantError(
+                "history_lookback_seconds must be finite and non-negative"
+            )
         if configuration is None:
             raise HomeAssistantError(
                 f"no Home Assistant {label} energy aggregation is configured"
@@ -152,14 +168,12 @@ class EnergyAggregate:
         )
 
     def needs(self) -> tuple[HistoryNeed, ...]:
-        """Declare the counter history of every entity for the imported range."""
         return tuple(
             HistoryNeed(entity.entity_id, "counter", self._history_start, self.end_time)
             for _, entity in self.entities
         )
 
     def build(self, history: HomeAssistantHistory) -> HomeAssistantEnergySeries:
-        """Combine all entity contributions from the shared history."""
         started_at = perf_counter()
         entity_count = len(self.entities)
         try:
@@ -201,11 +215,9 @@ class EnergyAggregate:
         end = self.end_time
         label = self.label
         series_list = [
-            (self._normalize_entity(history, entity), sign, entity)
-            for sign, entity in self.entities
+            self._normalize_entity(history, entity) for _, entity in self.entities
         ]
-
-        aggregate_start = max(series.start_time for series, _, _ in series_list)
+        aggregate_start = max(series.start_time for series in series_list)
         if aggregate_start >= end:
             raise HomeAssistantError(
                 f"Home Assistant {label} entities have no complete hourly history "
@@ -213,9 +225,8 @@ class EnergyAggregate:
             )
         value_count = int((end - aggregate_start).total_seconds() // 3600)
         components: list[_Component] = []
-        for series, sign, entity in series_list:
-            offset = int((aggregate_start - series.start_time).total_seconds() // 3600)
-            values = series.values_kw[offset : offset + value_count]
+        for (sign, entity), series in zip(self.entities, series_list):
+            values = series.values_from(aggregate_start, value_count)
             if len(values) != value_count:
                 raise HomeAssistantError(
                     f"Home Assistant {label} entities returned misaligned hourly series"
@@ -241,16 +252,16 @@ class EnergyAggregate:
             if hour_start in excluded:
                 values_out.append(None)
                 continue
-            total = sum(
-                component.sign * _required(component.values[index])
+            # Every component is valid here: an excluded hour was skipped above.
+            signed_kwh = [
+                component.sign * cast(float, component.values[index])
                 for component in components
-            )
+            ]
+            total = sum(signed_kwh)
             if not math.isfinite(total):
                 reason: ExclusionReason = "combined_not_finite"
-                described = "not finite"
             elif total < -_NEGATIVE_ROUNDING_KWH and self.part == "net":
                 reason = "combined_negative"
-                described = "negative"
             else:
                 if total < -_NEGATIVE_ROUNDING_KWH:
                     # Only reachable for the positive part, where a negative sum
@@ -264,7 +275,7 @@ class EnergyAggregate:
                     hour_start,
                     (
                         self._combined_cause(
-                            reason, described, total, hour_start, components, index
+                            reason, total, hour_start, components, signed_kwh
                         ),
                     ),
                 )
@@ -283,32 +294,27 @@ class EnergyAggregate:
     def _combined_cause(
         self,
         reason: ExclusionReason,
-        described: str,
         total: float,
         hour_start: datetime,
         components: list[_Component],
-        index: int,
+        signed_kwh: list[float],
     ) -> ExclusionCause:
         """Explain a combined hour by listing the signed energy of every entity."""
         points = [
             ExcludedDataPoint(
-                timestamp=hour_start,
-                entity_id=component.entity_id,
-                step_kwh=component.sign * _required(component.values[index]),
+                timestamp=hour_start, entity_id=component.entity_id, step_kwh=step_kwh
             )
-            for component in components
+            for component, step_kwh in zip(components, signed_kwh)
         ]
-        hint = (
-            "; set part to positive if only the positive part is wanted"
-            if reason == "combined_negative"
-            else ""
-        )
+        negative = reason == "combined_negative"
+        hint = "; set part to positive if only the positive part is wanted"
         return ExclusionCause.of(
             reason,
-            f"The combined {self.label} energy is {described} "
+            f"The combined {self.label} energy is "
+            f"{'negative' if negative else 'not finite'} "
             f"({_number(total)} kWh) in the hour starting "
             f"{hour_start.isoformat()}; check the add and subtract operations of "
-            f"the configured entities{hint}.",
+            f"the configured entities{hint if negative else ''}.",
             None,
             points,
         )
@@ -395,17 +401,19 @@ def normalize_counter_history(
     - a step above the maximum excludes the hour of its later observation;
     - an hour whose total exceeds the maximum is excluded.
     """
-    start = _as_utc(start_time)
-    end = _as_utc(end_time)
+    start = as_import_utc(start_time)
+    end = as_import_utc(end_time)
     _validate_samples(entity, samples)
     factor = _KWH_PER_UNIT[entity.unit]
     maximum_kwh = entity.maximum_interval_energy_kwh
 
-    baseline_index = _last_index_at_or_before(samples, start)
+    baseline_index = bisect_right(samples, start, key=attrgetter("timestamp")) - 1
     effective_start = start
-    if baseline_index is None:
+    if baseline_index < 0:
         effective_start = align_to_next_hour(samples[0].timestamp)
-        baseline_index = _last_index_at_or_before(samples, effective_start) or 0
+        baseline_index = max(
+            bisect_right(samples, effective_start, key=attrgetter("timestamp")) - 1, 0
+        )
         logger.info(
             "event=provider_history_truncated component=home_assistant "
             "operation=normalize entity_id=%s requested_start=%s "
@@ -555,30 +563,10 @@ def _validate_samples(
                 f"{sample.unit}, an instantaneous power unit; configure an "
                 "energy entity reported in Wh, kWh, or MWh"
             )
-    timestamps = [sample.timestamp for sample in samples]
-    if len(timestamps) != len(set(timestamps)):
+    if len({sample.timestamp for sample in samples}) != len(samples):
         raise HomeAssistantError(
             f"Home Assistant entity {entity.entity_id} contains duplicate timestamps"
         )
-
-
-def _last_index_at_or_before(
-    samples: tuple[HistorySample, ...], timestamp: datetime
-) -> int | None:
-    """Return the index of the last sample recorded at or before ``timestamp``."""
-    index = bisect_right(samples, timestamp, key=_sample_timestamp) - 1
-    return index if index >= 0 else None
-
-
-def _sample_timestamp(sample: HistorySample) -> datetime:
-    return sample.timestamp
-
-
-def _required(value: float | None) -> float:
-    """Return the value of an hour that no entity excluded."""
-    if value is None:  # pragma: no cover - guarded by the exclusion check
-        raise HomeAssistantError("an included hour has no value")
-    return value
 
 
 def _sample_reason(
@@ -587,10 +575,7 @@ def _sample_reason(
     """Return why a sample cannot be used for this entity, or ``None``."""
     if sample.invalid is not None:
         return sample.invalid
-    state_class = (
-        sample.state_class if sample.state_class is not None else entity.state_class
-    )
-    if state_class != entity.state_class:
+    if sample.state_class not in (None, entity.state_class):
         return "state_class_mismatch"
     if sample.unit is None:
         return "unit_missing"
@@ -624,47 +609,40 @@ def _step_causes(
         f"{_number(earlier.value)} {unit} at {earlier.recorded_at.isoformat()} to "
         f"{_number(later.value)} {unit} at {later.recorded_at.isoformat()}"
     )
+
+    def cause(reason: ExclusionReason, message: str) -> ExclusionCause:
+        return ExclusionCause.of(reason, message, entity_id, [point])
+
     causes: list[ExclusionCause] = []
     if later.last_reset != earlier.last_reset:
         causes.append(
-            ExclusionCause.of(
+            cause(
                 "last_reset_changed",
                 f"The last_reset marker of {entity_id} changed between "
                 f"{earlier.recorded_at.isoformat()} and "
                 f"{later.recorded_at.isoformat()}.",
-                entity_id,
-                [point],
             )
         )
     if step_kwh < 0:
         causes.append(
-            ExclusionCause.of(
-                "counter_decrease",
-                f"{entity_id} decreased from {between}.",
-                entity_id,
-                [point],
-            )
+            cause("counter_decrease", f"{entity_id} decreased from {between}.")
         )
     else:
         if after_decrease:
             causes.append(
-                ExclusionCause.of(
+                cause(
                     "step_after_decrease",
                     f"{entity_id} changed from {between}, directly after a "
                     "decrease; a reset cannot be told apart from a glitch, so the "
                     "step is not trusted.",
-                    entity_id,
-                    [point],
                 )
             )
         if step_kwh > maximum_kwh:
             causes.append(
-                ExclusionCause.of(
+                cause(
                     "step_above_maximum",
                     f"{entity_id} rose by {_number(step_kwh)} kWh from {between}, "
                     f"above the maximum of {_number(maximum_kwh)} kWh.",
-                    entity_id,
-                    [point],
                 )
             )
     return causes
@@ -684,16 +662,13 @@ def gap_causes(
     by_reason: dict[ExclusionReason, list[ExcludedDataPoint]] = {}
     for reason, point in gap:
         by_reason.setdefault(reason, []).append(point)
-    surrounding = (
-        "last valid value "
-        + (f"at {valid_before_at.isoformat()}" if valid_before_at else "none before")
-        + ", next valid value "
-        + (
-            f"at {valid_after_at.isoformat()}"
-            if valid_after_at
-            else "none in the imported period"
-        )
+    before = f"at {valid_before_at.isoformat()}" if valid_before_at else "none before"
+    after = (
+        f"at {valid_after_at.isoformat()}"
+        if valid_after_at
+        else "none in the imported period"
     )
+    surrounding = f"last valid value {before}, next valid value {after}"
     return [
         ExclusionCause.of(
             reason,
@@ -712,41 +687,9 @@ def _number(value: float) -> str:
     return f"{value:.10g}"
 
 
-def _as_utc(value: datetime) -> datetime:
-    return as_utc(
-        value,
-        error_factory=HomeAssistantError,
-        message="Home Assistant import times must include a timezone",
-    )
-
-
 def latest_completed_hour(value: datetime) -> datetime:
     """Return the UTC boundary of the latest completed hourly interval."""
     return value.replace(minute=0, second=0, microsecond=0)
-
-
-def _validate_period(
-    start_time: datetime,
-    end_time: datetime,
-    history_lookback_seconds: float,
-    label: str,
-) -> None:
-    validate_hourly_period(
-        start_time,
-        end_time,
-        error_factory=HomeAssistantError,
-        start_message=f"{label} start_time must be aligned to the hour",
-        end_message=f"{label} end_time must be aligned to the hour",
-        order_message=f"{label} end_time must be after start_time",
-        whole_hours_message=(
-            f"{label} requested period must contain whole hourly intervals"
-        ),
-        check_end_alignment=False,
-    )
-    if not math.isfinite(history_lookback_seconds) or history_lookback_seconds < 0:
-        raise HomeAssistantError(
-            "history_lookback_seconds must be finite and non-negative"
-        )
 
 
 def is_fresh(
@@ -755,7 +698,6 @@ def is_fresh(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Check whether an observation is within the configured age threshold."""
     return check_freshness(
         latest_observation_at,
         max_data_age_seconds,

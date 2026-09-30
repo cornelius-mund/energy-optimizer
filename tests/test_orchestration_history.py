@@ -6,7 +6,8 @@ imported once, and only then does each source build and persist its record.
 
 import logging
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -65,6 +66,12 @@ HISTORY_KEY = ProviderDataKey(
 )
 LOAD_ADAPTER = TypeAdapter(HouseholdLoadData)
 GRID_ADAPTER = TypeAdapter(GridFlowData)
+HISTORY_ADAPTER = TypeAdapter(BatteryEfficiencyHistoryData)
+ALL_SUCCEEDED = {
+    "household_load": "success",
+    "grid_flow": "success",
+    "battery_efficiency": "success",
+}
 
 SOC = "sensor.battery_state_of_charge"
 # Kilowatt-hours that each counter of the example configuration gains per hour.
@@ -79,12 +86,16 @@ RATES = {
     "sensor.mppt_energy": 1,
     "sensor.inverter_to_ac": 2,
 }
+# The counters that household load reads, which cover its history lookback.
+HOUSEHOLD_ENTITIES = {
+    "sensor.household_energy",
+    "sensor.ev_energy",
+    "sensor.grid_import_energy",
+}
 
 
 def energy(
-    entity_id: str,
-    state_class: str = "total_increasing",
-    **settings: Any,
+    entity_id: str, state_class: str = "total_increasing", **settings: Any
 ) -> dict[str, Any]:
     return {
         "entity_id": entity_id,
@@ -92,6 +103,11 @@ def energy(
         "unit": "kWh",
         **settings,
     }
+
+
+def counter(entity_id: str, **settings: Any) -> dict[str, Any]:
+    """Aggregate one ``total_increasing`` energy counter."""
+    return aggregate_settings(add=[energy(entity_id, **settings)])
 
 
 # The entity mapping of config.example.yaml: household load and grid import share
@@ -103,19 +119,19 @@ HOUSEHOLD = aggregate_settings(
     add=[energy("sensor.household_energy"), energy("sensor.grid_import_energy")],
     subtract=[energy("sensor.ev_energy", "total")],
 )
-GRID_IMPORT = aggregate_settings(add=[energy("sensor.grid_import_energy")])
-GRID_EXPORT = aggregate_settings(add=[energy("sensor.grid_export_energy")])
+GRID_IMPORT = counter("sensor.grid_import_energy")
+GRID_EXPORT = counter("sensor.grid_export_energy")
 
 
 def efficiency_legs(part: Literal["net", "positive"]) -> dict[str, Any]:
     """The efficiency legs of the example; ``part`` applies to the two DC legs."""
     return {
         "battery": {
-            "energy_in": aggregate_settings(add=[energy("sensor.battery_energy_in")]),
-            "energy_out": aggregate_settings(add=[energy("sensor.battery_energy_out")]),
+            "energy_in": counter("sensor.battery_energy_in"),
+            "energy_out": counter("sensor.battery_energy_out"),
         },
         "inverter_charge": {
-            "energy_in": aggregate_settings(add=[energy("sensor.ac_into_inverter")]),
+            "energy_in": counter("sensor.ac_into_inverter"),
             "energy_out": aggregate_settings(
                 add=[energy("sensor.battery_energy_in")],
                 subtract=[energy("sensor.mppt_energy")],
@@ -131,7 +147,7 @@ def efficiency_legs(part: Literal["net", "positive"]) -> dict[str, Any]:
                 subtract=[energy("sensor.battery_energy_in")],
                 part=part,
             ),
-            "energy_out": aggregate_settings(add=[energy("sensor.inverter_to_ac")]),
+            "energy_out": counter("sensor.inverter_to_ac"),
         },
     }
 
@@ -146,12 +162,12 @@ SCHEDULES = {
 }
 
 
-LOAD_AND_GRID = {name: SCHEDULES[name] for name in ("household_load", "grid_flow")}
-
-
-def hourly_states(rate: float, hours: int = 12) -> list[tuple[datetime, str]]:
+def hourly_states(
+    rate: float, hours: int = 12, first_hour: int = 0
+) -> list[tuple[datetime, str]]:
     return [
-        (BASE + timedelta(hours=hour), str(rate * hour)) for hour in range(hours + 1)
+        (BASE + hour * ONE_HOUR, str(rate * hour))
+        for hour in range(first_hour, hours + 1)
     ]
 
 
@@ -165,19 +181,23 @@ def with_samples(
 def example_home_assistant(
     replaced: Mapping[str, Sequence[tuple[datetime, str]]] | None = None,
     rates: Mapping[str, float] | None = None,
-    **overrides: Any,
+    *,
+    first_hour: int = 0,
+    last_hour: int = 12,
 ) -> FakeHomeAssistant:
-    """Serve every counter of the example.
+    """Serve every counter of the example from ``first_hour`` to ``last_hour``.
 
     ``replaced`` overrides single samples and ``rates`` the hourly gain of whole
-    counters.
+    counters. A ``first_hour`` after the first requested hour serves the history
+    as it is after a purge.
     """
     states = {
-        entity: hourly_states(rate)
+        entity: hourly_states(rate, last_hour, first_hour)
         for entity, rate in {**RATES, **(rates or {})}.items()
     }
     states[SOC] = [
-        (BASE + timedelta(hours=hour), str(40 + 10 * (hour % 5))) for hour in range(13)
+        (BASE + hour * ONE_HOUR, str(40 + 10 * (hour % 5)))
+        for hour in range(first_hour, last_hour + 1)
     ]
     for entity, samples in (replaced or {}).items():
         states[entity] = with_samples(states[entity], *samples)
@@ -185,7 +205,6 @@ def example_home_assistant(
         states,
         units={SOC: "%"},
         state_classes={SOC: "measurement", "sensor.ev_energy": "total"},
-        **overrides,
     )
 
 
@@ -227,6 +246,64 @@ def runtime_configuration(
     )
 
 
+# Options of ``runtime_configuration`` that leave out the efficiency source.
+LOAD_AND_GRID = {
+    "efficiency": None,
+    "schedules": {name: SCHEDULES[name] for name in ("household_load", "grid_flow")},
+}
+
+
+def household_only(entity_id: str) -> dict[str, Any]:
+    """Options of ``runtime_configuration`` for household load from one counter."""
+    return {
+        "household": counter(entity_id),
+        "efficiency": None,
+        "schedules": {
+            "household_load": DataSourceScheduleConfiguration(interval_seconds=3600)
+        },
+    }
+
+
+@contextmanager
+def orchestrating(
+    tmp_path: Path, home_assistant: FakeHomeAssistant, **options: Any
+) -> Iterator[ProviderOrchestrator]:
+    """Orchestrate ``runtime_configuration(tmp_path, **options)`` on Home Assistant.
+
+    Every orchestrator of a test that shares ``tmp_path`` shares its persisted data.
+    """
+    client = home_assistant.client()
+    try:
+        orchestrator = build_configured_orchestrator(
+            runtime_configuration(tmp_path, **options),
+            ProviderDataStore(tmp_path),
+            home_assistant_client=client,
+        )
+        assert orchestrator is not None
+        yield orchestrator
+    finally:
+        client.close()
+
+
+def load_persisted[T](
+    store: ProviderDataStore, key: ProviderDataKey, adapter: TypeAdapter[T]
+) -> T:
+    persisted = store.load(key, adapter)
+    assert persisted is not None
+    return persisted
+
+
+def persisted_records(
+    store: ProviderDataStore,
+) -> tuple[HouseholdLoadData, GridFlowData, BatteryEfficiencyHistoryData]:
+    """Load the persisted household load, grid flow, and efficiency history."""
+    return (
+        load_persisted(store, HOUSEHOLD_KEY, LOAD_ADAPTER),
+        load_persisted(store, GRID_KEY, GRID_ADAPTER),
+        load_persisted(store, HISTORY_KEY, HISTORY_ADAPTER),
+    )
+
+
 def chunks(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
     """Return the contiguous seven-day request chunks of one range."""
     ranges: list[tuple[datetime, datetime]] = []
@@ -246,6 +323,16 @@ def requested_ranges(
     }
 
 
+def expected_requests(
+    household: list[tuple[datetime, datetime]], others: list[tuple[datetime, datetime]]
+) -> dict[str, list[tuple[datetime, datetime]]]:
+    """Expect each of the 10 entities of the example to be requested once."""
+    return {
+        entity: household if entity in HOUSEHOLD_ENTITIES else others
+        for entity in (*RATES, SOC)
+    }
+
+
 def statuses(cycle: Any) -> dict[str, str]:
     return {run.source: run.status for run in cycle.provider_runs}
 
@@ -262,24 +349,17 @@ def test_a_pv_surplus_hour_is_zero_for_the_positive_part_and_excluded_for_net(
     cycle it sits in. The net part treats the negative value as invalid data.
     """
     home_assistant = example_home_assistant(rates={"sensor.mppt_energy": 3})
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path, efficiency=efficiency_legs(part)),
-        store,
-        home_assistant_client=client,
-    )
-    assert orchestrator is not None
 
-    try:
-        with caplog.at_level(logging.INFO):
-            cycle = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
-    finally:
-        client.close()
+    with (
+        orchestrating(
+            tmp_path, home_assistant, efficiency=efficiency_legs(part)
+        ) as orchestrator,
+        caplog.at_level(logging.INFO),
+    ):
+        cycle = orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
 
     assert statuses(cycle)["battery_efficiency"] == "success"
-    history = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
-    assert history is not None
+    history = load_persisted(orchestrator.store, HISTORY_KEY, HISTORY_ADAPTER)
     summary = [
         record.getMessage()
         for record in caplog.records
@@ -315,29 +395,17 @@ def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
     tmp_path: Path,
 ) -> None:
     home_assistant = example_home_assistant()
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path), store, home_assistant_client=client
-    )
-    assert orchestrator is not None
 
-    try:
-        bootstrap = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
+    with orchestrating(tmp_path, home_assistant) as orchestrator:
+        bootstrap = orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
         bootstrap_requests = requested_ranges(home_assistant)
         home_assistant.requests.clear()
         incremental = orchestrator.run_due(
-            BASE + 9 * ONE_HOUR + timedelta(minutes=30), force=True
+            BASE + timedelta(hours=9, minutes=30), force=True
         )
         incremental_requests = requested_ranges(home_assistant)
-    finally:
-        client.close()
 
-    assert statuses(bootstrap) == {
-        "household_load": "success",
-        "grid_flow": "success",
-        "battery_efficiency": "success",
-    }
+    assert statuses(bootstrap) == ALL_SUCCEEDED
     assert statuses(incremental) == statuses(bootstrap)
 
     # Bootstrap: ten years of history. Every one of the 10 distinct entities is
@@ -346,43 +414,20 @@ def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
     # state of charge ends at the last complete hour, like every energy entity.
     end = BASE + 6 * ONE_HOUR
     start = end - RETENTION
-    assert bootstrap_requests == {
-        "sensor.household_energy": chunks(start - ONE_HOUR, end),
-        "sensor.ev_energy": chunks(start - ONE_HOUR, end),
-        "sensor.grid_import_energy": chunks(start - ONE_HOUR, end),
-        "sensor.grid_export_energy": chunks(start, end),
-        "sensor.battery_energy_in": chunks(start, end),
-        "sensor.battery_energy_out": chunks(start, end),
-        "sensor.ac_into_inverter": chunks(start, end),
-        "sensor.mppt_energy": chunks(start, end),
-        "sensor.inverter_to_ac": chunks(start, end),
-        SOC: chunks(start, end),
-    }
+    assert bootstrap_requests == expected_requests(
+        chunks(start - ONE_HOUR, end), chunks(start, end)
+    )
 
     # Steady state: only the three new hours, one request per distinct entity.
     persisted_end = BASE + 6 * ONE_HOUR
     new_end = BASE + 9 * ONE_HOUR
-    assert incremental_requests == {
-        "sensor.household_energy": [(persisted_end - ONE_HOUR, new_end)],
-        "sensor.ev_energy": [(persisted_end - ONE_HOUR, new_end)],
-        "sensor.grid_import_energy": [(persisted_end - ONE_HOUR, new_end)],
-        "sensor.grid_export_energy": [(persisted_end, new_end)],
-        "sensor.battery_energy_in": [(persisted_end, new_end)],
-        "sensor.battery_energy_out": [(persisted_end, new_end)],
-        "sensor.ac_into_inverter": [(persisted_end, new_end)],
-        "sensor.mppt_energy": [(persisted_end, new_end)],
-        "sensor.inverter_to_ac": [(persisted_end, new_end)],
-        SOC: [(persisted_end, new_end)],
-    }
+    assert incremental_requests == expected_requests(
+        [(persisted_end - ONE_HOUR, new_end)], [(persisted_end, new_end)]
+    )
     assert sum(len(ranges) for ranges in incremental_requests.values()) == 10
 
     # The shared series feed the same results an independent fetch would give.
-    load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    grid = store.load(GRID_KEY, GRID_ADAPTER)
-    history = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
-    assert load is not None
-    assert grid is not None
-    assert history is not None
+    load, grid, history = persisted_records(orchestrator.store)
     assert load.start_time == BASE
     assert load.load_kw == pytest.approx((4.0,) * 9)
     assert grid.import_kw == pytest.approx((2.0,) * 9)
@@ -408,36 +453,16 @@ def test_identical_normalizations_within_a_cycle_are_computed_once(
         return original(entity, *arguments)
 
     monkeypatch.setattr(home_assistant_energy, "normalize_counter_history", counting)
-    home_assistant = example_home_assistant()
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path),
-        ProviderDataStore(tmp_path),
-        home_assistant_client=client,
-    )
-    assert orchestrator is not None
 
-    try:
+    with orchestrating(tmp_path, example_home_assistant()) as orchestrator:
         orchestrator.run_due(BASE + 6 * ONE_HOUR)
-    finally:
-        client.close()
 
     # The efficiency legs use battery in three times, battery out and MPPT twice
     # each, with identical settings and windows: those are normalized once. The
     # entity that household load and grid import share has two different windows:
     # twice.
     assert computed == Counter(
-        {
-            "sensor.household_energy": 1,
-            "sensor.ev_energy": 1,
-            "sensor.grid_import_energy": 2,
-            "sensor.grid_export_energy": 1,
-            "sensor.battery_energy_in": 1,
-            "sensor.battery_energy_out": 1,
-            "sensor.ac_into_inverter": 1,
-            "sensor.mppt_energy": 1,
-            "sensor.inverter_to_ac": 1,
-        }
+        {entity: 1 for entity in RATES} | {"sensor.grid_import_energy": 2}
     )
 
 
@@ -453,31 +478,19 @@ def test_a_shared_entity_is_fetched_once_and_normalized_with_each_aggregates_lim
     home_assistant = FakeHomeAssistant(
         {shared: jump, "sensor.grid_export_energy": hourly_states(1, 4)}
     )
-    configuration = runtime_configuration(
+
+    with orchestrating(
         tmp_path,
-        household=aggregate_settings(
-            add=[energy(shared, maximum_interval_energy_kwh=10)]
-        ),
-        grid_import=aggregate_settings(
-            add=[energy(shared, maximum_interval_energy_kwh=500)]
-        ),
+        home_assistant,
+        household=counter(shared, maximum_interval_energy_kwh=10),
+        grid_import=counter(shared, maximum_interval_energy_kwh=500),
         efficiency=None,
         schedules={
             "household_load": SCHEDULES["grid_flow"],
             "grid_flow": SCHEDULES["grid_flow"],
         },
-    )
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        configuration, store, home_assistant_client=client
-    )
-    assert orchestrator is not None
-
-    try:
+    ) as orchestrator:
         cycle = orchestrator.run_due(BASE + 4 * ONE_HOUR)
-    finally:
-        client.close()
 
     # One request sequence serves both aggregates.
     end = BASE + 4 * ONE_HOUR
@@ -485,10 +498,8 @@ def test_a_shared_entity_is_fetched_once_and_normalized_with_each_aggregates_lim
     # The household limit of 10 kWh excludes the hour of the jump; the grid limit
     # of 500 kWh accepts it.
     assert statuses(cycle) == {"household_load": "success", "grid_flow": "success"}
-    load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    grid = store.load(GRID_KEY, GRID_ADAPTER)
-    assert load is not None
-    assert grid is not None
+    load = load_persisted(orchestrator.store, HOUSEHOLD_KEY, LOAD_ADAPTER)
+    grid = load_persisted(orchestrator.store, GRID_KEY, GRID_ADAPTER)
     assert load.load_kw == (1.0, 1.0, None, 1.0)
     (excluded,) = load.exclusions
     assert excluded.hour_start == BASE + 2 * ONE_HOUR
@@ -502,20 +513,6 @@ def test_a_shared_entity_is_fetched_once_and_normalized_with_each_aggregates_lim
     assert (point.step_kwh, point.maximum_kwh) == (150.0, 10.0)
     assert grid.import_kw == (1.0, 1.0, 150.0, 1.0)
     assert grid.exclusions == ()
-
-
-HOUSEHOLD_ONLY = {
-    "household_load": DataSourceScheduleConfiguration(interval_seconds=3600)
-}
-
-
-def household_configuration(tmp_path: Path, entity_id: str) -> Configuration:
-    return runtime_configuration(
-        tmp_path,
-        household=aggregate_settings(add=[energy(entity_id)]),
-        efficiency=None,
-        schedules=HOUSEHOLD_ONLY,
-    )
 
 
 @pytest.mark.parametrize(
@@ -540,30 +537,23 @@ def test_a_permanently_bad_sample_never_blocks_a_later_refresh(
     Home Assistant kept the sample.
     """
     entity = "sensor.household_energy"
-    bad_at = BASE + 3 * ONE_HOUR + timedelta(minutes=30)
+    bad_at = BASE + timedelta(hours=3, minutes=30)
     home_assistant = FakeHomeAssistant(
         {entity: with_samples(hourly_states(3), (bad_at, state))}
     )
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        household_configuration(tmp_path, entity), store, home_assistant_client=client
-    )
-    assert orchestrator is not None
 
-    try:
-        first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
-        after_first = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    with orchestrating(
+        tmp_path, home_assistant, **household_only(entity)
+    ) as orchestrator:
+        first = orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
+        after_first = load_persisted(orchestrator.store, HOUSEHOLD_KEY, LOAD_ADAPTER)
         home_assistant.requests.clear()
-        second = orchestrator.run_due(BASE + 9 * ONE_HOUR + timedelta(minutes=30))
-        after_second = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    finally:
-        client.close()
+        second = orchestrator.run_due(BASE + timedelta(hours=9, minutes=30))
+        after_second = load_persisted(orchestrator.store, HOUSEHOLD_KEY, LOAD_ADAPTER)
 
     # Hour 3 covers (03:00, 04:00], which holds the bad sample. Every other hour
     # of the first import is valid, and 3 kWh per hour is 3 kW.
     assert statuses(first) == {"household_load": "success"}
-    assert after_first is not None
     assert after_first.start_time == BASE
     assert after_first.load_kw == (3.0, 3.0, 3.0, None, 3.0, 3.0)
     (excluded,) = after_first.exclusions
@@ -580,7 +570,6 @@ def test_a_permanently_bad_sample_never_blocks_a_later_refresh(
     assert home_assistant.requested_ranges(entity) == [
         (BASE + 6 * ONE_HOUR, BASE + 9 * ONE_HOUR)
     ]
-    assert after_second is not None
     assert len(after_second.load_kw) == 9 > len(after_first.load_kw)
     assert after_second.load_kw == (3.0, 3.0, 3.0, None) + (3.0,) * 5
     assert after_second.exclusions == after_first.exclusions
@@ -601,31 +590,23 @@ def test_an_entity_that_stays_unavailable_excludes_hours_across_refreshes(
                     for timestamp, state in hourly_states(3)
                     if not BASE + 5 * ONE_HOUR < timestamp < BASE + 8 * ONE_HOUR
                 ],
-                (BASE + 5 * ONE_HOUR + timedelta(minutes=30), "unavailable"),
+                (BASE + timedelta(hours=5, minutes=30), "unavailable"),
             )
         }
     )
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        household_configuration(tmp_path, entity), store, home_assistant_client=client
-    )
-    assert orchestrator is not None
 
-    try:
-        first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
-        after_first = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-        second = orchestrator.run_due(BASE + 9 * ONE_HOUR + timedelta(minutes=30))
-        after_second = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    finally:
-        client.close()
+    with orchestrating(
+        tmp_path, home_assistant, **household_only(entity)
+    ) as orchestrator:
+        first = orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
+        after_first = load_persisted(orchestrator.store, HOUSEHOLD_KEY, LOAD_ADAPTER)
+        second = orchestrator.run_due(BASE + timedelta(hours=9, minutes=30))
+        after_second = load_persisted(orchestrator.store, HOUSEHOLD_KEY, LOAD_ADAPTER)
 
     assert statuses(first) == statuses(second) == {"household_load": "success"}
     # The outage covers hours 5 and 6 and ends with the return in hour 7, whose
     # step is unknown, so all three have no value. Hour 8 is the first valid one.
-    assert after_first is not None
     assert after_first.load_kw == (3.0, 3.0, 3.0, 3.0, 3.0, None)
-    assert after_second is not None
     assert after_second.load_kw == (3.0,) * 5 + (None,) * 3 + (3.0,)
     assert [item.hour_start for item in after_second.exclusions] == [
         BASE + hour * ONE_HOUR for hour in (5, 6, 7)
@@ -646,21 +627,15 @@ def test_each_source_logs_its_excluded_hours_once_per_refresh(
         replaced={
             # Household load and grid flow both read the grid import counter.
             "sensor.grid_import_energy": [
-                (BASE + 2 * ONE_HOUR + timedelta(minutes=30), "unavailable"),
+                (BASE + timedelta(hours=2, minutes=30), "unavailable"),
                 (BASE + 3 * ONE_HOUR, "unavailable"),
             ],
             # Only the efficiency source reads the battery counters.
             "sensor.battery_energy_in": [
-                (BASE + 4 * ONE_HOUR + timedelta(minutes=30), "nan")
+                (BASE + timedelta(hours=4, minutes=30), "nan")
             ],
         }
     )
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path), store, home_assistant_client=client
-    )
-    assert orchestrator is not None
 
     def summaries() -> list[str]:
         return [
@@ -669,24 +644,17 @@ def test_each_source_logs_its_excluded_hours_once_per_refresh(
             if "provider_hours_excluded" in record.getMessage()
         ]
 
-    try:
-        with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
-            first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
-            first_summaries = summaries()
-            caplog.clear()
-            second = orchestrator.run_due(
-                BASE + 9 * ONE_HOUR + timedelta(minutes=30), force=True
-            )
-            second_summaries = summaries()
-    finally:
-        client.close()
+    with (
+        orchestrating(tmp_path, home_assistant) as orchestrator,
+        caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"),
+    ):
+        first = orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
+        first_summaries = summaries()
+        caplog.clear()
+        second = orchestrator.run_due(BASE + timedelta(hours=9, minutes=30), force=True)
+        second_summaries = summaries()
 
-    success = {
-        "household_load": "success",
-        "grid_flow": "success",
-        "battery_efficiency": "success",
-    }
-    assert statuses(first) == statuses(second) == success
+    assert statuses(first) == statuses(second) == ALL_SUCCEEDED
     # One warning per source, with the counts of the hours it just imported.
     prefix = "event=provider_hours_excluded component=orchestration operation=refresh"
     assert first_summaries == [
@@ -701,12 +669,7 @@ def test_each_source_logs_its_excluded_hours_once_per_refresh(
     # The persisted excluded hours are not reported again by a clean refresh.
     assert second_summaries == []
 
-    load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    grid = store.load(GRID_KEY, GRID_ADAPTER)
-    history = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
-    assert load is not None
-    assert grid is not None
-    assert history is not None
+    load, grid, history = persisted_records(orchestrator.store)
     assert load.load_kw == (4.0, 4.0, None, None) + (4.0,) * 5
     # Grid flow excludes an hour for both channels, though only the import
     # counter was bad.
@@ -723,6 +686,16 @@ def test_each_source_logs_its_excluded_hours_once_per_refresh(
     ):
         assert len(values) == 9
         assert [index for index, value in enumerate(values) if value is None] == [4]
+
+
+class FakeImporter:
+    """Stand-in for a provider importer whose data is always fresh."""
+
+    def __init__(self, _: object) -> None:
+        pass
+
+    def is_fresh(self, *_: object, **__: object) -> bool:
+        return True
 
 
 class RecordingHistoryImporter(HomeAssistantHistoryImporter):
@@ -754,25 +727,32 @@ def load_data(now: datetime, source: str) -> HouseholdLoadData:
     )
 
 
-def registration(
-    name: str,
-    plan: Any,
-) -> ProviderRegistration:
-    return ProviderRegistration(
-        name=name,
-        data_type=name.replace("_", "-"),
-        adapter=LOAD_ADAPTER,
-        plan=plan,
-        is_fresh=lambda data, now: True,
-    )
-
-
-def schedules(*names: str) -> OrchestrationConfiguration:
-    return OrchestrationConfiguration(
-        enabled=True,
-        sources={
-            name: DataSourceScheduleConfiguration(interval_seconds=60) for name in names
-        },
+def plan_orchestrator(
+    tmp_path: Path,
+    plans: Mapping[str, Any],
+    history_importer: HomeAssistantHistoryImporter | None = None,
+) -> ProviderOrchestrator:
+    """Orchestrate one source per named plan, each due at every cycle."""
+    return ProviderOrchestrator(
+        OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                name: DataSourceScheduleConfiguration(interval_seconds=60)
+                for name in plans
+            },
+        ),
+        [
+            ProviderRegistration(
+                name=name,
+                data_type=name.replace("_", "-"),
+                adapter=LOAD_ADAPTER,
+                plan=plan,
+                is_fresh=lambda data, now: True,
+            )
+            for name, plan in plans.items()
+        ],
+        ProviderDataStore(tmp_path),
+        history_importer=history_importer,
     )
 
 
@@ -810,67 +790,25 @@ def self_contained_plan(name: str, events: list[str]) -> Any:
     return plan
 
 
-def purged_home_assistant(first_hour: int, last_hour: int) -> FakeHomeAssistant:
-    """Serve the example counters only from ``first_hour``, as after a purge."""
-    hours = range(first_hour, last_hour + 1)
-    states = {
-        entity: [(BASE + hour * ONE_HOUR, str(rate * hour)) for hour in hours]
-        for entity, rate in RATES.items()
-    }
-    states[SOC] = [
-        (BASE + hour * ONE_HOUR, str(40 + 10 * (hour % 5))) for hour in hours
-    ]
-    return FakeHomeAssistant(
-        states,
-        units={SOC: "%"},
-        state_classes={SOC: "measurement", "sensor.ev_energy": "total"},
-    )
-
-
 def test_hours_home_assistant_no_longer_holds_are_excluded_and_never_block_refreshes(
     tmp_path: Path, caplog: LogCaptureFixture
 ) -> None:
     """Hours purged from the recorder while the service was down cannot be
     fetched by any retry, so they become excluded hours and the refresh moves on.
     """
-    store = ProviderDataStore(tmp_path)
-    first_client = example_home_assistant().client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path), store, home_assistant_client=first_client
-    )
-    assert orchestrator is not None
-    try:
-        first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
-    finally:
-        first_client.close()
+    with orchestrating(tmp_path, example_home_assistant()) as orchestrator:
+        first = orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
     # Home Assistant now retains hour 9 onward only; hours 6 to 8 are gone.
-    purged = purged_home_assistant(first_hour=9, last_hour=12)
-    client = purged.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path), store, home_assistant_client=client
-    )
-    assert orchestrator is not None
+    with (
+        orchestrating(tmp_path, example_home_assistant(first_hour=9)) as orchestrator,
+        caplog.at_level(logging.WARNING),
+    ):
+        second = orchestrator.run_due(
+            BASE + timedelta(hours=12, minutes=30), force=True
+        )
 
-    try:
-        with caplog.at_level(logging.WARNING):
-            second = orchestrator.run_due(
-                BASE + 12 * ONE_HOUR + timedelta(minutes=30), force=True
-            )
-    finally:
-        client.close()
-
-    success = {
-        "household_load": "success",
-        "grid_flow": "success",
-        "battery_efficiency": "success",
-    }
-    assert statuses(first) == statuses(second) == success
-    load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    grid = store.load(GRID_KEY, GRID_ADAPTER)
-    efficiency = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
-    assert load is not None
-    assert grid is not None
-    assert efficiency is not None
+    assert statuses(first) == statuses(second) == ALL_SUCCEEDED
+    load, grid, efficiency = persisted_records(orchestrator.store)
     missing = (None,) * 3
     assert load.start_time == grid.start_time == efficiency.start_time == BASE
     assert load.load_kw[6:9] == missing
@@ -913,19 +851,10 @@ def test_hours_home_assistant_no_longer_holds_are_excluded_and_never_block_refre
 
     # The next refresh continues after the new end instead of asking again for
     # the hours Home Assistant does not hold.
-    later = purged_home_assistant(first_hour=9, last_hour=14)
-    later_client = later.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path), store, home_assistant_client=later_client
-    )
-    assert orchestrator is not None
-    try:
-        third = orchestrator.run_due(
-            BASE + 14 * ONE_HOUR + timedelta(minutes=30), force=True
-        )
-    finally:
-        later_client.close()
-    assert statuses(third) == success
+    later = example_home_assistant(first_hour=9, last_hour=14)
+    with orchestrating(tmp_path, later) as orchestrator:
+        third = orchestrator.run_due(BASE + timedelta(hours=14, minutes=30), force=True)
+    assert statuses(third) == ALL_SUCCEEDED
     requested = requested_ranges(later)
     persisted_end = BASE + 12 * ONE_HOUR
     assert requested["sensor.grid_export_energy"] == [
@@ -935,8 +864,7 @@ def test_hours_home_assistant_no_longer_holds_are_excluded_and_never_block_refre
         (persisted_end - ONE_HOUR, BASE + 14 * ONE_HOUR)
     ]
     assert requested[SOC] == [(persisted_end, BASE + 14 * ONE_HOUR)]
-    final = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
-    assert final is not None
+    final = load_persisted(orchestrator.store, HOUSEHOLD_KEY, LOAD_ADAPTER)
     assert final.load_kw[6:9] == missing
     assert final.load_kw[:6] + final.load_kw[9:] == pytest.approx((4.0,) * 11)
     assert len(final.exclusions) == 3
@@ -952,16 +880,14 @@ def test_every_plan_precedes_the_import_and_the_import_precedes_every_build(
             "sensor.b": hourly_states(1),
         }
     )
-    importer = RecordingHistoryImporter(home_assistant, events)
-    orchestrator = ProviderOrchestrator(
-        schedules("first", "second", "third"),
-        [
-            registration("first", counter_plan("first", "sensor.a", events)),
-            registration("second", counter_plan("second", "sensor.b", events)),
-            registration("third", self_contained_plan("third", events)),
-        ],
-        ProviderDataStore(tmp_path),
-        history_importer=importer,
+    orchestrator = plan_orchestrator(
+        tmp_path,
+        {
+            "first": counter_plan("first", "sensor.a", events),
+            "second": counter_plan("second", "sensor.b", events),
+            "third": self_contained_plan("third", events),
+        },
+        RecordingHistoryImporter(home_assistant, events),
     )
 
     cycle = orchestrator.run_due(BASE + 4 * ONE_HOUR)
@@ -989,22 +915,13 @@ def test_a_source_that_is_not_due_or_has_nothing_missing_causes_no_request(
     tmp_path: Path,
 ) -> None:
     home_assistant = example_home_assistant()
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path),
-        ProviderDataStore(tmp_path),
-        home_assistant_client=client,
-    )
-    assert orchestrator is not None
-    now = BASE + 6 * ONE_HOUR + timedelta(minutes=30)
+    now = BASE + timedelta(hours=6, minutes=30)
 
-    try:
+    with orchestrating(tmp_path, home_assistant) as orchestrator:
         orchestrator.run_due(now)
         home_assistant.requests.clear()
         not_due = orchestrator.run_due(now + timedelta(minutes=10))
         nothing_missing = orchestrator.run_due(now + timedelta(minutes=20), force=True)
-    finally:
-        client.close()
 
     assert {run.error for run in not_due.provider_runs} == {"source is not due"}
     # Household load and grid flow have every completed hour. The efficiency
@@ -1022,10 +939,7 @@ def test_a_source_that_is_not_due_or_has_nothing_missing_causes_no_request(
 def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeForecastSolarImporter:
-        def __init__(self, _: ForecastSolarConfiguration) -> None:
-            pass
-
+    class FakeForecastSolarImporter(FakeImporter):
         def fetch(
             self, start_time: datetime, *, now: datetime | None = None
         ) -> PvGenerationData:
@@ -1043,13 +957,7 @@ def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_re
                 expires_at=start_time + timedelta(hours=24),
             )
 
-        def is_fresh(self, _: PvGenerationData, now: datetime) -> bool:
-            return True
-
-    class FakeAwattarImporter:
-        def __init__(self, _: AwattarConfiguration) -> None:
-            pass
-
+    class FakeAwattarImporter(FakeImporter):
         def fetch(
             self, start_time: datetime, *, now: datetime | None = None
         ) -> ElectricityPriceData:
@@ -1065,9 +973,6 @@ def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_re
                 retrieved_at=now,
                 expires_at=start_time + timedelta(hours=1),
             )
-
-        def is_fresh(self, _: ElectricityPriceData, now: datetime) -> bool:
-            return True
 
     monkeypatch.setattr(
         "energy_optimizer.orchestration.ForecastSolarImporter",
@@ -1101,16 +1006,13 @@ def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_re
             "awattar": AwattarConfiguration(),
         }
     )
-    client = httpx.Client(transport=httpx.MockTransport(refuse))
-    orchestrator = build_configured_orchestrator(
-        configuration, ProviderDataStore(tmp_path), home_assistant_client=client
-    )
-    assert orchestrator is not None
 
-    try:
+    with httpx.Client(transport=httpx.MockTransport(refuse)) as client:
+        orchestrator = build_configured_orchestrator(
+            configuration, ProviderDataStore(tmp_path), home_assistant_client=client
+        )
+        assert orchestrator is not None
         cycle = orchestrator.run_due(BASE + 2 * ONE_HOUR)
-    finally:
-        client.close()
 
     assert statuses(cycle) == {
         "pv_generation": "success",
@@ -1120,24 +1022,12 @@ def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_re
 
 def test_a_failing_entity_fails_only_the_sources_that_need_it(tmp_path: Path) -> None:
     home_assistant = example_home_assistant()
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path, efficiency=None, schedules=LOAD_AND_GRID),
-        store,
-        home_assistant_client=client,
-    )
-    assert orchestrator is not None
 
-    try:
-        orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
-        last_valid_load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    with orchestrating(tmp_path, home_assistant, **LOAD_AND_GRID) as orchestrator:
+        orchestrator.run_due(BASE + timedelta(hours=6, minutes=30))
+        last_valid_load = orchestrator.store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
         home_assistant.failures["sensor.ev_energy"] = 503
-        cycle = orchestrator.run_due(
-            BASE + 9 * ONE_HOUR + timedelta(minutes=30), force=True
-        )
-    finally:
-        client.close()
+        cycle = orchestrator.run_due(BASE + timedelta(hours=9, minutes=30), force=True)
 
     # Only household load reads sensor.ev_energy, and the error names it.
     assert statuses(cycle) == {"household_load": "failed", "grid_flow": "success"}
@@ -1148,9 +1038,8 @@ def test_a_failing_entity_fails_only_the_sources_that_need_it(tmp_path: Path) ->
     assert "sensor.ev_energy" in error
     assert "HTTP 503" in error
     # The failed source keeps its last valid data; the other source advanced.
-    assert store.load(HOUSEHOLD_KEY, LOAD_ADAPTER) == last_valid_load
-    grid = store.load(GRID_KEY, GRID_ADAPTER)
-    assert grid is not None
+    assert orchestrator.store.load(HOUSEHOLD_KEY, LOAD_ADAPTER) == last_valid_load
+    grid = load_persisted(orchestrator.store, GRID_KEY, GRID_ADAPTER)
     assert len(grid.import_kw) == 9
 
 
@@ -1158,25 +1047,15 @@ def test_an_entity_shared_with_a_failing_source_still_reaches_the_other_source(
     tmp_path: Path,
 ) -> None:
     home_assistant = example_home_assistant()
-    store = ProviderDataStore(tmp_path)
-    client = home_assistant.client()
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration(tmp_path, efficiency=None, schedules=LOAD_AND_GRID),
-        store,
-        home_assistant_client=client,
-    )
-    assert orchestrator is not None
 
-    try:
+    with orchestrating(tmp_path, home_assistant, **LOAD_AND_GRID) as orchestrator:
         # sensor.grid_import_energy is read by household load and by grid flow.
         home_assistant.failures["sensor.grid_import_energy"] = 503
         cycle = orchestrator.run_due(BASE + 6 * ONE_HOUR)
-    finally:
-        client.close()
 
     assert statuses(cycle) == {"household_load": "failed", "grid_flow": "failed"}
-    assert store.load(HOUSEHOLD_KEY, LOAD_ADAPTER) is None
-    assert store.load(GRID_KEY, GRID_ADAPTER) is None
+    assert orchestrator.store.load(HOUSEHOLD_KEY, LOAD_ADAPTER) is None
+    assert orchestrator.store.load(GRID_KEY, GRID_ADAPTER) is None
 
 
 def test_an_exception_while_planning_one_source_fails_only_that_source(
@@ -1187,15 +1066,13 @@ def test_an_exception_while_planning_one_source_fails_only_that_source(
 
     home_assistant = FakeHomeAssistant({"sensor.a": hourly_states(1)})
     events: list[str] = []
-    store = ProviderDataStore(tmp_path)
-    orchestrator = ProviderOrchestrator(
-        schedules("broken", "healthy"),
-        [
-            registration("broken", failing_plan),
-            registration("healthy", counter_plan("healthy", "sensor.a", events)),
-        ],
-        store,
-        history_importer=RecordingHistoryImporter(home_assistant, events),
+    orchestrator = plan_orchestrator(
+        tmp_path,
+        {
+            "broken": failing_plan,
+            "healthy": counter_plan("healthy", "sensor.a", events),
+        },
+        RecordingHistoryImporter(home_assistant, events),
     )
 
     cycle = orchestrator.run_due(BASE + 4 * ONE_HOUR)
@@ -1210,6 +1087,7 @@ def test_an_exception_while_planning_one_source_fails_only_that_source(
         "import finished",
         "build healthy",
     ]
+    store = orchestrator.store
     assert store.load(ProviderDataKey("broken", "test", "broken"), LOAD_ADAPTER) is None
     assert store.load(ProviderDataKey("healthy", "test", "healthy"), LOAD_ADAPTER)
 
@@ -1224,21 +1102,16 @@ def test_planning_one_entity_with_two_kinds_fails_every_source_that_needs_histor
         )
 
     home_assistant = FakeHomeAssistant({"sensor.a": hourly_states(1)})
-    events: list[str] = []
-    orchestrator = ProviderOrchestrator(
-        schedules("counter_source", "state_source", "independent"),
-        [
-            registration("counter_source", counter_plan("counter_source", "sensor.a")),
-            registration("state_source", state_plan),
-            registration(
-                "independent",
-                lambda now, schedule: plan_without_needs(
-                    lambda: load_data(now, "independent")
-                ),
+    orchestrator = plan_orchestrator(
+        tmp_path,
+        {
+            "counter_source": counter_plan("counter_source", "sensor.a"),
+            "state_source": state_plan,
+            "independent": lambda now, schedule: plan_without_needs(
+                lambda: load_data(now, "independent")
             ),
-        ],
-        ProviderDataStore(tmp_path),
-        history_importer=RecordingHistoryImporter(home_assistant, events),
+        },
+        RecordingHistoryImporter(home_assistant, []),
     )
 
     cycle = orchestrator.run_due(BASE + 4 * ONE_HOUR)
@@ -1259,10 +1132,8 @@ def test_planning_one_entity_with_two_kinds_fails_every_source_that_needs_histor
 def test_history_needs_without_a_history_importer_fail_the_source(
     tmp_path: Path,
 ) -> None:
-    orchestrator = ProviderOrchestrator(
-        schedules("needy"),
-        [registration("needy", counter_plan("needy", "sensor.a"))],
-        ProviderDataStore(tmp_path),
+    orchestrator = plan_orchestrator(
+        tmp_path, {"needy": counter_plan("needy", "sensor.a")}
     )
 
     cycle = orchestrator.run_due(BASE + 4 * ONE_HOUR)

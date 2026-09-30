@@ -1,7 +1,5 @@
 """Shared persistence mapping for provider-backed API submissions."""
 
-from __future__ import annotations
-
 from typing import Any
 
 from fastapi import HTTPException
@@ -26,13 +24,12 @@ def persist_provider_data(
     if store is None:
         raise RuntimeError("save_provider_data requires a configured store")
     try:
-        persisted = store.save(key, adapter, data)
+        return store.save(key, adapter, data)
     except ProviderDataStoreError as error:
         raise HTTPException(
             status_code=503,
             detail=f"could not persist {data_label} provider data: {error}",
         ) from error
-    return persisted
 
 
 def load_provider_data(
@@ -45,8 +42,7 @@ def load_provider_data(
     """Load one provider model or return a consistent API error."""
     if store is None:
         raise HTTPException(
-            status_code=503,
-            detail="provider data persistence is not configured",
+            status_code=503, detail="provider data persistence is not configured"
         )
     try:
         provider_data = store.load(key, adapter)

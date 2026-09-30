@@ -1,43 +1,62 @@
 """Tests for runtime configuration loading."""
 
+import textwrap
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from energy_optimizer.config import (
     BatteryConstantConfiguration,
+    Configuration,
     ConfigurationError,
     HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
+    HomeAssistantEnergyEntityConfiguration,
     load_configuration,
 )
 from home_assistant_fixtures import aggregate_settings
 
-CONFIG_MARKER = """  household_load:
-    terms:
-      - operation: add
-        entities:
-          - entity_id: sensor.household_load
-            state_class: total_increasing
-            unit: kWh
-"""
 
-GRID_FLOW_CONFIGURATION = (
-    "  grid_import:\n"
-    "    terms:\n"
-    "      - operation: add\n"
-    "        entities:\n"
-    "          - entity_id: sensor.grid_import\n"
-    "            state_class: total_increasing\n"
-    "            unit: kWh\n"
-    "  grid_export:\n"
-    "    terms:\n"
-    "      - operation: add\n"
-    "        entities:\n"
-    "          - entity_id: sensor.grid_export\n"
-    "            state_class: total_increasing\n"
-    "            unit: kWh\n"
-)
+def dump(**sections: object) -> str:
+    return yaml.safe_dump(sections, sort_keys=False)
+
+
+def home_assistant_sections(**sections: object) -> str:
+    return textwrap.indent(dump(**sections), "  ")
+
+
+def energy_entity(
+    entity_id: str, state_class: str = "total_increasing", **extra: object
+) -> dict[str, object]:
+    return {"entity_id": entity_id, "state_class": state_class, "unit": "kWh", **extra}
+
+
+def aggregate(*terms: tuple[str, list[dict[str, object]]]) -> dict[str, object]:
+    """Build an energy aggregation from ``(operation, entities)`` terms."""
+    return {
+        "terms": [
+            {"operation": operation, "entities": entities}
+            for operation, entities in terms
+        ]
+    }
+
+
+def adding(*entities: dict[str, object]) -> dict[str, object]:
+    return aggregate(("add", list(entities)))
+
+
+def added(*entity_ids: str) -> dict[str, object]:
+    return adding(*(energy_entity(entity_id) for entity_id in entity_ids))
+
+
+def sensor(entity_id: str, unit: str, **fields: str) -> dict[str, str]:
+    return {"entity_id": entity_id, **fields, "unit": unit}
+
+
+HOUSEHOLD_LOAD = home_assistant_sections(household_load=added("sensor.household_load"))
 
 VALID_CONFIGURATION = f"""
 time_resolution_minutes: 60
@@ -50,17 +69,106 @@ solver:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: test-token
-{CONFIG_MARKER}
+{HOUSEHOLD_LOAD}
   timeout_seconds: 10
   max_data_age_seconds: 7200
 """
+WITHOUT_HOME_ASSISTANT = VALID_CONFIGURATION.split("home_assistant:", 1)[0]
+PERSISTENCE = "persistence:\n  directory: provider-data\n"
+
+GRID_FLOW = {
+    "grid_import": added("sensor.grid_import"),
+    "grid_export": added("sensor.grid_export"),
+}
+FORECAST_SOLAR = {
+    "latitude": 52.52,
+    "longitude": 13.41,
+    "declination_degrees": 35,
+    "azimuth_degrees": 0,
+    "peak_power_kw": 8,
+}
+BATTERY_SOC = sensor("sensor.battery_soc", "%")
+CANONICAL_BATTERY = {
+    "state_of_charge": BATTERY_SOC,
+    "capacity": 28.7,
+    "minimum_soc": 5,
+    "maximum_soc": 100,
+    "maximum_charge": 12,
+    "maximum_discharge": 12,
+    "battery_efficiency": 0.85,
+}
+SEPARATE_BATTERY_SENSORS = {
+    "minimum_soc": sensor("sensor.battery_minimum_soc", "kWh"),
+    "maximum_soc": sensor("sensor.battery_maximum_soc", "kWh"),
+    "maximum_charge": sensor("sensor.battery_maximum_charge", "kW"),
+    "maximum_discharge": sensor("sensor.battery_maximum_discharge", "kW"),
+    "battery_efficiency": sensor("sensor.battery_efficiency", "ratio"),
+}
+
+
+def document_with(**sections: object) -> str:
+    """Return the valid document with ``sections`` replacing its household load."""
+    return VALID_CONFIGURATION.replace(
+        HOUSEHOLD_LOAD, home_assistant_sections(**sections)
+    )
+
+
+def household_document(**entity_fields: Any) -> str:
+    """Return a document whose household load adds one entity with these fields."""
+    entity = energy_entity("sensor.household_energy", **entity_fields)
+    return document_with(household_load=adding(entity))
+
+
+def load(tmp_path: Path, document: str) -> Configuration:
+    path = tmp_path / "config.yaml"
+    path.write_text(document, encoding="utf-8")
+    return load_configuration(path)
+
+
+def load_home_assistant(tmp_path: Path, document: str) -> HomeAssistantConfiguration:
+    home_assistant = load(tmp_path, document).home_assistant
+    assert home_assistant is not None
+    return home_assistant
+
+
+def load_household_entity(
+    tmp_path: Path, document: str
+) -> HomeAssistantEnergyEntityConfiguration:
+    household_load = load_home_assistant(tmp_path, document).household_load
+    assert household_load is not None
+    return household_load.terms[0].entities[0]
+
+
+def validate_home_assistant(**sections: Any) -> HomeAssistantConfiguration:
+    return HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "test-token",
+            "timeout_seconds": 5,
+            **sections,
+        }
+    )
+
+
+def battery_with_calculation(
+    calculation: dict[str, Any], **fields: Any
+) -> dict[str, Any]:
+    """Build battery settings whose efficiency is calculated from energy legs."""
+    soc = sensor("sensor.soc", "%")
+    return {
+        "state_of_charge": soc,
+        "capacity": 10,
+        "minimum_soc": 1,
+        "maximum_soc": 10,
+        "maximum_charge": 4,
+        "maximum_discharge": 4,
+        **fields,
+        "efficiency_calculation": {"state_of_charge": soc, **calculation},
+    }
 
 
 def test_load_configuration_returns_typed_values(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(VALID_CONFIGURATION, encoding="utf-8")
-
-    configuration = load_configuration(path)
+    configuration = load(tmp_path, VALID_CONFIGURATION)
 
     assert configuration.time_resolution_minutes == 60
     assert configuration.grid.maximum_export_kw == 5
@@ -72,10 +180,7 @@ def test_load_configuration_returns_typed_values(tmp_path: Path) -> None:
 
 
 def test_load_configuration_defaults_the_timezone_to_utc(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(VALID_CONFIGURATION, encoding="utf-8")
-
-    assert load_configuration(path).timezone == "UTC"
+    assert load(tmp_path, VALID_CONFIGURATION).timezone == "UTC"
 
 
 @pytest.mark.parametrize(
@@ -85,10 +190,9 @@ def test_load_configuration_defaults_the_timezone_to_utc(tmp_path: Path) -> None
 def test_load_configuration_returns_a_whole_hour_timezone(
     tmp_path: Path, zone: str
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(f"timezone: {zone}\n" + VALID_CONFIGURATION, encoding="utf-8")
+    configuration = load(tmp_path, f"timezone: {zone}\n" + VALID_CONFIGURATION)
 
-    assert load_configuration(path).timezone == zone
+    assert configuration.timezone == zone
 
 
 @pytest.mark.parametrize(
@@ -106,51 +210,31 @@ def test_load_configuration_returns_a_whole_hour_timezone(
 def test_load_configuration_rejects_unusable_timezones(
     tmp_path: Path, value: str, reason: str
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(f"timezone: {value}\n" + VALID_CONFIGURATION, encoding="utf-8")
-
     with pytest.raises(ConfigurationError, match=r"timezone: .*" + reason):
-        load_configuration(path)
+        load(tmp_path, f"timezone: {value}\n" + VALID_CONFIGURATION)
 
 
 @pytest.mark.parametrize("value", ["null", "5", "[Europe/Berlin]"])
 def test_load_configuration_rejects_a_timezone_that_is_not_a_name(
     tmp_path: Path, value: str
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(f"timezone: {value}\n" + VALID_CONFIGURATION, encoding="utf-8")
-
     with pytest.raises(ConfigurationError, match="timezone"):
-        load_configuration(path)
+        load(tmp_path, f"timezone: {value}\n" + VALID_CONFIGURATION)
 
 
 def test_load_configuration_returns_explicit_energy_entity_mappings(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "      - operation: subtract\n"
-            "        entities:\n"
-            "          - entity_id: sensor.ev_energy\n"
-            "            state_class: total\n"
-            "            unit: kWh\n",
-        ),
-        encoding="utf-8",
+    document = document_with(
+        household_load=aggregate(
+            ("add", [energy_entity("sensor.household_energy")]),
+            ("subtract", [energy_entity("sensor.ev_energy", "total")]),
+        )
     )
 
-    configuration = load_configuration(path)
+    home_assistant = load_home_assistant(tmp_path, document)
 
-    assert configuration.home_assistant is not None
-    household_load = configuration.home_assistant.household_load
+    household_load = home_assistant.household_load
     assert household_load is not None
     assert household_load.part == "net"
     assert [
@@ -171,82 +255,23 @@ def test_load_configuration_returns_explicit_energy_entity_mappings(
         for term in household_load.terms
         for entity in term.entities
     )
-    assert configuration.home_assistant.household_load_source_id == "household_load"
+    assert home_assistant.household_load_source_id == "household_load"
 
 
 def test_load_configuration_accepts_entity_physical_energy_limits(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "            maximum_interval_energy_kwh: 15\n",
-        ),
-        encoding="utf-8",
-    )
+    document = household_document(maximum_interval_energy_kwh=15)
 
-    configuration = load_configuration(path)
+    entity = load_household_entity(tmp_path, document)
 
-    assert configuration.home_assistant is not None
-    household_load = configuration.home_assistant.household_load
-    assert household_load is not None
-    entity = household_load.terms[0].entities[0]
     assert entity.maximum_interval_energy_kwh == 15
 
 
-def test_load_configuration_rejects_non_positive_entity_physical_limit(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "            maximum_interval_energy_kwh: 0\n",
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="maximum_interval_energy_kwh"):
-        load_configuration(path)
-
-
-def household_entity_configuration(tmp_path: Path, entity_lines: str) -> Path:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            f"{entity_lines}"
-            "            unit: kWh\n",
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
 @pytest.mark.parametrize("state_class", ["total", "total_increasing"])
-@pytest.mark.parametrize("tolerance", ["0.01", "0", "0.5"])
+@pytest.mark.parametrize("tolerance", [0.01, 0, 0.5])
 def test_decrease_tolerance_is_rejected_as_an_unknown_key(
-    tmp_path: Path, state_class: str, tolerance: str
+    tmp_path: Path, state_class: str, tolerance: float
 ) -> None:
     """A counter decrease of any size excludes its hours, so nothing tolerates it.
 
@@ -254,14 +279,12 @@ def test_decrease_tolerance_is_rejected_as_an_unknown_key(
     it must fail at load and name the key, instead of silently ignoring a setting
     that used to change which data is imported.
     """
-    path = household_entity_configuration(
-        tmp_path,
-        f"            state_class: {state_class}\n"
-        f"            decrease_tolerance_kwh: {tolerance}\n",
+    document = household_document(
+        state_class=state_class, decrease_tolerance_kwh=tolerance
     )
 
     with pytest.raises(ConfigurationError) as error:
-        load_configuration(path)
+        load(tmp_path, document)
 
     assert (
         "home_assistant.household_load.terms.0.entities.0.decrease_tolerance_kwh: "
@@ -269,204 +292,97 @@ def test_decrease_tolerance_is_rejected_as_an_unknown_key(
     ) in str(error.value)
 
 
-def test_decrease_tolerance_is_rejected_for_every_energy_expression(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  grid_import:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.grid_import\n"
-            "            state_class: total\n"
-            "            unit: kWh\n"
-            "            decrease_tolerance_kwh: 0.01\n"
-            "  grid_export:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.grid_export\n"
-            "            state_class: total\n"
-            "            unit: kWh\n",
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="decrease_tolerance_kwh"):
-        load_configuration(path)
-
-
 @pytest.mark.parametrize("state_class", ["total", "total_increasing"])
 def test_energy_entity_accepts_a_maximum_interval_limit_for_either_state_class(
     tmp_path: Path, state_class: str
 ) -> None:
-    path = household_entity_configuration(
-        tmp_path,
-        f"            state_class: {state_class}\n"
-        "            maximum_interval_energy_kwh: 25\n",
+    document = household_document(
+        state_class=state_class, maximum_interval_energy_kwh=25
     )
 
-    configuration = load_configuration(path)
+    entity = load_household_entity(tmp_path, document)
 
-    assert configuration.home_assistant is not None
-    household_load = configuration.home_assistant.household_load
-    assert household_load is not None
-    entity = household_load.terms[0].entities[0]
     assert entity.state_class == state_class
     assert entity.maximum_interval_energy_kwh == 25
 
 
-def test_load_configuration_returns_grid_flow_entity_mappings(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(CONFIG_MARKER, GRID_FLOW_CONFIGURATION),
-        encoding="utf-8",
-    )
+def test_load_configuration_returns_grid_flow_entity_mappings(tmp_path: Path) -> None:
+    home_assistant = load_home_assistant(tmp_path, document_with(**GRID_FLOW))
 
-    configuration = load_configuration(path)
-
-    assert configuration.home_assistant is not None
-    grid_import = configuration.home_assistant.grid_import
-    grid_export = configuration.home_assistant.grid_export
+    grid_import = home_assistant.grid_import
+    grid_export = home_assistant.grid_export
     assert grid_import is not None
     assert grid_export is not None
     assert grid_import.entity_ids == ("sensor.grid_import",)
     assert grid_export.entity_ids == ("sensor.grid_export",)
-    assert configuration.home_assistant.grid_flow_source_id == "grid_flow"
+    assert home_assistant.grid_flow_source_id == "grid_flow"
 
 
 def test_load_configuration_returns_battery_entity_mappings(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  battery:\n"
-            "    state_of_charge:\n"
-            "      entity_id: sensor.battery_soc\n"
-            "      unit: '%'\n"
-            "    capacity:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: capacity_kwh\n"
-            "      unit: kWh\n"
-            "    minimum_soc:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: minimum_soc_kwh\n"
-            "      unit: kWh\n"
-            "    maximum_soc:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: maximum_soc_kwh\n"
-            "      unit: kWh\n"
-            "    maximum_charge:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: maximum_charge_kw\n"
-            "      unit: kW\n"
-            "    maximum_discharge:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: maximum_discharge_kw\n"
-            "      unit: kW\n"
-            "    battery_efficiency:\n"
-            "      entity_id: sensor.battery\n"
-            "      attribute: battery_efficiency\n"
-            "      unit: ratio\n",
-        ),
-        encoding="utf-8",
+    battery = partial(sensor, "sensor.battery")
+    document = document_with(
+        battery={
+            "state_of_charge": BATTERY_SOC,
+            "capacity": battery("kWh", attribute="capacity_kwh"),
+            "minimum_soc": battery("kWh", attribute="minimum_soc_kwh"),
+            "maximum_soc": battery("kWh", attribute="maximum_soc_kwh"),
+            "maximum_charge": battery("kW", attribute="maximum_charge_kw"),
+            "maximum_discharge": battery("kW", attribute="maximum_discharge_kw"),
+            "battery_efficiency": battery("ratio", attribute="battery_efficiency"),
+        }
     )
 
-    configuration = load_configuration(path)
+    home_assistant = load_home_assistant(tmp_path, document)
 
-    assert configuration.home_assistant is not None
-    assert configuration.home_assistant.battery is not None
-    assert configuration.home_assistant.battery.state_of_charge.unit == "%"
-    capacity = configuration.home_assistant.battery.capacity
+    assert home_assistant.battery is not None
+    assert home_assistant.battery.state_of_charge.unit == "%"
+    capacity = home_assistant.battery.capacity
     assert isinstance(capacity, HomeAssistantBatteryEntityConfiguration)
     assert capacity.attribute == "capacity_kwh"
-    assert configuration.home_assistant.battery_source_id == "battery"
+    assert home_assistant.battery_source_id == "battery"
 
 
 def test_load_configuration_accepts_battery_constants(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  battery:\n"
-            "    state_of_charge:\n"
-            "      entity_id: sensor.battery_soc\n"
-            "      unit: '%'\n"
-            "    capacity:\n"
-            "      value: 28.7\n"
-            "      unit: kWh\n"
-            "    minimum_soc:\n"
-            "      value: 5\n"
-            "      unit: '%'\n"
-            "    maximum_soc:\n"
-            "      value: 100\n"
-            "      unit: '%'\n"
-            "    maximum_charge:\n"
-            "      value: 12\n"
-            "      unit: kW\n"
-            "    maximum_discharge:\n"
-            "      value: 12\n"
-            "      unit: kW\n"
-            "    battery_efficiency:\n"
-            "      value: 0.85\n"
-            "      unit: ratio\n",
-        ),
-        encoding="utf-8",
+    document = document_with(
+        battery={
+            "state_of_charge": BATTERY_SOC,
+            "capacity": {"value": 28.7, "unit": "kWh"},
+            "minimum_soc": {"value": 5, "unit": "%"},
+            "maximum_soc": {"value": 100, "unit": "%"},
+            "maximum_charge": {"value": 12, "unit": "kW"},
+            "maximum_discharge": {"value": 12, "unit": "kW"},
+            "battery_efficiency": {"value": 0.85, "unit": "ratio"},
+        }
     )
 
-    configuration = load_configuration(path)
+    battery = load_home_assistant(tmp_path, document).battery
 
-    assert configuration.home_assistant is not None
-    battery = configuration.home_assistant.battery
     assert battery is not None
     assert isinstance(battery.capacity, BatteryConstantConfiguration)
     assert battery.capacity.value == 28.7
     assert battery.maximum_soc.unit == "%"
 
 
-def test_load_configuration_accepts_calculated_efficiency_configuration(
-    tmp_path: Path,
-) -> None:
-    del tmp_path
-
-    def energy_entity(name: str) -> dict[str, object]:
-        return {
-            "entity_id": f"sensor.{name}",
-            "state_class": "total_increasing",
-            "unit": "kWh",
-        }
-
+def test_load_configuration_accepts_calculated_efficiency_configuration() -> None:
     def leg(name: str) -> dict[str, dict[str, object]]:
         return {
-            "energy_in": aggregate_settings(add=[energy_entity(f"{name}_in")]),
-            "energy_out": aggregate_settings(add=[energy_entity(f"{name}_out")]),
+            "energy_in": aggregate_settings(add=[energy_entity(f"sensor.{name}_in")]),
+            "energy_out": aggregate_settings(add=[energy_entity(f"sensor.{name}_out")]),
         }
 
-    configuration = HomeAssistantConfiguration.model_validate(
-        {
-            "base_url": "http://homeassistant.test:8123",
-            "token": "test-token",
-            "timeout_seconds": 5,
-            "battery": {
-                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                "capacity": 28.7,
-                "minimum_soc": 5,
-                "maximum_soc": 100,
-                "maximum_charge": 12,
-                "maximum_discharge": 12,
-                "efficiency_calculation": {
-                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                    "battery": leg("battery"),
-                    "inverter_charge": leg("charge"),
-                    "inverter_discharge": leg("discharge"),
-                },
+    configuration = validate_home_assistant(
+        battery=battery_with_calculation(
+            {
+                "battery": leg("battery"),
+                "inverter_charge": leg("charge"),
+                "inverter_discharge": leg("discharge"),
             },
-        }
+            capacity=28.7,
+            minimum_soc=5,
+            maximum_soc=100,
+            maximum_charge=12,
+            maximum_discharge=12,
+        )
     )
 
     assert configuration.battery is not None
@@ -480,37 +396,18 @@ def test_load_configuration_accepts_calculated_efficiency_configuration(
 def test_load_configuration_warns_when_fixed_battery_efficiency_overrides_calculated(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    energy_entity = {
-        "entity_id": "sensor.energy",
-        "state_class": "total_increasing",
-        "unit": "kWh",
-    }
-    energy_leg = {
-        "energy_in": aggregate_settings(add=[energy_entity]),
-        "energy_out": aggregate_settings(add=[energy_entity]),
-    }
-    battery = {
-        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-        "capacity": 10,
-        "minimum_soc": 1,
-        "maximum_soc": 10,
-        "maximum_charge": 4,
-        "maximum_discharge": 4,
-        "battery_efficiency": 0.85,
-        "efficiency_calculation": {
-            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-            "battery": energy_leg,
-            "inverter_charge": energy_leg,
-            "inverter_discharge": energy_leg,
-        },
-    }
-    HomeAssistantConfiguration.model_validate(
-        {
-            "base_url": "http://homeassistant.test:8123",
-            "token": "test-token",
-            "timeout_seconds": 5,
-            "battery": battery,
-        }
+    energy = aggregate_settings(add=[energy_entity("sensor.energy")])
+    energy_leg = {"energy_in": energy, "energy_out": energy}
+
+    validate_home_assistant(
+        battery=battery_with_calculation(
+            {
+                "battery": energy_leg,
+                "inverter_charge": energy_leg,
+                "inverter_discharge": energy_leg,
+            },
+            battery_efficiency=0.85,
+        )
     )
 
     assert "fixed_over_calculated" in caplog.text
@@ -519,28 +416,10 @@ def test_load_configuration_warns_when_fixed_battery_efficiency_overrides_calcul
 def test_load_configuration_accepts_canonical_numeric_battery_constants(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  battery:\n"
-            "    state_of_charge:\n"
-            "      entity_id: sensor.battery_soc\n"
-            "      unit: '%'\n"
-            "    capacity: 28.7\n"
-            "    minimum_soc: 5\n"
-            "    maximum_soc: 100\n"
-            "    maximum_charge: 12\n"
-            "    maximum_discharge: 12\n"
-            "    battery_efficiency: 0.85\n",
-        ),
-        encoding="utf-8",
-    )
+    document = document_with(battery=CANONICAL_BATTERY)
 
-    configuration = load_configuration(path)
+    battery = load_home_assistant(tmp_path, document).battery
 
-    assert configuration.home_assistant is not None
-    battery = configuration.home_assistant.battery
     assert battery is not None
     assert isinstance(battery.capacity, BatteryConstantConfiguration)
     assert battery.capacity.value == 28.7
@@ -557,360 +436,213 @@ def test_load_configuration_accepts_canonical_numeric_battery_constants(
     ],
 )
 def test_load_configuration_rejects_invalid_battery_constants(
-    tmp_path: Path,
-    field: str,
-    value: float,
-    message: str,
+    tmp_path: Path, field: str, value: float, message: str
 ) -> None:
-    path = tmp_path / "config.yaml"
-    document = VALID_CONFIGURATION.replace(
-        CONFIG_MARKER,
-        "  battery:\n"
-        "    state_of_charge:\n"
-        "      entity_id: sensor.battery_soc\n"
-        "      unit: '%'\n"
-        "    capacity: 28.7\n"
-        "    minimum_soc: 5\n"
-        "    maximum_soc: 100\n"
-        "    maximum_charge: 12\n"
-        "    maximum_discharge: 12\n"
-        "    battery_efficiency: 0.85\n",
-    )
-    path.write_text(
-        document.replace(f"    {field}: ", f"    {field}: {value} # "),
-        encoding="utf-8",
-    )
+    document = document_with(battery={**CANONICAL_BATTERY, field: value})
 
     with pytest.raises(ConfigurationError, match=message):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_invalid_battery_mapping_unit(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  battery:\n"
-            "    state_of_charge:\n"
-            "      entity_id: sensor.battery_soc\n"
-            "      unit: W\n"
-            "    capacity:\n"
-            "      entity_id: sensor.battery_capacity\n"
-            "      unit: kWh\n"
-            "    minimum_soc:\n"
-            "      entity_id: sensor.battery_minimum_soc\n"
-            "      unit: kWh\n"
-            "    maximum_soc:\n"
-            "      entity_id: sensor.battery_maximum_soc\n"
-            "      unit: kWh\n"
-            "    maximum_charge:\n"
-            "      entity_id: sensor.battery_maximum_charge\n"
-            "      unit: kW\n"
-            "    maximum_discharge:\n"
-            "      entity_id: sensor.battery_maximum_discharge\n"
-            "      unit: kW\n"
-            "    battery_efficiency:\n"
-            "      entity_id: sensor.battery_efficiency\n"
-            "      unit: ratio\n",
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="battery.state_of_charge"):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_reused_battery_entity_and_attribute(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    document = VALID_CONFIGURATION.replace(
-        CONFIG_MARKER,
-        "  battery:\n"
-        "    state_of_charge:\n"
-        "      entity_id: sensor.battery\n"
-        "      attribute: value\n"
-        "      unit: '%'\n"
-        "    capacity:\n"
-        "      entity_id: sensor.battery\n"
-        "      attribute: value\n"
-        "      unit: kWh\n"
-        "    minimum_soc:\n"
-        "      entity_id: sensor.battery_minimum_soc\n"
-        "      unit: kWh\n"
-        "    maximum_soc:\n"
-        "      entity_id: sensor.battery_maximum_soc\n"
-        "      unit: kWh\n"
-        "    maximum_charge:\n"
-        "      entity_id: sensor.battery_maximum_charge\n"
-        "      unit: kW\n"
-        "    maximum_discharge:\n"
-        "      entity_id: sensor.battery_maximum_discharge\n"
-        "      unit: kW\n"
-        "    battery_efficiency:\n"
-        "      entity_id: sensor.battery_efficiency\n"
-        "      unit: ratio\n",
-    )
-    path.write_text(document, encoding="utf-8")
-
-    with pytest.raises(ConfigurationError, match="reuse"):
-        load_configuration(path)
+        load(tmp_path, document)
 
 
 def test_load_configuration_allows_grid_only_home_assistant_provider(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(CONFIG_MARKER, GRID_FLOW_CONFIGURATION),
-        encoding="utf-8",
-    )
+    home_assistant = load_home_assistant(tmp_path, document_with(**GRID_FLOW))
 
-    configuration = load_configuration(path)
-
-    assert configuration.home_assistant is not None
-    assert configuration.home_assistant.household_load is None
+    assert home_assistant.household_load is None
 
 
 def test_load_configuration_allows_cross_category_energy_entity_reuse(
     tmp_path: Path,
 ) -> None:
-    def aggregate(name: str) -> str:
-        return (
-            f"  {name}:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.grid_import\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-        )
-
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            aggregate("household_load")
-            + aggregate("grid_import")
-            + aggregate("grid_export"),
-        ),
-        encoding="utf-8",
+    reused = added("sensor.grid_import")
+    document = document_with(
+        household_load=reused, grid_import=reused, grid_export=reused
     )
 
-    configuration = load_configuration(path)
+    home_assistant = load_home_assistant(tmp_path, document)
 
-    assert configuration.home_assistant is not None
-    household_load = configuration.home_assistant.household_load
-    grid_import = configuration.home_assistant.grid_import
+    household_load = home_assistant.household_load
+    grid_import = home_assistant.grid_import
     assert household_load is not None
     assert grid_import is not None
     assert household_load.entity_ids == ("sensor.grid_import",)
     assert grid_import.entity_ids == ("sensor.grid_import",)
 
 
-def test_load_configuration_rejects_duplicate_energy_entities_within_aggregate(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  grid_import:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.grid_import\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "          - entity_id: sensor.grid_import\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "  grid_export:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.grid_export\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n",
+REJECTED_DOCUMENTS = {
+    "non-positive-entity-physical-limit": (
+        household_document(maximum_interval_energy_kwh=0),
+        "maximum_interval_energy_kwh",
+    ),
+    "decrease-tolerance-in-any-energy-expression": (
+        document_with(
+            grid_import=adding(
+                energy_entity(
+                    "sensor.grid_import", "total", decrease_tolerance_kwh=0.01
+                )
+            ),
+            grid_export=adding(energy_entity("sensor.grid_export", "total")),
         ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match="grid_import.*energy aggregation entities must not contain duplicates",
-    ):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_energy_entity_repeated_across_terms(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "      - operation: subtract\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n",
+        "decrease_tolerance_kwh",
+    ),
+    "battery-mapping-unit": (
+        document_with(
+            battery={
+                "state_of_charge": sensor("sensor.battery_soc", "W"),
+                "capacity": sensor("sensor.battery_capacity", "kWh"),
+                **SEPARATE_BATTERY_SENSORS,
+            }
         ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match="household_load.*energy aggregation entities must not contain duplicates",
-    ):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_repeated_operation_in_one_aggregate(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.other_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n",
+        "battery.state_of_charge",
+    ),
+    "reused-battery-entity-and-attribute": (
+        document_with(
+            battery={
+                "state_of_charge": sensor("sensor.battery", "%", attribute="value"),
+                "capacity": sensor("sensor.battery", "kWh", attribute="value"),
+                **SEPARATE_BATTERY_SENSORS,
+            }
         ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match="an energy aggregation must not contain more than one term for the "
+        "reuse",
+    ),
+    "duplicate-entities-within-aggregate": (
+        document_with(
+            grid_import=added("sensor.grid_import", "sensor.grid_import"),
+            grid_export=added("sensor.grid_export"),
+        ),
+        "grid_import.*energy aggregation entities must not contain duplicates",
+    ),
+    "entity-repeated-across-terms": (
+        document_with(
+            household_load=aggregate(
+                ("add", [energy_entity("sensor.household_energy")]),
+                ("subtract", [energy_entity("sensor.household_energy")]),
+            )
+        ),
+        "household_load.*energy aggregation entities must not contain duplicates",
+    ),
+    "repeated-operation-in-one-aggregate": (
+        document_with(
+            household_load=aggregate(
+                ("add", [energy_entity("sensor.household_energy")]),
+                ("add", [energy_entity("sensor.other_energy")]),
+            )
+        ),
+        "an energy aggregation must not contain more than one term for the "
         "same operation",
-    ):
-        load_configuration(path)
+    ),
+    "aggregate-without-terms": (
+        document_with(household_load={"terms": []}),
+        "home_assistant.household_load.terms",
+    ),
+    "term-without-entities": (
+        document_with(household_load=adding()),
+        "home_assistant.household_load.terms.0.entities",
+    ),
+    "old-entity-list": (
+        document_with(
+            household_load=[energy_entity("sensor.household_energy", operation="add")]
+        ),
+        "home_assistant.household_load",
+    ),
+    "operation-on-an-entity": (
+        document_with(
+            household_load=adding(
+                energy_entity("sensor.household_energy", operation="add")
+            )
+        ),
+        "home_assistant.household_load.terms.0.entities.0.operation",
+    ),
+    "unknown-part": (
+        document_with(
+            household_load={"part": "negative", **added("sensor.household_energy")}
+        ),
+        "home_assistant.household_load.part",
+    ),
+    "old-key-name": (
+        document_with(
+            household_load_entities=[
+                energy_entity("sensor.household_energy", operation="add")
+            ]
+        ),
+        "home_assistant.household_load_entities",
+    ),
+    "incomplete-grid-flow-mapping": (
+        document_with(grid_import=added("sensor.grid_import")),
+        "grid_import and grid_export must be configured together",
+    ),
+    "invalid-grid-value": (
+        VALID_CONFIGURATION.replace("maximum_import_kw: 10", "maximum_import_kw: 0"),
+        "grid.maximum_import_kw",
+    ),
+    "malformed-yaml": ("grid: [", "Invalid YAML"),
+    "invalid-home-assistant-setting": (
+        VALID_CONFIGURATION.replace("timeout_seconds: 10", "timeout_seconds: 0"),
+        "home_assistant.timeout_seconds",
+    ),
+    "removed-horizon-setting": (
+        VALID_CONFIGURATION
+        + PERSISTENCE
+        + dump(
+            orchestration={
+                "sources": {
+                    "household_load": {"interval_seconds": 300, "horizon_hours": 12}
+                }
+            }
+        ),
+        "horizon_hours",
+    ),
+    "orchestration-without-persistence": (
+        VALID_CONFIGURATION
+        + dump(
+            orchestration={
+                "enabled": True,
+                "sources": {"household_load": {"interval_seconds": 300}},
+            }
+        ),
+        "persistence",
+    ),
+    "unconfigured-plan-source": (
+        VALID_CONFIGURATION
+        + PERSISTENCE
+        + dump(
+            orchestration={
+                "optimization": {"enabled": True, "required_sources": ["pv_generation"]}
+            }
+        ),
+        "not configured as sources",
+    ),
+}
 
 
 @pytest.mark.parametrize(
-    ("aggregate", "location"),
-    [
-        pytest.param(
-            "  household_load:\n    terms: []\n",
-            "home_assistant.household_load.terms",
-            id="no-terms",
-        ),
-        pytest.param(
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities: []\n",
-            "home_assistant.household_load.terms.0.entities",
-            id="no-entities",
-        ),
-        pytest.param(
-            "  household_load:\n"
-            "    - entity_id: sensor.household_energy\n"
-            "      state_class: total_increasing\n"
-            "      unit: kWh\n"
-            "      operation: add\n",
-            "home_assistant.household_load",
-            id="old-entity-list",
-        ),
-        pytest.param(
-            "  household_load:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n"
-            "            operation: add\n",
-            "home_assistant.household_load.terms.0.entities.0.operation",
-            id="operation-on-an-entity",
-        ),
-        pytest.param(
-            "  household_load:\n"
-            "    part: negative\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.household_energy\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n",
-            "home_assistant.household_load.part",
-            id="unknown-part",
-        ),
-        pytest.param(
-            "  household_load_entities:\n"
-            "    - entity_id: sensor.household_energy\n"
-            "      state_class: total_increasing\n"
-            "      unit: kWh\n"
-            "      operation: add\n",
-            "home_assistant.household_load_entities",
-            id="old-key-name",
-        ),
-    ],
+    ("document", "match"),
+    REJECTED_DOCUMENTS.values(),
+    ids=list(REJECTED_DOCUMENTS),
 )
-def test_load_configuration_rejects_malformed_energy_aggregate(
-    tmp_path: Path, aggregate: str, location: str
+def test_load_configuration_rejects_invalid_documents(
+    tmp_path: Path, document: str, match: str
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(CONFIG_MARKER, aggregate),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match=location):
-        load_configuration(path)
+    with pytest.raises(ConfigurationError, match=match):
+        load(tmp_path, document)
 
 
 def test_every_energy_aggregate_accepts_the_positive_part() -> None:
-    entity = {
-        "entity_id": "sensor.energy",
-        "state_class": "total_increasing",
-        "unit": "kWh",
-    }
-    plain = aggregate_settings(add=[entity])
-    positive = aggregate_settings(add=[entity], part="positive")
+    plain = aggregate_settings(add=[energy_entity("sensor.energy")])
+    positive = aggregate_settings(add=[energy_entity("sensor.energy")], part="positive")
 
-    configuration = HomeAssistantConfiguration.model_validate(
-        {
-            "base_url": "http://homeassistant.test:8123",
-            "token": "test-token",
-            "timeout_seconds": 5,
-            "household_load": positive,
-            "grid_import": positive,
-            "grid_export": plain,
-            "battery": {
-                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                "capacity": 10,
-                "minimum_soc": 1,
-                "maximum_soc": 10,
-                "maximum_charge": 4,
-                "maximum_discharge": 4,
-                "efficiency_calculation": {
-                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                    "battery": {"energy_in": plain, "energy_out": plain},
-                    "inverter_charge": {"energy_in": plain, "energy_out": positive},
-                    "inverter_discharge": {"energy_in": positive, "energy_out": plain},
-                },
-            },
-        }
+    configuration = validate_home_assistant(
+        household_load=positive,
+        grid_import=positive,
+        grid_export=plain,
+        battery=battery_with_calculation(
+            {
+                "battery": {"energy_in": plain, "energy_out": plain},
+                "inverter_charge": {"energy_in": plain, "energy_out": positive},
+                "inverter_discharge": {"energy_in": positive, "energy_out": plain},
+            }
+        ),
     )
 
     assert configuration.household_load is not None
@@ -927,41 +659,10 @@ def test_every_energy_aggregate_accepts_the_positive_part() -> None:
     assert calculation.inverter_discharge.energy_in.part == "positive"
 
 
-def test_load_configuration_rejects_incomplete_grid_flow_mapping(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(
-            CONFIG_MARKER,
-            "  grid_import:\n"
-            "    terms:\n"
-            "      - operation: add\n"
-            "        entities:\n"
-            "          - entity_id: sensor.grid_import\n"
-            "            state_class: total_increasing\n"
-            "            unit: kWh\n",
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match="grid_import and grid_export must be configured together",
-    ):
-        load_configuration(path)
-
-
 def test_load_configuration_does_not_match_unconfigured_provider_sources(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace(CONFIG_MARKER, ""),
-        encoding="utf-8",
-    )
-
-    configuration = load_configuration(path)
+    configuration = load(tmp_path, VALID_CONFIGURATION.replace(HOUSEHOLD_LOAD, ""))
 
     assert (
         configuration.is_configured_household_load_source(
@@ -978,18 +679,14 @@ def test_load_configuration_does_not_match_unconfigured_provider_sources(
 def test_load_configuration_uses_explicit_single_entity_mapping(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(VALID_CONFIGURATION, encoding="utf-8")
+    home_assistant = load_home_assistant(tmp_path, VALID_CONFIGURATION)
 
-    configuration = load_configuration(path)
-
-    assert configuration.home_assistant is not None
-    household_load = configuration.home_assistant.household_load
+    household_load = home_assistant.household_load
     assert household_load is not None
     entity = household_load.terms[0].entities[0]
     assert entity.state_class == "total_increasing"
     assert entity.unit == "kWh"
-    assert configuration.home_assistant.household_load_source_id == "household_load"
+    assert home_assistant.household_load_source_id == "household_load"
 
 
 def test_load_configuration_rejects_missing_file(tmp_path: Path) -> None:
@@ -997,52 +694,14 @@ def test_load_configuration_rejects_missing_file(tmp_path: Path) -> None:
         load_configuration(tmp_path / "missing.yaml")
 
 
-def test_load_configuration_rejects_invalid_values(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace("maximum_import_kw: 10", "maximum_import_kw: 0"),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="grid.maximum_import_kw"):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_malformed_yaml(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text("grid: [", encoding="utf-8")
-
-    with pytest.raises(ConfigurationError, match="Invalid YAML"):
-        load_configuration(path)
-
-
-def test_load_configuration_allows_no_home_assistant_provider(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.split("home_assistant:", 1)[0], encoding="utf-8"
-    )
-
-    configuration = load_configuration(path)
-
-    assert configuration.home_assistant is None
+def test_load_configuration_allows_no_home_assistant_provider(tmp_path: Path) -> None:
+    assert load(tmp_path, WITHOUT_HOME_ASSISTANT).home_assistant is None
 
 
 def test_load_configuration_returns_forecast_solar_settings(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION
-        + "forecast_solar:\n"
-        + "  latitude: 52.52\n"
-        + "  longitude: 13.41\n"
-        + "  declination_degrees: 35\n"
-        + "  azimuth_degrees: 0\n"
-        + "  peak_power_kw: 8\n",
-        encoding="utf-8",
-    )
+    document = VALID_CONFIGURATION + dump(forecast_solar=FORECAST_SOLAR)
 
-    configuration = load_configuration(path)
+    configuration = load(tmp_path, document)
 
     assert configuration.forecast_solar is not None
     assert configuration.forecast_solar.base_url.host == "api.forecast.solar"
@@ -1050,13 +709,9 @@ def test_load_configuration_returns_forecast_solar_settings(tmp_path: Path) -> N
 
 
 def test_load_configuration_returns_awattar_settings(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION + "awattar:\n  timeout_seconds: 5\n",
-        encoding="utf-8",
+    configuration = load(
+        tmp_path, VALID_CONFIGURATION + dump(awattar={"timeout_seconds": 5})
     )
-
-    configuration = load_configuration(path)
 
     assert configuration.awattar is not None
     assert configuration.awattar.base_url.host == "api.awattar.de"
@@ -1074,98 +729,58 @@ def test_load_configuration_returns_awattar_settings(tmp_path: Path) -> None:
     ],
 )
 def test_load_configuration_rejects_invalid_forecast_solar_settings(
-    tmp_path: Path,
-    field: str,
-    value: object,
+    tmp_path: Path, field: str, value: object
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION
-        + "forecast_solar:\n"
-        + "  latitude: 52.52\n"
-        + "  longitude: 13.41\n"
-        + "  declination_degrees: 35\n"
-        + "  azimuth_degrees: 0\n"
-        + "  peak_power_kw: 8\n",
-        encoding="utf-8",
+    document = VALID_CONFIGURATION + dump(
+        forecast_solar={**FORECAST_SOLAR, field: value}
     )
-    defaults = {
-        "latitude": 52.52,
-        "longitude": 13.41,
-        "declination_degrees": 35,
-        "azimuth_degrees": 0,
-        "peak_power_kw": 8,
-    }
-    document = path.read_text(encoding="utf-8").replace(
-        f"  {field}: {defaults[field]}\n",
-        f"  {field}: {value}\n",
-    )
-    path.write_text(document, encoding="utf-8")
 
     with pytest.raises(ConfigurationError, match=f"forecast_solar.{field}"):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_invalid_home_assistant_settings(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace("timeout_seconds: 10", "timeout_seconds: 0"),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="home_assistant.timeout_seconds"):
-        load_configuration(path)
+        load(tmp_path, document)
 
 
 def test_load_configuration_allows_optional_freshness_threshold(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.replace("  max_data_age_seconds: 7200\n", ""),
-        encoding="utf-8",
-    )
+    document = VALID_CONFIGURATION.replace("  max_data_age_seconds: 7200\n", "")
 
-    configuration = load_configuration(path)
-
-    assert configuration.home_assistant is not None
-    assert configuration.home_assistant.max_data_age_seconds is None
+    assert load_home_assistant(tmp_path, document).max_data_age_seconds is None
 
 
 def test_load_configuration_returns_persistence_directory(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION + "persistence:\n  directory: /var/lib/provider-data\n",
-        encoding="utf-8",
+    document = VALID_CONFIGURATION + dump(
+        persistence={"directory": "/var/lib/provider-data"}
     )
 
-    configuration = load_configuration(path)
+    configuration = load(tmp_path, document)
 
     assert configuration.persistence is not None
     assert configuration.persistence.directory == Path("/var/lib/provider-data")
 
 
 def test_load_configuration_returns_orchestration_settings(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
+    document = (
         VALID_CONFIGURATION
-        + "persistence:\n  directory: provider-data\n"
-        + "orchestration:\n"
-        + "  enabled: true\n"
-        + "  startup_fetch: false\n"
-        + "  sources:\n"
-        + "    household_load:\n"
-        + "      interval_seconds: 300\n"
-        + "      history_lookback_seconds: 3600\n"
-        + "  optimization:\n"
-        + "    enabled: true\n"
-        + "    required_sources: [household_load]\n",
-        encoding="utf-8",
+        + PERSISTENCE
+        + dump(
+            orchestration={
+                "enabled": True,
+                "startup_fetch": False,
+                "sources": {
+                    "household_load": {
+                        "interval_seconds": 300,
+                        "history_lookback_seconds": 3600,
+                    }
+                },
+                "optimization": {
+                    "enabled": True,
+                    "required_sources": ["household_load"],
+                },
+            }
+        )
     )
 
-    configuration = load_configuration(path)
+    configuration = load(tmp_path, document)
 
     assert configuration.orchestration is not None
     assert configuration.orchestration.startup_fetch is False
@@ -1177,68 +792,10 @@ def test_load_configuration_returns_orchestration_settings(tmp_path: Path) -> No
     ]
 
 
-def test_load_configuration_rejects_removed_horizon_setting(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION
-        + "persistence:\n  directory: provider-data\n"
-        + "orchestration:\n"
-        + "  sources:\n"
-        + "    household_load:\n"
-        + "      interval_seconds: 300\n"
-        + "      horizon_hours: 12\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="horizon_hours"):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_orchestration_without_persistence(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION
-        + "orchestration:\n"
-        + "  enabled: true\n"
-        + "  sources:\n"
-        + "    household_load:\n"
-        + "      interval_seconds: 300\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="persistence"):
-        load_configuration(path)
-
-
-def test_load_configuration_rejects_unconfigured_plan_source(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION
-        + "persistence:\n  directory: provider-data\n"
-        + "orchestration:\n"
-        + "  optimization:\n"
-        + "    enabled: true\n"
-        + "    required_sources: [pv_generation]\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigurationError, match="not configured as sources"):
-        load_configuration(path)
-
-
 def test_load_configuration_allows_persistence_without_provider(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        VALID_CONFIGURATION.split("home_assistant:", 1)[0]
-        + "persistence:\n  directory: provider-data\n",
-        encoding="utf-8",
-    )
-
-    configuration = load_configuration(path)
+    configuration = load(tmp_path, WITHOUT_HOME_ASSISTANT + PERSISTENCE)
 
     assert configuration.persistence is not None
     assert configuration.home_assistant is None

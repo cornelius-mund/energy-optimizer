@@ -45,52 +45,34 @@ async def log_requests(
 
     duration_ms = (perf_counter() - started) * 1000
     status_code = response.status_code
-    dashboard_request = request.url.path == "/api/v1/dashboard/data"
-    candidate_scenario = request.query_params.get("scenario_kind")
-    scenario_kind = (
-        candidate_scenario
-        if candidate_scenario in {"actual", "forecast", "plan"}
-        else "actual"
-        if candidate_scenario is None
-        else "invalid"
-    )
+    health_check = request.method == "GET" and request.url.path == "/health"
     if status_code >= 500:
         level = logging.ERROR
     elif status_code >= 400:
         level = logging.WARNING
-    elif request.method == "GET" and request.url.path == "/health":
+    elif health_check:
         level = logging.DEBUG
     else:
         level = logging.INFO
-    event = (
-        "health_check_request"
-        if request.method == "GET" and request.url.path == "/health"
-        else "request_completed"
+    message = "event=%s component=api operation=request method=%s path=%s"
+    details: list[object] = [
+        "health_check_request" if health_check else "request_completed",
+        request.method,
+        request.url.path,
+    ]
+    if request.url.path == "/api/v1/dashboard/data":
+        scenario_kind = request.query_params.get("scenario_kind", "actual")
+        if scenario_kind not in {"actual", "forecast", "plan"}:
+            scenario_kind = "invalid"
+        message += " scenario_kind=%s"
+        details.append(scenario_kind)
+    logger.log(
+        level,
+        message + " status=%s request_id=%s duration_ms=%.2f",
+        *details,
+        status_code,
+        request_id,
+        duration_ms,
     )
-    if dashboard_request:
-        logger.log(
-            level,
-            "event=%s component=api operation=request method=%s "
-            "path=%s scenario_kind=%s status=%s request_id=%s duration_ms=%.2f",
-            event,
-            request.method,
-            request.url.path,
-            scenario_kind,
-            status_code,
-            request_id,
-            duration_ms,
-        )
-    else:
-        logger.log(
-            level,
-            "event=%s component=api operation=request method=%s "
-            "path=%s status=%s request_id=%s duration_ms=%.2f",
-            event,
-            request.method,
-            request.url.path,
-            status_code,
-            request_id,
-            duration_ms,
-        )
     response.headers["X-Request-ID"] = request_id
     return response

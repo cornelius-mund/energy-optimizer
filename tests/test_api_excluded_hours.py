@@ -1,7 +1,5 @@
 """The excluded-hours endpoint: every hour left out of imported history, with causes."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta
@@ -10,9 +8,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import TypeAdapter
 
-from energy_optimizer.api import app
 from energy_optimizer.exclusions import (
     MAX_DATA_POINTS_PER_ENTITY_HOUR,
     ExcludedDataPoint,
@@ -22,23 +18,17 @@ from energy_optimizer.exclusions import (
 from energy_optimizer.providers.home_assistant_battery_efficiency import (
     merge_battery_efficiency_history,
 )
-from energy_optimizer.providers.interfaces import HouseholdLoadData
-from energy_optimizer.providers.interfaces import (
-    SourceMetadata as ProviderSourceMetadata,
-)
-from energy_optimizer.storage import ProviderDataStore
 from test_api_historic_assets import (
     GRID_KEY,
-    HOUSEHOLD_KEY,
     START,
     Environment,
+    application,
     battery_history,
-    corrupt,
     grid_flow,
+    household_load,
     seed_battery,
     seed_grid,
     seed_household,
-    write_configuration,
 )
 
 ENDPOINT = "/api/v1/dashboard/excluded-hours"
@@ -50,11 +40,8 @@ def environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[Environment]:
     """Run a fully configured application; tests choose what data to seed."""
-    write_configuration(tmp_path, monkeypatch)
-    with TestClient(app) as client:
-        yield Environment(
-            client, ProviderDataStore(tmp_path / "provider-data"), tmp_path
-        )
+    with application(tmp_path, monkeypatch) as environment:
+        yield environment
 
 
 def get(
@@ -68,7 +55,7 @@ def get(
 def test_every_source_is_listed_in_hour_order_with_its_causes(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, excluded=(1, 3))
+    seed_household(environment.store, household_load(excluded=(1, 3)))
     seed_grid(environment.store, grid_flow(excluded=(1,)))
     seed_battery(environment.store, battery_history(excluded=(2,)))
 
@@ -84,42 +71,19 @@ def test_every_source_is_listed_in_hour_order_with_its_causes(
         ("2026-01-01T02:00:00Z", "battery_efficiency"),
         ("2026-01-01T03:00:00Z", "household_load"),
     ]
+    counts = {"household_load": 2, "grid_flow": 1, "battery_efficiency": 1}
     assert body["sources"] == [
         {
-            "source": "household_load",
+            "source": source,
             "status": "available",
             "reason": None,
-            "excluded_hour_count": 2,
-        },
-        {
-            "source": "grid_flow",
-            "status": "available",
-            "reason": None,
-            "excluded_hour_count": 1,
-        },
-        {
-            "source": "battery_efficiency",
-            "status": "available",
-            "reason": None,
-            "excluded_hour_count": 1,
-        },
+            "excluded_hour_count": count,
+        }
+        for source, count in counts.items()
     ]
     assert body["summary"] == [
-        {
-            "source": "household_load",
-            "reason": "counter_decrease",
-            "excluded_hour_count": 2,
-        },
-        {
-            "source": "grid_flow",
-            "reason": "counter_decrease",
-            "excluded_hour_count": 1,
-        },
-        {
-            "source": "battery_efficiency",
-            "reason": "counter_decrease",
-            "excluded_hour_count": 1,
-        },
+        {"source": source, "reason": "counter_decrease", "excluded_hour_count": count}
+        for source, count in counts.items()
     ]
     [cause] = body["hours"][0]["causes"]
     assert cause == {
@@ -148,8 +112,8 @@ def test_hours_the_provider_no_longer_holds_are_listed_as_history_unavailable(
 ) -> None:
     """Every source persisted one hour, then Home Assistant only had hour 3."""
     later = START + timedelta(hours=3)
-    seed_household(environment.store, (1.0,))
-    seed_household(environment.store, (4.0,), start=later)
+    seed_household(environment.store, household_load((1.0,)))
+    seed_household(environment.store, household_load((4.0,), start=later))
     seed_grid(environment.store, grid_flow((0.5,)))
     seed_grid(environment.store, replace(grid_flow((3.5,)), start_time=later))
     seed_battery(
@@ -195,7 +159,7 @@ def test_hours_the_provider_no_longer_holds_are_listed_as_history_unavailable(
 def test_only_hours_inside_the_requested_range_are_returned(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, excluded=(0, 1, 2, 3))
+    seed_household(environment.store, household_load(excluded=(0, 1, 2, 3)))
 
     body = get(
         environment.client,
@@ -221,44 +185,24 @@ def test_only_hours_inside_the_requested_range_are_returned(
 def test_a_hour_counts_once_per_distinct_reason_in_the_summary(
     environment: Environment,
 ) -> None:
-    hour_start = START + timedelta(hours=1)
     twice = HourExclusion(
-        hour_start,
+        START + timedelta(hours=1),
         (
             ExclusionCause.of("unavailable", "a", "sensor.a", []),
             ExclusionCause.of("unavailable", "b", "sensor.b", []),
             ExclusionCause.of("counter_decrease", "c", "sensor.c", []),
         ),
     )
-    environment.store.save(
-        HOUSEHOLD_KEY,
-        TypeAdapter(HouseholdLoadData),
-        HouseholdLoadData(
-            schema_version="1",
-            start_time=START,
-            interval_minutes=60,
-            load_kw=(1.0, None),
-            unit="kW",
-            source=ProviderSourceMetadata("home-assistant", "household_load"),
-            retrieved_at=START,
-            latest_observation_at=START,
-            exclusions=(twice,),
-        ),
+    seed_household(
+        environment.store,
+        replace(household_load((1.0, None)), exclusions=(twice,)),
     )
 
     body = get(environment.client)
 
     assert body["summary"] == [
-        {
-            "source": "household_load",
-            "reason": "counter_decrease",
-            "excluded_hour_count": 1,
-        },
-        {
-            "source": "household_load",
-            "reason": "unavailable",
-            "excluded_hour_count": 1,
-        },
+        {"source": "household_load", "reason": reason, "excluded_hour_count": 1}
+        for reason in ("counter_decrease", "unavailable")
     ]
     assert [cause["reason"] for cause in body["hours"][0]["causes"]] == [
         "unavailable",
@@ -270,27 +214,16 @@ def test_a_hour_counts_once_per_distinct_reason_in_the_summary(
 def test_the_stored_bound_on_data_points_is_reported_with_the_full_count(
     environment: Environment,
 ) -> None:
-    points = [
+    points = tuple(
         ExcludedDataPoint(START + timedelta(minutes=index), "unavailable")
         for index in range(MAX_DATA_POINTS_PER_ENTITY_HOUR)
-    ]
-    cause = ExclusionCause(
-        "unavailable", "many", "sensor.a", tuple(points), data_point_count=120
     )
-    environment.store.save(
-        HOUSEHOLD_KEY,
-        TypeAdapter(HouseholdLoadData),
-        HouseholdLoadData(
-            schema_version="1",
-            start_time=START,
-            interval_minutes=60,
-            load_kw=(None,),
-            unit="kW",
-            source=ProviderSourceMetadata("home-assistant", "household_load"),
-            retrieved_at=START,
-            latest_observation_at=START,
-            exclusions=(HourExclusion(START, (cause,)),),
-        ),
+    cause = ExclusionCause(
+        "unavailable", "many", "sensor.a", points, data_point_count=120
+    )
+    seed_household(
+        environment.store,
+        replace(household_load((None,)), exclusions=(HourExclusion(START, (cause,)),)),
     )
 
     [hour] = get(environment.client)["hours"]
@@ -303,9 +236,8 @@ def test_the_stored_bound_on_data_points_is_reported_with_the_full_count(
 def test_unconfigured_sources_and_sources_without_history_are_named(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(tmp_path, monkeypatch, grid=False, battery=None)
-    with TestClient(app) as client:
-        body = get(client)
+    with application(tmp_path, monkeypatch, grid=False, battery=None) as environment:
+        body = get(environment.client)
 
     assert body["excluded_hour_count"] == 0
     assert body["hours"] == []
@@ -347,9 +279,8 @@ def test_configured_sources_without_persisted_history_are_unavailable(
 def test_a_configuration_without_persistence_reports_every_source_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(tmp_path, monkeypatch, persistence=False)
-    with TestClient(app) as client:
-        body = get(client)
+    with application(tmp_path, monkeypatch, persistence=False) as environment:
+        body = get(environment.client)
 
     assert {item["status"] for item in body["sources"]} == {"unavailable"}
     assert all(
@@ -360,9 +291,9 @@ def test_a_configuration_without_persistence_reports_every_source_unavailable(
 def test_corrupt_persisted_data_is_withheld_without_hiding_other_sources(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, excluded=(1,))
+    seed_household(environment.store, household_load(excluded=(1,)))
     seed_grid(environment.store, grid_flow(excluded=(2,)))
-    corrupt(environment.directory, GRID_KEY)
+    environment.corrupt(GRID_KEY)
 
     body = get(environment.client)
 
@@ -374,50 +305,24 @@ def test_corrupt_persisted_data_is_withheld_without_hiding_other_sources(
 
 
 @pytest.mark.parametrize(
-    ("params", "detail"),
+    ("start", "end", "detail"),
     [
-        (
-            {"start_time": "2026-01-01T00:00:00", "end_time": "2026-01-01T04:00:00Z"},
-            "must include a timezone",
-        ),
-        (
-            {
-                "start_time": "2026-01-01T00:30:00Z",
-                "end_time": "2026-01-01T04:00:00Z",
-            },
-            "aligned to the hour",
-        ),
-        (
-            {
-                "start_time": "2026-01-01T04:00:00Z",
-                "end_time": "2026-01-01T04:00:00Z",
-            },
-            "later than start_time",
-        ),
-        (
-            {
-                "start_time": "2016-01-01T00:00:00Z",
-                "end_time": "2026-01-01T04:00:00Z",
-            },
-            "must not exceed",
-        ),
+        ("2026-01-01T00:00:00", "2026-01-01T04:00:00Z", "must include a timezone"),
+        ("2026-01-01T00:30:00Z", "2026-01-01T04:00:00Z", "aligned to the hour"),
+        ("2026-01-01T04:00:00Z", "2026-01-01T04:00:00Z", "later than start_time"),
+        ("2016-01-01T00:00:00Z", "2026-01-01T04:00:00Z", "must not exceed"),
     ],
 )
 def test_the_range_is_validated_like_the_other_dashboard_endpoints(
-    environment: Environment, params: dict[str, str], detail: str
+    environment: Environment, start: str, end: str, detail: str
 ) -> None:
-    body = get(environment.client, params, status=422)
+    body = get(environment.client, {"start_time": start, "end_time": end}, status=422)
 
     assert detail in body["detail"]
 
 
 def test_a_missing_range_boundary_is_rejected(environment: Environment) -> None:
-    assert (
-        environment.client.get(
-            ENDPOINT, params={"start_time": "2026-01-01T00:00:00Z"}
-        ).status_code
-        == 422
-    )
+    get(environment.client, {"start_time": "2026-01-01T00:00:00Z"}, status=422)
 
 
 def test_the_endpoint_is_documented_in_the_generated_contract(

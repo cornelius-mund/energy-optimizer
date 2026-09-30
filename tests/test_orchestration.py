@@ -1,6 +1,7 @@
 """Tests for scheduled provider retrieval and optimization triggers."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from energy_optimizer.exclusions import (
 )
 from energy_optimizer.orchestration import (
     OrchestrationError,
+    PlanGenerator,
     ProviderDataSnapshot,
     ProviderOrchestrator,
     ProviderRegistration,
@@ -65,6 +67,31 @@ ADAPTER = TypeAdapter(HouseholdLoadData)
 PV_ADAPTER = TypeAdapter(PvGenerationData)
 GRID_FLOW_ADAPTER = TypeAdapter(GridFlowData)
 BATTERY_ADAPTER = TypeAdapter(BatteryData)
+PRICE_ADAPTER = TypeAdapter(ElectricityPriceData)
+EFFICIENCY_ADAPTER = TypeAdapter(BatteryEfficiencyData)
+HISTORY_ADAPTER = TypeAdapter(BatteryEfficiencyHistoryData)
+LOAD_KEY = ProviderDataKey("household-load", "household_load", "sensor.household_load")
+HOUSEHOLD_KEY = ProviderDataKey("household-load", "home-assistant", "household_load")
+PV_KEY = ProviderDataKey("pv-generation", "forecast.solar", "pv_generation")
+GRID_KEY = ProviderDataKey("grid-flow", "home-assistant", "grid_flow")
+BATTERY_KEY = ProviderDataKey("battery", "home-assistant", "battery")
+PRICE_KEY = ProviderDataKey("electricity-prices", "awattar.de", "de")
+PRICE_HISTORY_KEY = ProviderDataKey("electricity-price-history", "awattar.de", "de")
+EFFICIENCY_HISTORY_KEY = ProviderDataKey(
+    "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
+)
+EFFICIENCY_RESULT_KEY = ProviderDataKey(
+    "battery-efficiency", "home-assistant", "battery_efficiency"
+)
+FORECAST_SOLAR = ForecastSolarConfiguration(
+    latitude=52.52,
+    longitude=13.41,
+    declination_degrees=35,
+    azimuth_degrees=0,
+    peak_power_kw=8,
+)
+
+LoadCall = tuple[datetime, datetime | None, float, datetime | None]
 
 
 def data(
@@ -87,6 +114,11 @@ def data(
     )
 
 
+def home_assistant_load(now: datetime, value: float = 1.0) -> HouseholdLoadData:
+    """Build household load as the configured Home Assistant source persists it."""
+    return data(now, value, source="home-assistant", entity_id="household_load")
+
+
 def exclusion(
     hour_start: datetime,
     *reasons: ExclusionReason,
@@ -107,64 +139,18 @@ def exclusion(
     )
 
 
-def pv_data(now: datetime, value: float = 1.0) -> PvGenerationData:
-    start = now.replace(minute=0, second=0, microsecond=0)
-    return PvGenerationData(
-        schema_version="1",
-        start_time=start,
-        interval_minutes=60,
-        generation_kw=(value,),
-        unit="kW",
-        source=SourceMetadata(provider="forecast.solar", entity_id="pv_generation"),
-        retrieved_at=now,
-        expires_at=start + timedelta(hours=24),
-    )
+def load_persisted[T](
+    store: ProviderDataStore, key: ProviderDataKey, adapter: TypeAdapter[T]
+) -> T:
+    persisted = store.load(key, adapter)
+    assert persisted is not None
+    return persisted
 
 
-def grid_flow_data(now: datetime, value: float = 1.0) -> GridFlowData:
-    start = now.replace(minute=0, second=0, microsecond=0)
-    return GridFlowData(
-        schema_version="1",
-        start_time=start,
-        interval_minutes=60,
-        import_kw=(value,),
-        export_kw=(value / 2,),
-        unit="kW",
-        source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
-        retrieved_at=now,
-        latest_observation_at=now,
-    )
-
-
-def battery_data(now: datetime) -> BatteryData:
-    return BatteryData(
-        schema_version="1",
-        start_time=now,
-        interval_minutes=60,
-        state_of_charge_kwh=(5.0,),
-        capacity_kwh=10.0,
-        minimum_soc_kwh=2.0,
-        maximum_soc_kwh=10.0,
-        initial_soc_kwh=5.0,
-        maximum_charge_kw=4.0,
-        maximum_discharge_kw=4.0,
-        battery_efficiency=0.95,
-        unit="kWh",
-        power_unit="kW",
-        source=SourceMetadata(provider="home-assistant", entity_id="battery"),
-        retrieved_at=now,
-        latest_observation_at=now,
-    )
-
-
-def registration(
-    fetch: Any,
-    source: str = "household_load",
-    data_type: str = "household-load",
-) -> ProviderRegistration:
+def registration(fetch: Any) -> ProviderRegistration:
     return ProviderRegistration(
-        name=source,
-        data_type=data_type,
+        name="household_load",
+        data_type="household-load",
         adapter=ADAPTER,
         plan=lambda now, schedule: plan_without_needs(lambda: fetch(now, schedule)),
         is_fresh=lambda value, now: (
@@ -174,25 +160,49 @@ def registration(
     )
 
 
-def configuration(
-    *,
+def orchestration(
+    source: str = "household_load",
     interval_seconds: float = 300,
-    startup_fetch: bool = True,
     optimization_enabled: bool = False,
 ) -> OrchestrationConfiguration:
+    """Orchestrate one ``source``, optionally planning once it has refreshed."""
     return OrchestrationConfiguration(
         enabled=True,
-        startup_fetch=startup_fetch,
         sources={
-            "household_load": DataSourceScheduleConfiguration(
-                interval_seconds=interval_seconds,
-            )
+            source: DataSourceScheduleConfiguration(interval_seconds=interval_seconds)
         },
         optimization=OptimizationTriggerConfiguration(
             enabled=optimization_enabled,
-            required_sources=["household_load"] if optimization_enabled else [],
+            required_sources=[source] if optimization_enabled else [],
         ),
     )
+
+
+def default_fetch(now: datetime, _: Any) -> HouseholdLoadData:
+    return data(now)
+
+
+def orchestrator_for(
+    tmp_path: Path,
+    fetch: Any = default_fetch,
+    plan_generator: PlanGenerator | None = None,
+    **options: Any,
+) -> ProviderOrchestrator:
+    """Orchestrate the household-load source that ``fetch`` provides."""
+    return ProviderOrchestrator(
+        orchestration(**options),
+        [registration(fetch)],
+        ProviderDataStore(tmp_path),
+        plan_generator=plan_generator,
+    )
+
+
+class PlanRecorder(list[ProviderDataSnapshot]):
+    """A plan generator that records the snapshot of every plan it creates."""
+
+    def __call__(self, snapshot: ProviderDataSnapshot) -> object:
+        self.append(snapshot)
+        return snapshot
 
 
 def test_startup_fetch_persists_normalized_data(tmp_path: Path) -> None:
@@ -202,17 +212,11 @@ def test_startup_fetch_persists_normalized_data(tmp_path: Path) -> None:
         calls.append(now)
         return data(now)
 
-    orchestrator = ProviderOrchestrator(
-        configuration(), [registration(fetch)], ProviderDataStore(tmp_path)
-    )
-
-    cycle = orchestrator.run_due(START)
+    cycle = orchestrator_for(tmp_path, fetch).run_due(START)
 
     assert calls == [START]
     assert cycle.provider_runs[0].status == "success"
-    key = ProviderDataKey("household-load", "household_load", "sensor.household_load")
-    persisted = ProviderDataStore(tmp_path).load(key, ADAPTER)
-    assert persisted is not None
+    persisted = load_persisted(ProviderDataStore(tmp_path), LOAD_KEY, ADAPTER)
     assert persisted.load_kw == (1.0,)
 
 
@@ -223,11 +227,7 @@ def test_source_is_not_fetched_until_its_interval_elapses(tmp_path: Path) -> Non
         calls.append(now)
         return data(now)
 
-    orchestrator = ProviderOrchestrator(
-        configuration(interval_seconds=300),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-    )
+    orchestrator = orchestrator_for(tmp_path, fetch, interval_seconds=300)
 
     orchestrator.run_due(START)
     not_due = orchestrator.run_due(START + timedelta(seconds=299))
@@ -246,41 +246,28 @@ def test_failed_refresh_preserves_last_persisted_data(tmp_path: Path) -> None:
             raise RuntimeError("provider unavailable")
         return data(now, value=2.0)
 
-    orchestrator = ProviderOrchestrator(
-        configuration(interval_seconds=60),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-    )
+    orchestrator = orchestrator_for(tmp_path, fetch, interval_seconds=60)
     orchestrator.run_due(START)
     should_fail = True
     cycle = orchestrator.run_due(START + timedelta(seconds=60))
 
     assert cycle.provider_runs[0].status == "failed"
     assert cycle.provider_runs[0].error == "provider unavailable"
-    key = ProviderDataKey("household-load", "household_load", "sensor.household_load")
-    persisted = ProviderDataStore(tmp_path).load(key, ADAPTER)
-    assert persisted is not None
+    persisted = load_persisted(ProviderDataStore(tmp_path), LOAD_KEY, ADAPTER)
     assert persisted.load_kw == (2.0,)
 
 
 def test_failed_required_refresh_does_not_create_plan(tmp_path: Path) -> None:
     should_fail = False
-    plans: list[ProviderDataSnapshot] = []
 
     def fetch(now: datetime, _: Any) -> HouseholdLoadData:
         if should_fail:
             raise RuntimeError("provider unavailable")
         return data(now)
 
-    def generate(snapshot: ProviderDataSnapshot) -> object:
-        plans.append(snapshot)
-        return snapshot
-
-    orchestrator = ProviderOrchestrator(
-        configuration(interval_seconds=60, optimization_enabled=True),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-        plan_generator=generate,
+    plans = PlanRecorder()
+    orchestrator = orchestrator_for(
+        tmp_path, fetch, plans, interval_seconds=60, optimization_enabled=True
     )
     orchestrator.run_due(START)
     should_fail = True
@@ -303,11 +290,7 @@ def test_concurrent_cycle_is_skipped_without_duplicate_fetch(
         release.wait(timeout=5)
         return data(now)
 
-    orchestrator = ProviderOrchestrator(
-        configuration(),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-    )
+    orchestrator = orchestrator_for(tmp_path, fetch)
     first_result: list[object] = []
 
     def run_first_cycle() -> None:
@@ -328,23 +311,9 @@ def test_concurrent_cycle_is_skipped_without_duplicate_fetch(
 
 
 def test_disabled_optimization_does_not_call_plan_generator(tmp_path: Path) -> None:
-    plans: list[ProviderDataSnapshot] = []
+    plans = PlanRecorder()
 
-    def generate(snapshot: ProviderDataSnapshot) -> object:
-        plans.append(snapshot)
-        return snapshot
-
-    def fetch(now: datetime, _: Any) -> HouseholdLoadData:
-        return data(now)
-
-    orchestrator = ProviderOrchestrator(
-        configuration(),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-        plan_generator=generate,
-    )
-
-    cycle = orchestrator.run_due(START)
+    cycle = orchestrator_for(tmp_path, plan_generator=plans).run_due(START)
 
     assert cycle.plan_status == "disabled"
     assert plans == []
@@ -353,36 +322,19 @@ def test_disabled_optimization_does_not_call_plan_generator(tmp_path: Path) -> N
 def test_optimization_reports_unavailable_without_plan_generator(
     tmp_path: Path,
 ) -> None:
-    def fetch(now: datetime, _: Any) -> HouseholdLoadData:
-        return data(now)
-
-    orchestrator = ProviderOrchestrator(
-        configuration(optimization_enabled=True),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-    )
-
-    cycle = orchestrator.run_due(START)
+    cycle = orchestrator_for(tmp_path, optimization_enabled=True).run_due(START)
 
     assert cycle.plan_status == "unavailable"
     assert cycle.plan_error == "optimization plan generator is not configured"
 
 
 def test_complete_fresh_refresh_creates_one_plan_snapshot(tmp_path: Path) -> None:
-    plans: list[ProviderDataSnapshot] = []
-
-    def generate(snapshot: ProviderDataSnapshot) -> object:
-        plans.append(snapshot)
-        return snapshot
-
-    def fetch(now: datetime, _: Any) -> HouseholdLoadData:
-        return data(now, value=3.5)
-
-    orchestrator = ProviderOrchestrator(
-        configuration(optimization_enabled=True),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-        plan_generator=generate,
+    plans = PlanRecorder()
+    orchestrator = orchestrator_for(
+        tmp_path,
+        lambda now, _: data(now, value=3.5),
+        plans,
+        optimization_enabled=True,
     )
 
     cycle = orchestrator.run_due(START)
@@ -396,17 +348,11 @@ def test_complete_fresh_refresh_creates_one_plan_snapshot(tmp_path: Path) -> Non
 
 
 def test_plan_generation_failure_is_reported(tmp_path: Path) -> None:
-    def fetch(now: datetime, _: Any) -> HouseholdLoadData:
-        return data(now)
-
     def generate(_: ProviderDataSnapshot) -> object:
         raise RuntimeError("solver unavailable")
 
-    orchestrator = ProviderOrchestrator(
-        configuration(optimization_enabled=True),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-        plan_generator=generate,
+    orchestrator = orchestrator_for(
+        tmp_path, plan_generator=generate, optimization_enabled=True
     )
 
     cycle = orchestrator.run_due(START)
@@ -419,35 +365,19 @@ def test_restarted_orchestrator_loads_persisted_data(tmp_path: Path) -> None:
     def fetch(now: datetime, _: Any) -> HouseholdLoadData:
         return data(now, value=4.0)
 
-    first = ProviderOrchestrator(
-        configuration(),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-    )
-    first.run_due(START)
-
+    orchestrator_for(tmp_path, fetch).run_due(START)
     loaded: list[object | None] = []
 
     def load() -> object | None:
-        persisted = ProviderDataStore(tmp_path).load(
-            ProviderDataKey(
-                "household-load", "household_load", "sensor.household_load"
-            ),
-            ADAPTER,
-        )
+        persisted = ProviderDataStore(tmp_path).load(LOAD_KEY, ADAPTER)
         loaded.append(persisted)
         return persisted
 
     ProviderOrchestrator(
-        configuration(),
+        orchestration(),
         [
-            ProviderRegistration(
-                name="household_load",
-                data_type="household-load",
-                adapter=ADAPTER,
-                plan=lambda now, schedule: plan_without_needs(
-                    lambda: fetch(now, schedule)
-                ),
+            replace(
+                registration(fetch),
                 is_fresh=lambda value, _: isinstance(value, HouseholdLoadData),
                 load=load,
             )
@@ -462,20 +392,12 @@ def test_restarted_orchestrator_loads_persisted_data(tmp_path: Path) -> None:
 
 
 def test_stale_refresh_does_not_create_plan(tmp_path: Path) -> None:
-    plans: list[ProviderDataSnapshot] = []
-
-    def generate(snapshot: ProviderDataSnapshot) -> object:
-        plans.append(snapshot)
-        return snapshot
-
-    def fetch(_: datetime, __: Any) -> HouseholdLoadData:
-        return data(START - timedelta(hours=2))
-
-    orchestrator = ProviderOrchestrator(
-        configuration(optimization_enabled=True),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-        plan_generator=generate,
+    plans = PlanRecorder()
+    orchestrator = orchestrator_for(
+        tmp_path,
+        lambda _, __: data(START - timedelta(hours=2)),
+        plans,
+        optimization_enabled=True,
     )
 
     cycle = orchestrator.run_due(START)
@@ -488,24 +410,13 @@ def test_stale_refresh_does_not_create_plan(tmp_path: Path) -> None:
 def test_refresh_with_excluded_hours_succeeds_and_does_not_block_the_plan(
     tmp_path: Path,
 ) -> None:
-    plans: list[ProviderDataSnapshot] = []
-
-    def generate(snapshot: ProviderDataSnapshot) -> object:
-        plans.append(snapshot)
-        return snapshot
-
     excluded = exclusion(START, "unavailable")
 
     def fetch(_: datetime, __: Any) -> HouseholdLoadData:
         return replace(data(START), load_kw=(None,), exclusions=(excluded,))
 
-    store = ProviderDataStore(tmp_path)
-    orchestrator = ProviderOrchestrator(
-        configuration(optimization_enabled=True),
-        [registration(fetch)],
-        store,
-        plan_generator=generate,
-    )
+    plans = PlanRecorder()
+    orchestrator = orchestrator_for(tmp_path, fetch, plans, optimization_enabled=True)
 
     cycle = orchestrator.run_due(START)
 
@@ -514,11 +425,7 @@ def test_refresh_with_excluded_hours_succeeds_and_does_not_block_the_plan(
     assert run.error is None
     assert cycle.plan_status == "created"
     assert len(plans) == 1
-    persisted = store.load(
-        ProviderDataKey("household-load", "household_load", "sensor.household_load"),
-        ADAPTER,
-    )
-    assert persisted is not None
+    persisted = load_persisted(ProviderDataStore(tmp_path), LOAD_KEY, ADAPTER)
     assert persisted.load_kw == (None,)
     assert persisted.exclusions == (excluded,)
 
@@ -538,11 +445,7 @@ def test_excluded_hours_are_logged_once_per_refresh_with_reason_counts(
             ),
         )
 
-    orchestrator = ProviderOrchestrator(
-        configuration(),
-        [registration(fetch)],
-        ProviderDataStore(tmp_path),
-    )
+    orchestrator = orchestrator_for(tmp_path, fetch)
 
     with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
         cycle = orchestrator.run_due(START)
@@ -570,12 +473,7 @@ def test_excluded_hours_are_logged_once_per_refresh_with_reason_counts(
 def test_no_excluded_hours_summary_is_logged_when_nothing_is_excluded(
     tmp_path: Path, caplog: LogCaptureFixture
 ) -> None:
-    def fetch(now: datetime, _: Any) -> HouseholdLoadData:
-        return data(now)
-
-    orchestrator = ProviderOrchestrator(
-        configuration(), [registration(fetch)], ProviderDataStore(tmp_path)
-    )
+    orchestrator = orchestrator_for(tmp_path)
 
     with caplog.at_level(logging.DEBUG, logger="energy_optimizer.orchestration"):
         cycle = orchestrator.run_due(START)
@@ -589,22 +487,92 @@ def test_no_excluded_hours_summary_is_logged_when_nothing_is_excluded(
 
 
 def test_orchestrator_rejects_unregistered_configured_source(tmp_path: Path) -> None:
-    configured = OrchestrationConfiguration(
-        enabled=True,
-        sources={"unknown": DataSourceScheduleConfiguration(interval_seconds=60)},
+    with pytest.raises(OrchestrationError, match="unknown"):
+        ProviderOrchestrator(
+            orchestration("unknown", 60), [], ProviderDataStore(tmp_path)
+        )
+
+
+def energy_entity(
+    entity_id: str, state_class: str = "total_increasing"
+) -> dict[str, str]:
+    return {"entity_id": entity_id, "state_class": state_class, "unit": "kWh"}
+
+
+def home_assistant_settings(**sections: Any) -> HomeAssistantConfiguration:
+    return HomeAssistantConfiguration.model_validate(
+        {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "test-token",
+            "timeout_seconds": 5,
+            **sections,
+        }
     )
 
-    with pytest.raises(OrchestrationError, match="unknown"):
-        ProviderOrchestrator(configured, [], ProviderDataStore(tmp_path))
+
+def runtime_configuration(
+    tmp_path: Path, source: str, interval_seconds: float, **sections: Any
+) -> Configuration:
+    """Configure orchestration of one ``source`` next to the given sections."""
+    return Configuration(
+        time_resolution_minutes=60,
+        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
+        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
+        persistence=PersistenceConfiguration(directory=tmp_path),
+        orchestration=orchestration(source, interval_seconds),
+        **sections,
+    )
 
 
-def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class FakeHomeAssistantImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
+def household_configuration(
+    tmp_path: Path, aggregate: dict[str, Any] | None = None
+) -> Configuration:
+    """Configure household load from one energy counter unless ``aggregate`` is set."""
+    return runtime_configuration(
+        tmp_path,
+        "household_load",
+        300,
+        home_assistant=home_assistant_settings(
+            household_load=aggregate
+            or aggregate_settings(add=[energy_entity("sensor.household_energy")])
+        ),
+    )
 
+
+def configured(
+    configuration: Configuration,
+    store: ProviderDataStore,
+    home_assistant_client: httpx.Client | None = None,
+) -> ProviderOrchestrator:
+    orchestrator = build_configured_orchestrator(
+        configuration, store, home_assistant_client=home_assistant_client
+    )
+    assert orchestrator is not None
+    return orchestrator
+
+
+class FakeImporter:
+    """Stand-in for a provider importer whose data is always fresh."""
+
+    def __init__(self, _: object) -> None:
+        pass
+
+    def is_fresh(self, *_: object, **__: object) -> bool:
+        return True
+
+
+def patch_importer(monkeypatch: pytest.MonkeyPatch, name: str, importer: type) -> None:
+    monkeypatch.setattr(f"energy_optimizer.orchestration.{name}", importer)
+
+
+def fake_load_importer(
+    monkeypatch: pytest.MonkeyPatch,
+    build: Callable[[datetime, datetime | None, datetime | None], HouseholdLoadData],
+) -> list[LoadCall]:
+    """Answer every household-load request with ``build`` and record it."""
+    calls: list[LoadCall] = []
+
+    class FakeLoadImporter(FakeImporter):
         def plan(
             self,
             start_time: datetime,
@@ -613,156 +581,71 @@ def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
             *,
             now: datetime | None = None,
         ) -> HistoryPlan[HouseholdLoadData]:
-            del end_time, history_lookback_seconds
-            return plan_without_needs(
-                lambda: data(
-                    now or start_time,
-                    source="home-assistant",
-                    entity_id="household_load",
-                )
-            )
+            calls.append((start_time, end_time, history_lookback_seconds, now))
+            return plan_without_needs(lambda: build(start_time, end_time, now))
 
-        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
-            return True
+    patch_importer(monkeypatch, "HomeAssistantLoadImporter", FakeLoadImporter)
+    return calls
 
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        FakeHomeAssistantImporter,
-    )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.household_energy",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(),
+
+def test_configured_home_assistant_orchestrator_uses_aggregate_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_load_importer(
+        monkeypatch, lambda start_time, _, now: home_assistant_load(now or start_time)
     )
     store = ProviderDataStore(tmp_path)
 
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    cycle = configured(household_configuration(tmp_path), store).run_due(START)
 
-    assert orchestrator is not None
-    cycle = orchestrator.run_due(START)
     assert cycle.provider_runs[0].status == "success"
-    persisted = store.load(
-        ProviderDataKey("household-load", "home-assistant", "household_load"),
-        ADAPTER,
-    )
-    assert persisted is not None
+    persisted = load_persisted(store, HOUSEHOLD_KEY, ADAPTER)
     assert persisted.source.entity_id == "household_load"
 
 
 def test_configured_forecast_solar_orchestrator_persists_forecast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeForecastSolarImporter:
-        def __init__(self, _: ForecastSolarConfiguration) -> None:
-            pass
-
+    class FakeForecastSolarImporter(FakeImporter):
         def fetch(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            *,
-            now: datetime | None = None,
+            self, start_time: datetime, *_: object, now: datetime | None = None
         ) -> PvGenerationData:
-            del end_time
-            return pv_data(now or start_time)
+            when = now or start_time
+            start = when.replace(minute=0, second=0, microsecond=0)
+            return PvGenerationData(
+                schema_version="1",
+                start_time=start,
+                interval_minutes=60,
+                generation_kw=(1.0,),
+                unit="kW",
+                source=SourceMetadata(
+                    provider="forecast.solar", entity_id="pv_generation"
+                ),
+                retrieved_at=when,
+                expires_at=start + timedelta(hours=24),
+            )
 
-        def is_fresh(self, _: PvGenerationData, now: datetime) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.ForecastSolarImporter",
-        FakeForecastSolarImporter,
-    )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        forecast_solar=ForecastSolarConfiguration(
-            latitude=52.52,
-            longitude=13.41,
-            declination_degrees=35,
-            azimuth_degrees=0,
-            peak_power_kw=8,
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "pv_generation": DataSourceScheduleConfiguration(interval_seconds=300)
-            },
-        ),
-    )
+    patch_importer(monkeypatch, "ForecastSolarImporter", FakeForecastSolarImporter)
     store = ProviderDataStore(tmp_path)
+    runtime = runtime_configuration(
+        tmp_path, "pv_generation", 300, forecast_solar=FORECAST_SOLAR
+    )
 
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    cycle = configured(runtime, store).run_due(START)
 
-    assert orchestrator is not None
-    cycle = orchestrator.run_due(START)
     assert cycle.provider_runs[0].source == "pv_generation"
     assert cycle.provider_runs[0].status == "success"
-    persisted = store.load(
-        ProviderDataKey("pv-generation", "forecast.solar", "pv_generation"),
-        PV_ADAPTER,
-    )
-    assert persisted is not None
-    assert persisted.generation_kw == (1.0,)
+    assert load_persisted(store, PV_KEY, PV_ADAPTER).generation_kw == (1.0,)
 
 
-def grid_flow_runtime_configuration(tmp_path: Path) -> Configuration:
-    return Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "grid_import": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.grid_import",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "grid_export": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.grid_export",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "grid_flow": DataSourceScheduleConfiguration(interval_seconds=300)
-            },
+def grid_flow_configuration(tmp_path: Path) -> Configuration:
+    return runtime_configuration(
+        tmp_path,
+        "grid_flow",
+        300,
+        home_assistant=home_assistant_settings(
+            grid_import=aggregate_settings(add=[energy_entity("sensor.grid_import")]),
+            grid_export=aggregate_settings(add=[energy_entity("sensor.grid_export")]),
         ),
     )
 
@@ -770,56 +653,41 @@ def grid_flow_runtime_configuration(tmp_path: Path) -> Configuration:
 def test_configured_grid_flow_orchestrator_persists_grid_flow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeGridFlowImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
+    class FakeGridFlowImporter(FakeImporter):
         def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
+            self, *_: object, now: datetime | None = None
         ) -> HistoryPlan[GridFlowData]:
-            del start_time, end_time, history_lookback_seconds
-            return plan_without_needs(lambda: grid_flow_data(now or START))
+            when = now or START
+            return plan_without_needs(
+                lambda: GridFlowData(
+                    schema_version="1",
+                    start_time=when.replace(minute=0, second=0, microsecond=0),
+                    interval_minutes=60,
+                    import_kw=(1.0,),
+                    export_kw=(0.5,),
+                    unit="kW",
+                    source=SourceMetadata(
+                        provider="home-assistant", entity_id="grid_flow"
+                    ),
+                    retrieved_at=when,
+                    latest_observation_at=when,
+                )
+            )
 
-        def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantGridFlowImporter",
-        FakeGridFlowImporter,
-    )
-    runtime_configuration = grid_flow_runtime_configuration(tmp_path)
+    patch_importer(monkeypatch, "HomeAssistantGridFlowImporter", FakeGridFlowImporter)
     store = ProviderDataStore(tmp_path)
 
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    cycle = configured(grid_flow_configuration(tmp_path), store).run_due(START)
 
-    assert orchestrator is not None
-    cycle = orchestrator.run_due(START)
     assert cycle.provider_runs[0].source == "grid_flow"
     assert cycle.provider_runs[0].status == "success"
-    persisted = store.load(
-        ProviderDataKey("grid-flow", "home-assistant", "grid_flow"),
-        GRID_FLOW_ADAPTER,
-    )
-    assert persisted is not None
-    assert persisted.import_kw == (1.0,)
+    assert load_persisted(store, GRID_KEY, GRID_FLOW_ADAPTER).import_kw == (1.0,)
 
 
-GRID_KEY = ProviderDataKey("grid-flow", "home-assistant", "grid_flow")
-
-
-class RecordingGridFlowImporter:
+class RecordingGridFlowImporter(FakeImporter):
     """Return one hour of grid flow per requested hour and record each request."""
 
     requests: list[tuple[datetime, datetime | None]] = []
-
-    def __init__(self, _: HomeAssistantConfiguration) -> None:
-        pass
 
     def plan(
         self,
@@ -854,35 +722,31 @@ class RecordingGridFlowImporter:
             )
         )
 
-    def is_fresh(self, _: GridFlowData, now: datetime) -> bool:
-        del now
-        return True
-
 
 @pytest.fixture
 def grid_flow_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[tuple[datetime, datetime | None]]:
     RecordingGridFlowImporter.requests = []
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantGridFlowImporter",
-        RecordingGridFlowImporter,
+    patch_importer(
+        monkeypatch, "HomeAssistantGridFlowImporter", RecordingGridFlowImporter
     )
     return RecordingGridFlowImporter.requests
 
 
+@pytest.fixture
+def grid_orchestrator(
+    tmp_path: Path, grid_flow_requests: list[tuple[datetime, datetime | None]]
+) -> ProviderOrchestrator:
+    """Orchestrate grid flow after ``grid_flow_requests`` replaced its importer."""
+    return configured(grid_flow_configuration(tmp_path), ProviderDataStore(tmp_path))
+
+
 def test_grid_flow_bootstrap_requests_the_complete_retention_window(
-    tmp_path: Path,
+    grid_orchestrator: ProviderOrchestrator,
     grid_flow_requests: list[tuple[datetime, datetime | None]],
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        grid_flow_runtime_configuration(tmp_path), store
-    )
-    assert orchestrator is not None
-    now = START + timedelta(hours=5, minutes=20)
-
-    cycle = orchestrator.run_due(now)
+    cycle = grid_orchestrator.run_due(START + timedelta(hours=5, minutes=20))
 
     end = START + timedelta(hours=5)
     assert cycle.provider_runs[0].status == "success"
@@ -890,42 +754,34 @@ def test_grid_flow_bootstrap_requests_the_complete_retention_window(
 
 
 def test_grid_flow_refresh_requests_only_missing_hours_and_keeps_history(
-    tmp_path: Path,
+    grid_orchestrator: ProviderOrchestrator,
     grid_flow_requests: list[tuple[datetime, datetime | None]],
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        grid_flow_runtime_configuration(tmp_path), store
+    grid_orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    second = grid_orchestrator.run_due(
+        START + timedelta(hours=8, minutes=1), force=True
     )
-    assert orchestrator is not None
-
-    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
-    second = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
 
     assert second.provider_runs[0].status == "success"
     assert grid_flow_requests[-1] == (
         START + timedelta(hours=5),
         START + timedelta(hours=8),
     )
-    history = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
-    assert history is not None
+    history = load_persisted(grid_orchestrator.store, GRID_KEY, GRID_FLOW_ADAPTER)
     assert history.start_time == START + timedelta(hours=3)
     assert history.import_kw == (1.0, 2.0, 1.0, 2.0, 3.0)
 
 
 def test_grid_flow_refresh_is_skipped_when_all_completed_hours_are_persisted(
-    tmp_path: Path,
+    grid_orchestrator: ProviderOrchestrator,
     grid_flow_requests: list[tuple[datetime, datetime | None]],
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        grid_flow_runtime_configuration(tmp_path), store
-    )
-    assert orchestrator is not None
-    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    grid_orchestrator.run_due(START + timedelta(hours=5, minutes=1))
     request_count = len(grid_flow_requests)
 
-    cycle = orchestrator.run_due(START + timedelta(hours=5, minutes=30), force=True)
+    cycle = grid_orchestrator.run_due(
+        START + timedelta(hours=5, minutes=30), force=True
+    )
 
     assert cycle.provider_runs[0].status == "skipped"
     assert cycle.provider_runs[0].error == "no missing completed hours"
@@ -933,64 +789,45 @@ def test_grid_flow_refresh_is_skipped_when_all_completed_hours_are_persisted(
 
 
 def test_grid_flow_failure_preserves_the_retained_history(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    grid_flow_requests: list[tuple[datetime, datetime | None]],
+    grid_orchestrator: ProviderOrchestrator, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        grid_flow_runtime_configuration(tmp_path), store
-    )
-    assert orchestrator is not None
-    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
-    retained = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
+    grid_orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    retained = grid_orchestrator.store.load(GRID_KEY, GRID_FLOW_ADAPTER)
 
     def fail(*_: object, **__: object) -> HistoryPlan[GridFlowData]:
         raise RuntimeError("Home Assistant is unavailable")
 
     monkeypatch.setattr(RecordingGridFlowImporter, "plan", fail)
-    cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
+    cycle = grid_orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
 
     assert cycle.provider_runs[0].status == "failed"
     assert cycle.provider_runs[0].error == "Home Assistant is unavailable"
-    assert store.load(GRID_KEY, GRID_FLOW_ADAPTER) == retained
+    assert grid_orchestrator.store.load(GRID_KEY, GRID_FLOW_ADAPTER) == retained
 
 
 def test_grid_flow_gap_in_fetched_hours_is_excluded_as_history_unavailable(
-    tmp_path: Path,
+    grid_orchestrator: ProviderOrchestrator,
     monkeypatch: pytest.MonkeyPatch,
     grid_flow_requests: list[tuple[datetime, datetime | None]],
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        grid_flow_runtime_configuration(tmp_path), store
-    )
-    assert orchestrator is not None
-    orchestrator.run_due(START + timedelta(hours=5, minutes=1))
+    grid_orchestrator.run_due(START + timedelta(hours=5, minutes=1))
     original_plan = RecordingGridFlowImporter.plan
 
     def skip_first_requested_hour(
         self: RecordingGridFlowImporter,
         start_time: datetime,
-        end_time: datetime | None = None,
-        history_lookback_seconds: float = 0,
-        *,
-        now: datetime | None = None,
+        *arguments: Any,
+        **keywords: Any,
     ) -> HistoryPlan[GridFlowData]:
         return original_plan(
-            self,
-            start_time + timedelta(hours=1),
-            end_time,
-            history_lookback_seconds,
-            now=now,
+            self, start_time + timedelta(hours=1), *arguments, **keywords
         )
 
     monkeypatch.setattr(RecordingGridFlowImporter, "plan", skip_first_requested_hour)
-    cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
+    cycle = grid_orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
 
     assert cycle.provider_runs[0].status == "success"
-    history = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
-    assert history is not None
+    history = load_persisted(grid_orchestrator.store, GRID_KEY, GRID_FLOW_ADAPTER)
     assert history.start_time == START + timedelta(hours=3)
     assert history.import_kw == (1.0, 2.0, None, 1.0, 2.0)
     assert history.export_kw == (0.5, 0.5, None, 0.5, 0.5)
@@ -1000,7 +837,9 @@ def test_grid_flow_gap_in_fetched_hours_is_excluded_as_history_unavailable(
     ] == [(START + timedelta(hours=5), ["history_unavailable"])]
 
     monkeypatch.setattr(RecordingGridFlowImporter, "plan", original_plan)
-    third = orchestrator.run_due(START + timedelta(hours=10, minutes=1), force=True)
+    third = grid_orchestrator.run_due(
+        START + timedelta(hours=10, minutes=1), force=True
+    )
 
     assert third.provider_runs[0].status == "success"
     assert grid_flow_requests[-1] == (
@@ -1009,25 +848,12 @@ def test_grid_flow_gap_in_fetched_hours_is_excluded_as_history_unavailable(
     )
 
 
-PRICE_KEY = ProviderDataKey("electricity-prices", "awattar.de", "de")
-PRICE_HISTORY_KEY = ProviderDataKey("electricity-price-history", "awattar.de", "de")
-PRICE_ADAPTER = TypeAdapter(ElectricityPriceData)
-
-
-class FakeAwattarImporter:
+class FakeAwattarImporter(FakeImporter):
     """Return a 3-hour forecast starting at the requested hour."""
 
-    def __init__(self, _: AwattarConfiguration) -> None:
-        pass
-
     def fetch(
-        self,
-        start_time: datetime,
-        end_time: datetime | None = None,
-        *,
-        now: datetime | None = None,
+        self, start_time: datetime, *_: object, now: datetime | None = None
     ) -> ElectricityPriceData:
-        del end_time
         assert now is not None
         hours = tuple(start_time + timedelta(hours=index) for index in range(3))
         base = start_time.hour / 100
@@ -1043,48 +869,26 @@ class FakeAwattarImporter:
             expires_at=start_time + timedelta(hours=3),
         )
 
-    def is_fresh(self, _: ElectricityPriceData, now: datetime) -> bool:
-        del now
-        return True
 
-
-def price_runtime_configuration(tmp_path: Path) -> Configuration:
-    return Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        awattar=AwattarConfiguration(),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "electricity_prices": DataSourceScheduleConfiguration(
-                    interval_seconds=3600
-                )
-            },
-        ),
+def price_configuration(tmp_path: Path) -> Configuration:
+    return runtime_configuration(
+        tmp_path, "electricity_prices", 3600, awattar=AwattarConfiguration()
     )
 
 
 def test_price_refresh_retains_elapsed_hours_that_the_forecast_replaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.AwattarImporter", FakeAwattarImporter
-    )
+    patch_importer(monkeypatch, "AwattarImporter", FakeAwattarImporter)
     store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        price_runtime_configuration(tmp_path), store
-    )
-    assert orchestrator is not None
+    orchestrator = configured(price_configuration(tmp_path), store)
 
     orchestrator.run_due(START + timedelta(hours=1, minutes=5))
     cycle = orchestrator.run_due(START + timedelta(hours=4, minutes=5), force=True)
 
     assert cycle.provider_runs[0].status == "success"
-    forecast = store.load(PRICE_KEY, PRICE_ADAPTER)
-    history = store.load(PRICE_HISTORY_KEY, PRICE_ADAPTER)
-    assert forecast is not None and history is not None
+    forecast = load_persisted(store, PRICE_KEY, PRICE_ADAPTER)
+    history = load_persisted(store, PRICE_HISTORY_KEY, PRICE_ADAPTER)
     assert forecast.timestamps == tuple(START + timedelta(hours=h) for h in (4, 5, 6))
     assert history.timestamps == tuple(
         START + timedelta(hours=h) for h in (1, 2, 3, 4, 5, 6)
@@ -1097,388 +901,134 @@ def test_price_refresh_retains_elapsed_hours_that_the_forecast_replaces(
 def test_price_history_failure_never_blocks_the_forecast_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.AwattarImporter", FakeAwattarImporter
-    )
+    patch_importer(monkeypatch, "AwattarImporter", FakeAwattarImporter)
     store = ProviderDataStore(tmp_path)
     for suffix in (".json", ".json.bak"):
         (
             tmp_path / f"electricity-price-history-{PRICE_HISTORY_KEY.digest()}{suffix}"
         ).write_text("{corrupt", encoding="utf-8")
-    orchestrator = build_configured_orchestrator(
-        price_runtime_configuration(tmp_path), store
-    )
-    assert orchestrator is not None
+    orchestrator = configured(price_configuration(tmp_path), store)
 
     cycle = orchestrator.run_due(START + timedelta(hours=1, minutes=5))
 
     assert cycle.provider_runs[0].status == "success"
-    forecast = store.load(PRICE_KEY, PRICE_ADAPTER)
-    assert forecast is not None
+    forecast = load_persisted(store, PRICE_KEY, PRICE_ADAPTER)
     assert forecast.timestamps[0] == START + timedelta(hours=1)
 
 
 def test_configured_battery_orchestrator_persists_battery_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeBatteryImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
+    class FakeBatteryImporter(FakeImporter):
         def fetch(self, *, now: datetime | None = None) -> BatteryData:
-            return battery_data(now or START)
+            return BatteryData(
+                schema_version="1",
+                start_time=now or START,
+                interval_minutes=60,
+                state_of_charge_kwh=(5.0,),
+                capacity_kwh=10.0,
+                minimum_soc_kwh=2.0,
+                maximum_soc_kwh=10.0,
+                initial_soc_kwh=5.0,
+                maximum_charge_kw=4.0,
+                maximum_discharge_kw=4.0,
+                battery_efficiency=0.95,
+                unit="kWh",
+                power_unit="kW",
+                source=SourceMetadata(provider="home-assistant", entity_id="battery"),
+                retrieved_at=now or START,
+                latest_observation_at=now or START,
+            )
 
-        def is_fresh(self, _: BatteryData, *, now: datetime | None = None) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantBatteryImporter",
-        FakeBatteryImporter,
-    )
-    battery_entities = {
-        "state_of_charge": {
-            "entity_id": "sensor.battery_soc",
-            "unit": "%",
-        },
-        "capacity": {"entity_id": "sensor.battery_capacity", "unit": "kWh"},
-        "minimum_soc": {"entity_id": "sensor.battery_minimum", "unit": "kWh"},
-        "maximum_soc": {"entity_id": "sensor.battery_maximum", "unit": "kWh"},
-        "maximum_charge": {"entity_id": "sensor.battery_charge", "unit": "kW"},
-        "maximum_discharge": {
-            "entity_id": "sensor.battery_discharge",
-            "unit": "kW",
-        },
-        "battery_efficiency": {
-            "entity_id": "sensor.battery_efficiency",
-            "unit": "ratio",
-        },
-    }
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "battery": battery_entities,
-                "timeout_seconds": 5,
+    patch_importer(monkeypatch, "HomeAssistantBatteryImporter", FakeBatteryImporter)
+    store = ProviderDataStore(tmp_path)
+    runtime = runtime_configuration(
+        tmp_path,
+        "battery",
+        300,
+        home_assistant=home_assistant_settings(
+            battery={
+                "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
+                "capacity": {"entity_id": "sensor.battery_capacity", "unit": "kWh"},
+                "minimum_soc": {"entity_id": "sensor.battery_minimum", "unit": "kWh"},
+                "maximum_soc": {"entity_id": "sensor.battery_maximum", "unit": "kWh"},
+                "maximum_charge": {"entity_id": "sensor.battery_charge", "unit": "kW"},
+                "maximum_discharge": {
+                    "entity_id": "sensor.battery_discharge",
+                    "unit": "kW",
+                },
+                "battery_efficiency": {
+                    "entity_id": "sensor.battery_efficiency",
+                    "unit": "ratio",
+                },
             }
         ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={"battery": DataSourceScheduleConfiguration(interval_seconds=300)},
-        ),
     )
-    store = ProviderDataStore(tmp_path)
 
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
+    cycle = configured(runtime, store).run_due(START)
 
-    assert orchestrator is not None
-    cycle = orchestrator.run_due(START)
     assert cycle.provider_runs[0].source == "battery"
     assert cycle.provider_runs[0].status == "success"
-    persisted = store.load(
-        ProviderDataKey("battery", "home-assistant", "battery"), BATTERY_ADAPTER
-    )
-    assert persisted is not None
+    persisted = load_persisted(store, BATTERY_KEY, BATTERY_ADAPTER)
     assert persisted.state_of_charge_kwh == (5.0,)
 
 
-def test_configured_efficiency_orchestrator_persists_daily_calculation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class FakeEfficiencyImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
-            del end_time
-            return plan_without_needs(
-                lambda: BatteryEfficiencyHistoryData(
-                    schema_version="1",
-                    start_time=start_time,
-                    interval_minutes=60,
-                    battery_energy_in_kwh=(0, 5, 0, 5, 0, 5),
-                    battery_energy_out_kwh=(0, 4, 0, 4, 0, 4),
-                    inverter_charge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
-                    inverter_charge_energy_out_kwh=(9, 9, 9, 9, 9, 9),
-                    inverter_discharge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
-                    inverter_discharge_energy_out_kwh=(8, 8, 8, 8, 8, 8),
-                    state_of_charge_percent=(50, 100, 50, 100, 50, 100, 50),
-                    unit="kWh",
-                    source=SourceMetadata(
-                        provider="home-assistant",
-                        entity_id="battery_efficiency_history",
-                    ),
-                    retrieved_at=now or START,
-                    latest_observation_at=now or START,
-                )
-            )
-
-        def is_fresh(
-            self,
-            _: BatteryEfficiencyHistoryData,
-            *,
-            now: datetime | None = None,
-        ) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
-        FakeEfficiencyImporter,
-    )
-    energy_entity = {
-        "entity_id": "sensor.energy",
-        "state_class": "total_increasing",
-        "unit": "kWh",
+def efficiency_leg(
+    energy_in: str = "sensor.energy",
+    energy_out: str = "sensor.energy",
+    state_class: str = "total_increasing",
+) -> dict[str, Any]:
+    return {
+        "energy_in": aggregate_settings(add=[energy_entity(energy_in, state_class)]),
+        "energy_out": aggregate_settings(add=[energy_entity(energy_out, state_class)]),
     }
-    leg = {
-        "energy_in": aggregate_settings(add=[energy_entity]),
-        "energy_out": aggregate_settings(add=[energy_entity]),
-    }
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "timeout_seconds": 5,
-                "battery": {
-                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                    "capacity": 10,
-                    "minimum_soc": 1,
-                    "maximum_soc": 10,
-                    "maximum_charge": 4,
-                    "maximum_discharge": 4,
-                    "efficiency_calculation": {
-                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                        "battery": leg,
-                        "inverter_charge": leg,
-                        "inverter_discharge": leg,
-                    },
-                },
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "battery_efficiency": DataSourceScheduleConfiguration(
-                    interval_seconds=86400
-                )
-            },
-        ),
-    )
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
-
-    assert orchestrator is not None
-    cycle = orchestrator.run_due(START + timedelta(hours=6))
-
-    assert cycle.provider_runs[0].status == "success"
-    result = store.load(
-        ProviderDataKey("battery-efficiency", "home-assistant", "battery_efficiency"),
-        TypeAdapter(BatteryEfficiencyData),
-    )
-    assert result is not None
-    assert result.battery_efficiency == pytest.approx(0.8)
 
 
-def test_configured_efficiency_orchestrator_fetches_only_missing_hours(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    fetch_calls: list[tuple[datetime, datetime]] = []
-
-    class FakeIncrementalEfficiencyImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
-            fetch_calls.append((start_time, end_time))
-            hours = int((end_time - start_time).total_seconds() // 3600)
-            return plan_without_needs(
-                lambda: BatteryEfficiencyHistoryData(
-                    schema_version="1",
-                    start_time=start_time,
-                    interval_minutes=60,
-                    battery_energy_in_kwh=(1.0,) * hours,
-                    battery_energy_out_kwh=(0.0,) * hours,
-                    inverter_charge_energy_in_kwh=(1.0,) * hours,
-                    inverter_charge_energy_out_kwh=(1.0,) * hours,
-                    inverter_discharge_energy_in_kwh=(1.0,) * hours,
-                    inverter_discharge_energy_out_kwh=(1.0,) * hours,
-                    state_of_charge_percent=(50.0,) * (hours + 1),
-                    unit="kWh",
-                    source=SourceMetadata(
-                        provider="home-assistant",
-                        entity_id="battery_efficiency_history",
-                    ),
-                    retrieved_at=now or start_time,
-                    latest_observation_at=now or end_time,
-                )
-            )
-
-        def is_fresh(self, *_: object, **__: object) -> bool:
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
-        FakeIncrementalEfficiencyImporter,
-    )
-    energy_entity = {
-        "entity_id": "sensor.energy",
-        "state_class": "total_increasing",
-        "unit": "kWh",
-    }
-    leg = {
-        "energy_in": aggregate_settings(add=[energy_entity]),
-        "energy_out": aggregate_settings(add=[energy_entity]),
-    }
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "timeout_seconds": 5,
-                "battery": {
-                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                    "capacity": 10,
-                    "minimum_soc": 1,
-                    "maximum_soc": 10,
-                    "maximum_charge": 4,
-                    "maximum_discharge": 4,
-                    "efficiency_calculation": {
-                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                        "history_start": START.isoformat(),
-                        "battery": leg,
-                        "inverter_charge": leg,
-                        "inverter_discharge": leg,
-                    },
-                },
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "battery_efficiency": DataSourceScheduleConfiguration(
-                    interval_seconds=3600
-                )
-            },
-        ),
-    )
-    store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
-    assert orchestrator is not None
-
-    orchestrator.run_due(START + timedelta(hours=1), force=True)
-    orchestrator.run_due(START + timedelta(hours=2), force=True)
-
-    assert fetch_calls == [
-        (START, START + timedelta(hours=1)),
-        (START + timedelta(hours=1), START + timedelta(hours=2)),
-    ]
-    history_key = ProviderDataKey(
-        "battery-efficiency-history",
-        "home-assistant",
-        "battery_efficiency_history",
-    )
-    persisted = store.load(history_key, TypeAdapter(BatteryEfficiencyHistoryData))
-    assert persisted is not None
-    assert persisted.start_time == START
-    assert len(persisted.battery_energy_in_kwh) == 2
-    assert len(persisted.state_of_charge_percent) == 3
-
-
-def efficiency_runtime_configuration(
-    tmp_path: Path, leg: dict[str, Any]
+def efficiency_configuration(
+    tmp_path: Path,
+    leg: dict[str, Any] | None = None,
+    *,
+    interval_seconds: float = 3600,
+    history_start: bool = True,
 ) -> Configuration:
     """Configure hourly efficiency calculation with one entity mapping for every leg."""
-    return Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "timeout_seconds": 5,
-                "battery": {
-                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                    "capacity": 10,
-                    "minimum_soc": 1,
-                    "maximum_soc": 10,
-                    "maximum_charge": 4,
-                    "maximum_discharge": 4,
-                    "efficiency_calculation": {
-                        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                        "history_start": START.isoformat(),
-                        "battery": leg,
-                        "inverter_charge": leg,
-                        "inverter_discharge": leg,
-                    },
-                },
+    soc = {"entity_id": "sensor.soc", "unit": "%"}
+    legs = {
+        name: leg or efficiency_leg()
+        for name in ("battery", "inverter_charge", "inverter_discharge")
+    }
+    calculation: dict[str, Any] = {"state_of_charge": soc, **legs}
+    if history_start:
+        calculation["history_start"] = START.isoformat()
+    return runtime_configuration(
+        tmp_path,
+        "battery_efficiency",
+        interval_seconds,
+        home_assistant=home_assistant_settings(
+            battery={
+                "state_of_charge": soc,
+                "capacity": 10,
+                "minimum_soc": 1,
+                "maximum_soc": 10,
+                "maximum_charge": 4,
+                "maximum_discharge": 4,
+                "efficiency_calculation": calculation,
             }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "battery_efficiency": DataSourceScheduleConfiguration(
-                    interval_seconds=3600
-                )
-            },
         ),
     )
 
 
-EFFICIENCY_HISTORY_KEY = ProviderDataKey(
-    "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
-)
-EFFICIENCY_RESULT_KEY = ProviderDataKey(
-    "battery-efficiency", "home-assistant", "battery_efficiency"
-)
+def fake_efficiency_importer(
+    monkeypatch: pytest.MonkeyPatch, excluded: HourExclusion | None = None
+) -> list[tuple[datetime, datetime]]:
+    """Answer every window with 1 kWh hours and record the requested windows.
 
-
-def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
-) -> None:
-    """An excluded hour must not block persistence or force a full history refetch.
-
-    Regression test for issue #157: previously, any suspect hour anywhere in
-    the requested window made the importer raise before the history could be
-    saved, so the source could never advance past it and kept re-requesting
-    the entire configured history on every scheduled attempt.
+    With ``excluded``, the first hour of the window that starts at START is
+    excluded, and the state of charge next to it is dropped.
     """
-
     fetch_calls: list[tuple[datetime, datetime]] = []
-    excluded = exclusion(START, "counter_decrease", entity_id="sensor.energy")
 
-    class FakeExcludingEfficiencyImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
+    class FakeEfficiencyImporter(FakeImporter):
         def plan(
             self,
             start_time: datetime,
@@ -1488,8 +1038,10 @@ def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
         ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
             fetch_calls.append((start_time, end_time))
             hours = int((end_time - start_time).total_seconds() // 3600)
-            # Only the window that starts at START has an excluded first hour.
-            dropped = {0} if start_time == START else set()
+            exclusions = (
+                (excluded,) if excluded is not None and start_time == START else ()
+            )
+            dropped = {0} if exclusions else set()
 
             def leg(value: float) -> tuple[float | None, ...]:
                 return tuple(
@@ -1520,31 +1072,94 @@ def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
                     ),
                     retrieved_at=now or start_time,
                     latest_observation_at=now or end_time,
-                    exclusions=(excluded,) if dropped else (),
+                    exclusions=exclusions,
                 )
             )
 
-        def is_fresh(self, *_: object, **__: object) -> bool:
-            return True
+    patch_importer(
+        monkeypatch, "HomeAssistantBatteryEfficiencyImporter", FakeEfficiencyImporter
+    )
+    return fetch_calls
 
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
-        FakeExcludingEfficiencyImporter,
+
+def test_configured_efficiency_orchestrator_persists_daily_calculation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeEfficiencyImporter(FakeImporter):
+        def plan(
+            self, start_time: datetime, *_: object, now: datetime | None = None
+        ) -> HistoryPlan[BatteryEfficiencyHistoryData]:
+            return plan_without_needs(
+                lambda: BatteryEfficiencyHistoryData(
+                    schema_version="1",
+                    start_time=start_time,
+                    interval_minutes=60,
+                    battery_energy_in_kwh=(0, 5, 0, 5, 0, 5),
+                    battery_energy_out_kwh=(0, 4, 0, 4, 0, 4),
+                    inverter_charge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
+                    inverter_charge_energy_out_kwh=(9, 9, 9, 9, 9, 9),
+                    inverter_discharge_energy_in_kwh=(10, 10, 10, 10, 10, 10),
+                    inverter_discharge_energy_out_kwh=(8, 8, 8, 8, 8, 8),
+                    state_of_charge_percent=(50, 100, 50, 100, 50, 100, 50),
+                    unit="kWh",
+                    source=SourceMetadata(
+                        provider="home-assistant",
+                        entity_id="battery_efficiency_history",
+                    ),
+                    retrieved_at=now or START,
+                    latest_observation_at=now or START,
+                )
+            )
+
+    patch_importer(
+        monkeypatch, "HomeAssistantBatteryEfficiencyImporter", FakeEfficiencyImporter
     )
-    energy_entity = {
-        "entity_id": "sensor.energy",
-        "state_class": "total_increasing",
-        "unit": "kWh",
-    }
-    leg = {
-        "energy_in": aggregate_settings(add=[energy_entity]),
-        "energy_out": aggregate_settings(add=[energy_entity]),
-    }
     store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(
-        efficiency_runtime_configuration(tmp_path, leg), store
+    runtime = efficiency_configuration(
+        tmp_path, interval_seconds=86400, history_start=False
     )
-    assert orchestrator is not None
+
+    cycle = configured(runtime, store).run_due(START + timedelta(hours=6))
+
+    assert cycle.provider_runs[0].status == "success"
+    result = load_persisted(store, EFFICIENCY_RESULT_KEY, EFFICIENCY_ADAPTER)
+    assert result.battery_efficiency == pytest.approx(0.8)
+
+
+def test_configured_efficiency_orchestrator_fetches_only_missing_hours(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fetch_calls = fake_efficiency_importer(monkeypatch)
+    store = ProviderDataStore(tmp_path)
+    orchestrator = configured(efficiency_configuration(tmp_path), store)
+
+    orchestrator.run_due(START + timedelta(hours=1), force=True)
+    orchestrator.run_due(START + timedelta(hours=2), force=True)
+
+    assert fetch_calls == [
+        (START, START + timedelta(hours=1)),
+        (START + timedelta(hours=1), START + timedelta(hours=2)),
+    ]
+    persisted = load_persisted(store, EFFICIENCY_HISTORY_KEY, HISTORY_ADAPTER)
+    assert persisted.start_time == START
+    assert len(persisted.battery_energy_in_kwh) == 2
+    assert len(persisted.state_of_charge_percent) == 3
+
+
+def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """An excluded hour must not block persistence or force a full history refetch.
+
+    Regression test for issue #157: previously, any suspect hour anywhere in
+    the requested window made the importer raise before the history could be
+    saved, so the source could never advance past it and kept re-requesting
+    the entire configured history on every scheduled attempt.
+    """
+    excluded = exclusion(START, "counter_decrease", entity_id="sensor.energy")
+    fetch_calls = fake_efficiency_importer(monkeypatch, excluded)
+    store = ProviderDataStore(tmp_path)
+    orchestrator = configured(efficiency_configuration(tmp_path), store)
 
     with caplog.at_level(logging.WARNING, logger="energy_optimizer.orchestration"):
         first_cycle = orchestrator.run_due(START + timedelta(hours=1), force=True)
@@ -1573,10 +1188,7 @@ def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
         (START, START + timedelta(hours=1)),
         (START + timedelta(hours=1), START + timedelta(hours=2)),
     ]
-    persisted = store.load(
-        EFFICIENCY_HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData)
-    )
-    assert persisted is not None
+    persisted = load_persisted(store, EFFICIENCY_HISTORY_KEY, HISTORY_ADAPTER)
     assert persisted.start_time == START
     assert persisted.battery_energy_in_kwh == (None, 1.0)
     assert persisted.battery_energy_out_kwh == (None, 0.0)
@@ -1586,8 +1198,7 @@ def test_configured_efficiency_orchestrator_persists_through_an_excluded_hour(
     assert persisted.inverter_discharge_energy_out_kwh == (None, 1.0)
     assert persisted.state_of_charge_percent == (None, None, 50.0)
     assert persisted.exclusions == (excluded,)
-    result = store.load(EFFICIENCY_RESULT_KEY, TypeAdapter(BatteryEfficiencyData))
-    assert result is not None
+    result = load_persisted(store, EFFICIENCY_RESULT_KEY, EFFICIENCY_ADAPTER)
     # The excluded hour contributes nothing and is not estimated.
     assert result.charge_throughput_kwh == pytest.approx(1.0)
 
@@ -1648,44 +1259,22 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
             fetch_calls.append((start_time, end_time))
             return super().plan(start_time, end_time, now=now)
 
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantBatteryEfficiencyImporter",
+    patch_importer(
+        monkeypatch,
+        "HomeAssistantBatteryEfficiencyImporter",
         RecordingEfficiencyImporter,
     )
-    leg = {
-        "energy_in": aggregate_settings(
-            add=[
-                {
-                    "entity_id": "sensor.charging_battery_energy",
-                    "state_class": "total",
-                    "unit": "kWh",
-                }
-            ]
-        ),
-        "energy_out": aggregate_settings(
-            add=[
-                {
-                    "entity_id": "sensor.discharging_battery_energy",
-                    "state_class": "total",
-                    "unit": "kWh",
-                }
-            ]
-        ),
-    }
     store = ProviderDataStore(tmp_path)
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    orchestrator = build_configured_orchestrator(
-        efficiency_runtime_configuration(tmp_path, leg),
-        store,
-        home_assistant_client=client,
+    leg = efficiency_leg(
+        "sensor.charging_battery_energy", "sensor.discharging_battery_energy", "total"
     )
-    assert orchestrator is not None
 
-    try:
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        orchestrator = configured(
+            efficiency_configuration(tmp_path, leg), store, client
+        )
         first_cycle = orchestrator.run_due(START + timedelta(hours=2), force=True)
         second_cycle = orchestrator.run_due(START + timedelta(hours=4), force=True)
-    finally:
-        client.close()
 
     assert first_cycle.provider_runs[0].status == "success"
     assert second_cycle.provider_runs[0].status == "success"
@@ -1695,10 +1284,7 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
         (START + timedelta(hours=2), START + timedelta(hours=4)),
     ]
 
-    persisted = store.load(
-        EFFICIENCY_HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData)
-    )
-    assert persisted is not None
+    persisted = load_persisted(store, EFFICIENCY_HISTORY_KEY, HISTORY_ADAPTER)
     assert persisted.start_time == START
     # Hour 0 holds the charging dip and hour 2 the discharging dip. An hour that
     # is excluded for one counter is excluded for every leg, and each of the
@@ -1732,8 +1318,7 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
         assert decrease.state == f"{peak - dip_kwh:.3f}"
         assert decrease.previous_value == pytest.approx(peak)
         assert decrease.step_kwh == pytest.approx(-dip_kwh)
-    result = store.load(EFFICIENCY_RESULT_KEY, TypeAdapter(BatteryEfficiencyData))
-    assert result is not None
+    result = load_persisted(store, EFFICIENCY_RESULT_KEY, EFFICIENCY_ADAPTER)
     assert result.charge_throughput_kwh == pytest.approx(2.0)
     assert result.discharge_throughput_kwh == pytest.approx(2.0)
 
@@ -1741,172 +1326,51 @@ def test_configured_efficiency_orchestrator_persists_through_total_counter_decre
 def test_configured_forecast_solar_orchestrator_rejects_fast_polling(
     tmp_path: Path,
 ) -> None:
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        forecast_solar=ForecastSolarConfiguration(
-            latitude=52.52,
-            longitude=13.41,
-            declination_degrees=35,
-            azimuth_degrees=0,
-            peak_power_kw=8,
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=OrchestrationConfiguration(
-            enabled=True,
-            sources={
-                "pv_generation": DataSourceScheduleConfiguration(interval_seconds=299)
-            },
-        ),
+    runtime = runtime_configuration(
+        tmp_path, "pv_generation", 299, forecast_solar=FORECAST_SOLAR
     )
 
     with pytest.raises(OrchestrationError, match="at least 300 seconds"):
-        build_configured_orchestrator(
-            runtime_configuration, ProviderDataStore(tmp_path)
-        )
+        build_configured_orchestrator(runtime, ProviderDataStore(tmp_path))
 
 
 def test_configured_home_assistant_failure_preserves_persisted_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class FakeHomeAssistantImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[HouseholdLoadData]:
-            del start_time, end_time, history_lookback_seconds, now
+    class FailingLoadImporter(FakeImporter):
+        def plan(self, *_: object, **__: object) -> HistoryPlan[HouseholdLoadData]:
             raise RuntimeError(
                 "Home Assistant returned no history for sensor.household_energy "
                 "in the requested period"
             )
 
-        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        FakeHomeAssistantImporter,
-    )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.household_energy",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(),
-    )
+    patch_importer(monkeypatch, "HomeAssistantLoadImporter", FailingLoadImporter)
     store = ProviderDataStore(tmp_path)
-    key = ProviderDataKey("household-load", "home-assistant", "household_load")
-    store.save(
-        key,
-        ADAPTER,
-        data(
-            START,
-            value=2.5,
-            source="home-assistant",
-            entity_id="household_load",
-        ),
-    )
+    store.save(HOUSEHOLD_KEY, ADAPTER, home_assistant_load(START, value=2.5))
+    orchestrator = configured(household_configuration(tmp_path), store)
 
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
-    assert orchestrator is not None
     cycle = orchestrator.run_due(START + timedelta(hours=2))
 
     assert cycle.provider_runs[0].status == "failed"
     assert "no history for sensor.household_energy" in (
         cycle.provider_runs[0].error or ""
     )
-    persisted = store.load(key, ADAPTER)
-    assert persisted is not None
+    persisted = load_persisted(store, HOUSEHOLD_KEY, ADAPTER)
     assert persisted.load_kw == (2.5,)
 
 
 def test_configured_home_assistant_fetch_bootstraps_to_ten_year_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[datetime, datetime | None, float, datetime | None]] = []
-
-    class FakeHomeAssistantImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[HouseholdLoadData]:
-            calls.append((start_time, end_time, history_lookback_seconds, now))
-            return plan_without_needs(
-                lambda: data(
-                    end_time or start_time,
-                    source="home-assistant",
-                    entity_id="household_load",
-                )
-            )
-
-        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        FakeHomeAssistantImporter,
+    calls = fake_load_importer(
+        monkeypatch,
+        lambda start_time, end_time, _: home_assistant_load(end_time or start_time),
     )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.household_energy",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(),
+    orchestrator = configured(
+        household_configuration(tmp_path), ProviderDataStore(tmp_path)
     )
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration, ProviderDataStore(tmp_path)
-    )
-    assert orchestrator is not None
 
-    now = datetime(2026, 1, 1, 12, 34, tzinfo=timezone.utc)
+    now = START + timedelta(hours=12, minutes=34)
     cycle = orchestrator.run_due(now)
 
     assert cycle.provider_runs[0].status == "success"
@@ -1924,76 +1388,18 @@ def test_configured_home_assistant_persists_short_bootstrap_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     retained_start = datetime(2025, 12, 31, 22, tzinfo=timezone.utc)
-
-    class FakeHomeAssistantImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[HouseholdLoadData]:
-            del start_time, end_time, history_lookback_seconds, now
-            return plan_without_needs(
-                lambda: HouseholdLoadData(
-                    schema_version="1",
-                    start_time=retained_start,
-                    interval_minutes=60,
-                    load_kw=(1.0, 2.0),
-                    unit="kW",
-                    source=SourceMetadata(
-                        provider="home-assistant", entity_id="household_load"
-                    ),
-                    retrieved_at=START,
-                    latest_observation_at=START,
-                )
-            )
-
-        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        FakeHomeAssistantImporter,
-    )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.household_energy",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
+    fake_load_importer(
+        monkeypatch,
+        lambda *_: replace(
+            home_assistant_load(START), start_time=retained_start, load_kw=(1.0, 2.0)
         ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(),
     )
     store = ProviderDataStore(tmp_path)
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
-    assert orchestrator is not None
 
-    cycle = orchestrator.run_due(START)
+    cycle = configured(household_configuration(tmp_path), store).run_due(START)
 
     assert cycle.provider_runs[0].status == "success"
-    key = ProviderDataKey("household-load", "home-assistant", "household_load")
-    persisted = store.load(key, ADAPTER)
-    assert persisted is not None
+    persisted = load_persisted(store, HOUSEHOLD_KEY, ADAPTER)
     assert persisted.start_time == retained_start
     assert persisted.load_kw == (1.0, 2.0)
 
@@ -2001,74 +1407,18 @@ def test_configured_home_assistant_persists_short_bootstrap_history(
 def test_configured_home_assistant_fetch_starts_after_persisted_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[datetime, datetime | None, float, datetime | None]] = []
-
-    class FakeHomeAssistantImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[HouseholdLoadData]:
-            calls.append((start_time, end_time, history_lookback_seconds, now))
-            return plan_without_needs(
-                lambda: data(
-                    start_time,
-                    source="home-assistant",
-                    entity_id="household_load",
-                )
-            )
-
-        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        FakeHomeAssistantImporter,
-    )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.household_energy",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(),
+    calls = fake_load_importer(
+        monkeypatch, lambda start_time, *_: home_assistant_load(start_time)
     )
     store = ProviderDataStore(tmp_path)
-    key = ProviderDataKey("household-load", "home-assistant", "household_load")
     store.save(
-        key,
+        HOUSEHOLD_KEY,
         ADAPTER,
-        data(
-            datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
-            source="home-assistant",
-            entity_id="household_load",
-        ),
+        home_assistant_load(START + timedelta(hours=10)),
     )
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
-    assert orchestrator is not None
+    orchestrator = configured(household_configuration(tmp_path), store)
 
-    now = datetime(2026, 1, 1, 12, 34, tzinfo=timezone.utc)
+    now = START + timedelta(hours=12, minutes=34)
     orchestrator.run_due(now)
 
     assert calls[0] == (
@@ -2082,83 +1432,22 @@ def test_configured_home_assistant_fetch_starts_after_persisted_history(
 def test_configured_home_assistant_skips_when_all_completed_hours_are_persisted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[datetime, datetime | None, float, datetime | None]] = []
-
-    class FakeHomeAssistantImporter:
-        def __init__(self, _: HomeAssistantConfiguration) -> None:
-            pass
-
-        def plan(
-            self,
-            start_time: datetime,
-            end_time: datetime | None = None,
-            history_lookback_seconds: float = 0,
-            *,
-            now: datetime | None = None,
-        ) -> HistoryPlan[HouseholdLoadData]:
-            calls.append((start_time, end_time, history_lookback_seconds, now))
-            return plan_without_needs(
-                lambda: data(
-                    start_time,
-                    source="home-assistant",
-                    entity_id="household_load",
-                )
-            )
-
-        def is_fresh(self, _: HouseholdLoadData, now: datetime) -> bool:
-            del now
-            return True
-
-    monkeypatch.setattr(
-        "energy_optimizer.orchestration.HomeAssistantLoadImporter",
-        FakeHomeAssistantImporter,
-    )
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": "sensor.household_energy",
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ]
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(interval_seconds=300),
+    calls = fake_load_importer(
+        monkeypatch, lambda start_time, *_: home_assistant_load(start_time)
     )
     store = ProviderDataStore(tmp_path)
-    key = ProviderDataKey("household-load", "home-assistant", "household_load")
     store.save(
-        key,
+        HOUSEHOLD_KEY,
         ADAPTER,
-        data(
-            datetime(2026, 1, 1, 10, tzinfo=timezone.utc),
-            source="home-assistant",
-            entity_id="household_load",
-        ),
+        home_assistant_load(START + timedelta(hours=10)),
     )
     history_files = tuple(sorted(tmp_path.glob("*.ndjson*")))
     before = {path: path.read_bytes() for path in history_files}
-    orchestrator = build_configured_orchestrator(runtime_configuration, store)
-    assert orchestrator is not None
+    orchestrator = configured(household_configuration(tmp_path), store)
 
-    first_cycle = orchestrator.run_due(datetime(2026, 1, 1, 11, tzinfo=timezone.utc))
-    not_due_cycle = orchestrator.run_due(
-        datetime(2026, 1, 1, 11, 4, tzinfo=timezone.utc)
-    )
-    second_cycle = orchestrator.run_due(
-        datetime(2026, 1, 1, 11, 5, tzinfo=timezone.utc)
-    )
+    first_cycle = orchestrator.run_due(START + timedelta(hours=11))
+    not_due_cycle = orchestrator.run_due(START + timedelta(hours=11, minutes=4))
+    second_cycle = orchestrator.run_due(START + timedelta(hours=11, minutes=5))
 
     assert calls == []
     assert first_cycle.provider_runs[0].status == "skipped"
@@ -2199,60 +1488,23 @@ def test_household_load_refresh_excludes_a_negative_combined_hour_and_moves_on(
             subtract_entity: hourly([5, 5.5, 6.5, 7, 8, 9]),
         }
     )
-    client = home_assistant.client()
-    runtime_configuration = Configuration(
-        time_resolution_minutes=60,
-        grid=GridConfiguration(maximum_import_kw=10, maximum_export_kw=10),
-        solver=SolverConfiguration(name="highs", time_limit_seconds=60),
-        home_assistant=HomeAssistantConfiguration.model_validate(
-            {
-                "base_url": "http://homeassistant.test:8123",
-                "token": "test-token",
-                "household_load": aggregate_settings(
-                    add=[
-                        {
-                            "entity_id": add_entity,
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ],
-                    subtract=[
-                        {
-                            "entity_id": subtract_entity,
-                            "state_class": "total_increasing",
-                            "unit": "kWh",
-                        }
-                    ],
-                ),
-                "timeout_seconds": 5,
-            }
-        ),
-        persistence=PersistenceConfiguration(directory=tmp_path),
-        orchestration=configuration(),
+    aggregate = aggregate_settings(
+        add=[energy_entity(add_entity)], subtract=[energy_entity(subtract_entity)]
     )
     store = ProviderDataStore(tmp_path)
-    key = ProviderDataKey("household-load", "home-assistant", "household_load")
-    orchestrator = build_configured_orchestrator(
-        runtime_configuration, store, home_assistant_client=client
-    )
-    assert orchestrator is not None
 
-    try:
-        bootstrap_cycle = orchestrator.run_due(
-            datetime(2026, 1, 1, 3, 30, tzinfo=timezone.utc)
+    with home_assistant.client() as client:
+        orchestrator = configured(
+            household_configuration(tmp_path, aggregate), store, client
         )
-        bootstrapped = store.load(key, ADAPTER)
+        bootstrap_cycle = orchestrator.run_due(START + timedelta(hours=3, minutes=30))
+        bootstrapped = load_persisted(store, HOUSEHOLD_KEY, ADAPTER)
         home_assistant.requests.clear()
-        incremental_cycle = orchestrator.run_due(
-            datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
-        )
-        refreshed = store.load(key, ADAPTER)
-    finally:
-        client.close()
+        incremental_cycle = orchestrator.run_due(START + timedelta(hours=5, minutes=30))
+        refreshed = load_persisted(store, HOUSEHOLD_KEY, ADAPTER)
 
     assert bootstrap_cycle.provider_runs[0].status == "success"
     assert bootstrap_cycle.provider_runs[0].error is None
-    assert bootstrapped is not None
     assert bootstrapped.start_time == START
     assert bootstrapped.load_kw == (0.5, None, 0.5)
     (excluded,) = bootstrapped.exclusions
@@ -2277,7 +1529,6 @@ def test_household_load_refresh_excludes_a_negative_combined_hour_and_moves_on(
         add_entity: [(START + timedelta(hours=3), START + timedelta(hours=5))],
         subtract_entity: [(START + timedelta(hours=3), START + timedelta(hours=5))],
     }
-    assert refreshed is not None
     assert refreshed.start_time == START
     assert refreshed.load_kw == (0.5, None, 0.5, 1.0, 0.5)
     assert refreshed.exclusions == bootstrapped.exclusions

@@ -3,13 +3,7 @@
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from energy_optimizer.api.validation import (
     replace_non_finite_values,
@@ -21,10 +15,12 @@ from energy_optimizer.exclusions import ExclusionReason
 MAX_HORIZON_HOURS = 87_672
 
 
-class HourlyOptimizationRequest(BaseModel):
-    """Validated hourly inputs accepted by the optimization boundary."""
-
+class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class HourlyOptimizationRequest(_StrictModel):
+    """Validated hourly inputs accepted by the optimization boundary."""
 
     start_time: datetime = Field(description="Timezone-aware start of the horizon")
     interval_minutes: Literal[60] = Field(
@@ -59,19 +55,21 @@ class HourlyOptimizationRequest(BaseModel):
         return self
 
 
-class SourceMetadata(BaseModel):
+class SourceMetadata(_StrictModel):
     """Identify the system that supplied a normalized data series."""
-
-    model_config = ConfigDict(extra="forbid")
 
     provider: Annotated[str, Field(min_length=1, max_length=100)]
     entity_id: Annotated[str, Field(min_length=1, max_length=255)] | None = None
 
 
-class ElectricityPriceRequest(BaseModel):
-    """Versioned normalized hourly electricity-price data."""
+OptionalSource = Annotated[
+    SourceMetadata | None,
+    Field(description="Optional source metadata for externally supplied data"),
+]
 
-    model_config = ConfigDict(extra="forbid")
+
+class ElectricityPriceRequest(_StrictModel):
+    """Versioned normalized hourly electricity-price data."""
 
     schema_version: Literal["1"] = Field(description="Version of this API contract")
     timestamps: list[datetime] = Field(
@@ -99,33 +97,19 @@ class ElectricityPriceRequest(BaseModel):
     )
     expires_at: datetime = Field(description="Time after which the data is stale")
 
-    @field_validator("timestamps", "retrieved_at", "expires_at")
-    @classmethod
-    def validate_aware_timestamps(
-        cls, values: datetime | list[datetime]
-    ) -> datetime | list[datetime]:
-        """Reject naive timestamps that cannot be compared safely."""
-        return require_aware_timestamps(values)
-
-    @field_validator(
-        "import_price_eur_per_kwh", "export_price_eur_per_kwh", mode="before"
+    _aware_timestamps = field_validator("timestamps", "retrieved_at", "expires_at")(
+        require_aware_timestamps
     )
-    @classmethod
-    def validate_finite_prices(cls, values: object) -> object:
-        """Make non-finite values safe for the JSON validation response."""
-        return replace_non_finite_values(values)
+    _finite_prices = field_validator(
+        "import_price_eur_per_kwh", "export_price_eur_per_kwh", mode="before"
+    )(replace_non_finite_values)
 
     @model_validator(mode="after")
     def validate_price_series(self) -> "ElectricityPriceRequest":
         """Require aligned, ordered, fresh price data with explicit coverage."""
-        if len(self.timestamps) != len(self.import_price_eur_per_kwh):
-            raise ValueError(
-                "timestamps and import_price_eur_per_kwh must have the same length"
-            )
-        if len(self.timestamps) != len(self.export_price_eur_per_kwh):
-            raise ValueError(
-                "timestamps and export_price_eur_per_kwh must have the same length"
-            )
+        for name in ("import_price_eur_per_kwh", "export_price_eur_per_kwh"):
+            if len(self.timestamps) != len(getattr(self, name)):
+                raise ValueError(f"timestamps and {name} must have the same length")
         timestamp_values = [timestamp.timestamp() for timestamp in self.timestamps]
         if timestamp_values != sorted(set(timestamp_values)):
             raise ValueError("timestamps must be unique and in ascending order")
@@ -143,10 +127,8 @@ class ElectricityPriceRequest(BaseModel):
         return self
 
 
-class ElectricityPriceResponse(BaseModel):
+class ElectricityPriceResponse(_StrictModel):
     """Response returned after electricity-price data passes validation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated"]
     schema_version: Literal["1"]
@@ -160,10 +142,8 @@ class ElectricityPriceResponse(BaseModel):
     expires_at: datetime
 
 
-class BatteryRequest(BaseModel):
+class BatteryRequest(_StrictModel):
     """Versioned battery state and capability data at the API boundary."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"] = Field(description="Version of this API contract")
     start_time: datetime = Field(description="Timezone-aware start of the series")
@@ -198,12 +178,9 @@ class BatteryRequest(BaseModel):
     )
     unit: Literal["kWh"] = Field(description="Unit used by energy fields")
     power_unit: Literal["kW"] = Field(description="Unit used by power fields")
-    source: SourceMetadata | None = Field(
-        default=None,
-        description="Optional source metadata for externally supplied data",
-    )
+    source: OptionalSource = None
 
-    @field_validator(
+    _finite_values = field_validator(
         "state_of_charge_kwh",
         "capacity_kwh",
         "minimum_soc_kwh",
@@ -213,11 +190,7 @@ class BatteryRequest(BaseModel):
         "maximum_discharge_kw",
         "battery_efficiency",
         mode="before",
-    )
-    @classmethod
-    def validate_finite_values(cls, values: object) -> object:
-        """Make non-finite values safe for the JSON validation response."""
-        return replace_non_finite_values(values)
+    )(replace_non_finite_values)
 
     @model_validator(mode="after")
     def validate_battery_constraints(self) -> "BatteryRequest":
@@ -242,10 +215,8 @@ class BatteryRequest(BaseModel):
         return self
 
 
-class BatteryResponse(BaseModel):
+class BatteryResponse(_StrictModel):
     """Response returned after battery data passes validation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated"]
     schema_version: Literal["1"]
@@ -264,10 +235,8 @@ class BatteryResponse(BaseModel):
     source: SourceMetadata | None = None
 
 
-class HouseholdLoadRequest(BaseModel):
+class HouseholdLoadRequest(_StrictModel):
     """Versioned hourly household-load data at the API boundary."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"] = Field(description="Version of this API contract")
     start_time: datetime = Field(description="Timezone-aware start of the series")
@@ -280,10 +249,7 @@ class HouseholdLoadRequest(BaseModel):
         description="Household electrical load in kW, one value per interval",
     )
     unit: Literal["kW"] = Field(description="Unit used by load_kw")
-    source: SourceMetadata | None = Field(
-        default=None,
-        description="Optional source metadata for externally supplied data",
-    )
+    source: OptionalSource = None
     retrieved_at: datetime = Field(
         description="Time when the household-load data was retrieved"
     )
@@ -291,24 +257,21 @@ class HouseholdLoadRequest(BaseModel):
         description="Time of the latest source observation in the data"
     )
 
-    @field_validator("load_kw", mode="before")
-    @classmethod
-    def validate_finite_load_values(cls, values: object) -> object:
-        """Make non-finite values safe for the JSON validation response."""
-        return replace_non_finite_values(values)
+    _finite_values = field_validator("load_kw", mode="before")(
+        replace_non_finite_values
+    )
 
     @model_validator(mode="after")
     def validate_start_time(self) -> "HouseholdLoadRequest":
         """Require unambiguous timestamps for the load series metadata."""
-        timestamps = (self.start_time, self.retrieved_at, self.latest_observation_at)
-        require_aware_timestamps(list(timestamps))
+        require_aware_timestamps(
+            [self.start_time, self.retrieved_at, self.latest_observation_at]
+        )
         return self
 
 
-class HouseholdLoadResponse(BaseModel):
+class HouseholdLoadResponse(_StrictModel):
     """Response returned after household-load data passes validation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated"]
     schema_version: Literal["1"]
@@ -323,10 +286,8 @@ class HouseholdLoadResponse(BaseModel):
     latest_observation_at: datetime
 
 
-class HistoricHouseholdLoadResponse(BaseModel):
+class HistoricHouseholdLoadResponse(_StrictModel):
     """Historic household-load actuals returned to the dashboard."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated", "stale", "empty"]
     data_type: Literal["household_load"]
@@ -350,10 +311,8 @@ class HistoricHouseholdLoadResponse(BaseModel):
     freshness_checked_at: datetime
 
 
-class DashboardSeries(BaseModel):
+class DashboardSeries(_StrictModel):
     """One aligned, provider-independent dashboard series."""
-
-    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     data_type: str = Field(min_length=1)
@@ -401,20 +360,16 @@ class DashboardSeries(BaseModel):
         return self
 
 
-class DashboardPlanSummary(BaseModel):
+class DashboardPlanSummary(_StrictModel):
     """Optional plan-level diagnostics shared by dashboard consumers."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["available", "empty", "infeasible", "unavailable"]
     objective_value: float | None = None
     diagnostics: list[str] = Field(default_factory=list)
 
 
-class DashboardMetric(BaseModel):
+class DashboardMetric(_StrictModel):
     """One scalar dashboard measurement displayed separately from diagnostics."""
-
-    model_config = ConfigDict(extra="forbid")
 
     id: str = Field(min_length=1)
     label: str = Field(min_length=1)
@@ -422,19 +377,12 @@ class DashboardMetric(BaseModel):
     unit: str = Field(min_length=1)
 
 
-class DashboardAssetAvailability(BaseModel):
+class DashboardAssetAvailability(_StrictModel):
     """Whether one asset contributed data to a dashboard response, and why not."""
-
-    model_config = ConfigDict(extra="forbid")
 
     asset: str = Field(min_length=1, description="Stable asset key")
     status: Literal[
-        "available",
-        "empty",
-        "stale",
-        "not_configured",
-        "unavailable",
-        "invalid",
+        "available", "empty", "stale", "not_configured", "unavailable", "invalid"
     ] = Field(
         description=(
             "available: series returned; empty: history exists but has no "
@@ -451,10 +399,8 @@ class DashboardAssetAvailability(BaseModel):
     )
 
 
-class ExcludedDataPoint(BaseModel):
+class ExcludedDataPoint(_StrictModel):
     """One observation that contributed to an exclusion."""
-
-    model_config = ConfigDict(extra="forbid")
 
     timestamp: datetime = Field(
         description="When Home Assistant recorded the data point, or the hour start"
@@ -483,10 +429,8 @@ class ExcludedDataPoint(BaseModel):
     )
 
 
-class ExclusionCause(BaseModel):
+class ExclusionCause(_StrictModel):
     """One reason an hour is excluded, with the data points behind it."""
-
-    model_config = ConfigDict(extra="forbid")
 
     reason: ExclusionReason
     message: str = Field(description="Human-readable explanation of the exclusion")
@@ -499,20 +443,16 @@ class ExclusionCause(BaseModel):
     )
 
 
-class ExcludedHour(BaseModel):
+class ExcludedHour(_StrictModel):
     """One excluded hour of one source."""
-
-    model_config = ConfigDict(extra="forbid")
 
     hour_start: datetime = Field(description="UTC start of the excluded hour")
     source: Literal["household_load", "grid_flow", "battery_efficiency"]
     causes: list[ExclusionCause] = Field(min_length=1)
 
 
-class ExcludedHoursSource(BaseModel):
+class ExcludedHoursSource(_StrictModel):
     """Whether one source could be read, and how many hours it excluded."""
-
-    model_config = ConfigDict(extra="forbid")
 
     source: Literal["household_load", "grid_flow", "battery_efficiency"]
     status: Literal["available", "not_configured", "unavailable", "invalid"] = Field(
@@ -526,10 +466,8 @@ class ExcludedHoursSource(BaseModel):
     excluded_hour_count: int = Field(ge=0)
 
 
-class ExcludedHoursSummary(BaseModel):
+class ExcludedHoursSummary(_StrictModel):
     """The number of excluded hours of one source for one reason."""
-
-    model_config = ConfigDict(extra="forbid")
 
     source: Literal["household_load", "grid_flow", "battery_efficiency"]
     reason: ExclusionReason
@@ -538,10 +476,8 @@ class ExcludedHoursSummary(BaseModel):
     )
 
 
-class ExcludedHoursResponse(BaseModel):
+class ExcludedHoursResponse(_StrictModel):
     """Every hour that was excluded from imported history in a requested range."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"]
     requested_start_time: datetime = Field(description="Inclusive range start")
@@ -556,10 +492,8 @@ class ExcludedHoursResponse(BaseModel):
     )
 
 
-class DashboardSettingsResponse(BaseModel):
+class DashboardSettingsResponse(_StrictModel):
     """Runtime settings the dashboard reads before it requests any data."""
-
-    model_config = ConfigDict(extra="forbid")
 
     timezone: str = Field(
         description=(
@@ -570,20 +504,12 @@ class DashboardSettingsResponse(BaseModel):
     )
 
 
-class DashboardDataResponse(BaseModel):
+class DashboardDataResponse(_StrictModel):
     """Versioned read contract for actual, forecast, and plan dashboard data."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"]
     status: Literal[
-        "validated",
-        "partial",
-        "stale",
-        "empty",
-        "unavailable",
-        "invalid",
-        "infeasible",
+        "validated", "partial", "stale", "empty", "unavailable", "invalid", "infeasible"
     ]
     requested_start_time: datetime
     requested_end_time: datetime
@@ -598,10 +524,8 @@ class DashboardDataResponse(BaseModel):
     plan_summary: DashboardPlanSummary | None = None
 
 
-class PvGenerationRequest(BaseModel):
+class PvGenerationRequest(_StrictModel):
     """Versioned hourly PV-generation data at the API boundary."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"] = Field(description="Version of this API contract")
     start_time: datetime = Field(description="Timezone-aware start of the series")
@@ -614,16 +538,11 @@ class PvGenerationRequest(BaseModel):
         description="PV generation in kW, one value per interval",
     )
     unit: Literal["kW"] = Field(description="Unit used by generation_kw")
-    source: SourceMetadata | None = Field(
-        default=None,
-        description="Optional source metadata for externally supplied data",
-    )
+    source: OptionalSource = None
 
-    @field_validator("generation_kw", mode="before")
-    @classmethod
-    def validate_finite_generation_values(cls, values: object) -> object:
-        """Make non-finite values safe for the JSON validation response."""
-        return replace_non_finite_values(values)
+    _finite_values = field_validator("generation_kw", mode="before")(
+        replace_non_finite_values
+    )
 
     @model_validator(mode="after")
     def validate_start_time(self) -> "PvGenerationRequest":
@@ -632,10 +551,8 @@ class PvGenerationRequest(BaseModel):
         return self
 
 
-class PvGenerationResponse(BaseModel):
+class PvGenerationResponse(_StrictModel):
     """Response returned after PV-generation data passes validation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated"]
     schema_version: Literal["1"]
@@ -646,10 +563,8 @@ class PvGenerationResponse(BaseModel):
     source: SourceMetadata | None = None
 
 
-class GridFlowRequest(BaseModel):
+class GridFlowRequest(_StrictModel):
     """Versioned hourly grid import and export data at the API boundary."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal["1"] = Field(description="Version of this API contract")
     start_time: datetime = Field(description="Timezone-aware start of the series")
@@ -667,10 +582,7 @@ class GridFlowRequest(BaseModel):
         description="Grid export in kW, one value per interval",
     )
     unit: Literal["kW"] = Field(description="Unit used by import_kw and export_kw")
-    source: SourceMetadata | None = Field(
-        default=None,
-        description="Optional source metadata for externally supplied data",
-    )
+    source: OptionalSource = None
     retrieved_at: datetime = Field(
         description="Time when the grid-flow data was retrieved"
     )
@@ -678,21 +590,16 @@ class GridFlowRequest(BaseModel):
         description="Time of the latest source observation in the data"
     )
 
-    @field_validator("import_kw", "export_kw", mode="before")
-    @classmethod
-    def validate_finite_values(cls, values: object) -> object:
-        """Make non-finite values safe for the JSON validation response."""
-        return replace_non_finite_values(values)
+    _finite_values = field_validator("import_kw", "export_kw", mode="before")(
+        replace_non_finite_values
+    )
 
     @model_validator(mode="after")
     def validate_series(self) -> "GridFlowRequest":
         """Require an unambiguous timestamp and aligned import/export series."""
-        timestamps = (
-            self.start_time,
-            self.retrieved_at,
-            self.latest_observation_at,
+        require_aware_timestamps(
+            [self.start_time, self.retrieved_at, self.latest_observation_at]
         )
-        require_aware_timestamps(list(timestamps))
         if len(self.import_kw) != len(self.export_kw):
             raise ValueError(
                 "import_kw and export_kw must contain the same number of values"
@@ -700,10 +607,8 @@ class GridFlowRequest(BaseModel):
         return self
 
 
-class GridFlowResponse(BaseModel):
+class GridFlowResponse(_StrictModel):
     """Response returned after grid-flow data passes validation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated"]
     schema_version: Literal["1"]
@@ -717,10 +622,8 @@ class GridFlowResponse(BaseModel):
     latest_observation_at: datetime
 
 
-class OptimizationResponse(BaseModel):
+class OptimizationResponse(_StrictModel):
     """Response returned after an hourly request passes API validation."""
-
-    model_config = ConfigDict(extra="forbid")
 
     status: Literal["validated"]
     start_time: datetime

@@ -1,6 +1,9 @@
 """Tests for the Home Assistant battery importer."""
 
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 import pytest
@@ -10,7 +13,11 @@ from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
 )
 from energy_optimizer.providers.home_assistant_history import HomeAssistantError
-from energy_optimizer.providers.interfaces import BatteryEfficiencyData, SourceMetadata
+from energy_optimizer.providers.interfaces import (
+    BatteryData,
+    BatteryEfficiencyData,
+    SourceMetadata,
+)
 from home_assistant_fixtures import (
     aggregate_settings,
     home_assistant_configuration_factory,
@@ -19,44 +26,38 @@ from home_assistant_fixtures import (
 )
 
 START = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
+OBSERVED_AT = datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
 
 BATTERY_MAPPINGS = {
-    "state_of_charge": {
-        "entity_id": "sensor.battery_soc",
-        "unit": "%",
-    },
-    "capacity": {
-        "entity_id": "sensor.battery_capacity",
-        "unit": "kWh",
-    },
-    "minimum_soc": {
-        "entity_id": "sensor.battery_minimum_soc",
-        "unit": "kWh",
-    },
-    "maximum_soc": {
-        "entity_id": "sensor.battery_maximum_soc",
-        "unit": "kWh",
-    },
-    "maximum_charge": {
-        "entity_id": "sensor.battery_maximum_charge",
-        "unit": "W",
-    },
+    "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
+    "capacity": {"entity_id": "sensor.battery_capacity", "unit": "kWh"},
+    "minimum_soc": {"entity_id": "sensor.battery_minimum_soc", "unit": "kWh"},
+    "maximum_soc": {"entity_id": "sensor.battery_maximum_soc", "unit": "kWh"},
+    "maximum_charge": {"entity_id": "sensor.battery_maximum_charge", "unit": "W"},
     "maximum_discharge": {
         "entity_id": "sensor.battery_maximum_discharge",
         "unit": "kW",
     },
-    "battery_efficiency": {
-        "entity_id": "sensor.battery_efficiency",
-        "unit": "ratio",
-    },
+    "battery_efficiency": {"entity_id": "sensor.battery_efficiency", "unit": "ratio"},
+}
+ATTRIBUTE_UNITS = {
+    "state_of_charge": "%",
+    "capacity": "kWh",
+    "minimum_soc": "kWh",
+    "maximum_soc": "kWh",
+    "maximum_charge": "kW",
+    "maximum_discharge": "kW",
+    "battery_efficiency": "ratio",
 }
 
 
 configuration = home_assistant_configuration_factory(battery=BATTERY_MAPPINGS)
 payload = home_assistant_state_payload
+importer = home_assistant_importer_factory(HomeAssistantBatteryImporter, configuration)
 
 
-def standard_payloads() -> dict[str, dict[str, object]]:
+def standard_payloads(*replacements: dict[str, object]) -> dict[str, dict[str, object]]:
+    """Serve a healthy battery; ``replacements`` replace the payloads of entities."""
     states = {
         "sensor.battery_soc": 50,
         "sensor.battery_capacity": 10,
@@ -66,25 +67,47 @@ def standard_payloads() -> dict[str, dict[str, object]]:
         "sensor.battery_maximum_discharge": 4,
         "sensor.battery_efficiency": 0.85,
     }
-    return {entity_id: payload(entity_id, state) for entity_id, state in states.items()}
+    payloads = {
+        entity_id: payload(entity_id, state) for entity_id, state in states.items()
+    }
+    payloads.update((str(item["entity_id"]), item) for item in replacements)
+    return payloads
 
 
-importer = home_assistant_importer_factory(HomeAssistantBatteryImporter, configuration)
+def serve(responses: Mapping[str, object]) -> Callable[[httpx.Request], httpx.Response]:
+    """Answer every state request with the response of the requested entity."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer test-token"
+        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
+
+    return handler
+
+
+def fetch(
+    handler: Callable[[httpx.Request], httpx.Response],
+    now: datetime = START,
+    **overrides: Any,
+) -> BatteryData:
+    provider, client = importer(httpx.MockTransport(handler), **overrides)
+    with client:
+        return provider.fetch(now=now)
+
+
+def attribute_mapping(attributes: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """Read each battery value from an attribute of the one ``sensor.battery``."""
+    return {
+        name: {
+            "entity_id": "sensor.battery",
+            "unit": ATTRIBUTE_UNITS[name],
+            "attribute": attribute,
+        }
+        for name, attribute in attributes.items()
+    }
 
 
 def test_fetch_normalizes_battery_state_and_capabilities() -> None:
-    responses = standard_payloads()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.path.rsplit("/", 1)[-1]
-        assert request.headers["authorization"] == "Bearer test-token"
-        return httpx.Response(200, json=responses[entity_id])
-
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        data = provider.fetch(now=START)
-    finally:
-        client.close()
+    data = fetch(serve(standard_payloads()))
 
     assert data.schema_version == "1"
     assert data.start_time == START
@@ -98,45 +121,22 @@ def test_fetch_normalizes_battery_state_and_capabilities() -> None:
     assert data.battery_efficiency == 0.85
     assert data.source.entity_id == "battery"
     assert data.retrieved_at == START
-    assert data.latest_observation_at == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    assert data.latest_observation_at == OBSERVED_AT
 
 
 def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> None:
     mapping = {
-        "state_of_charge": {
-            "entity_id": "sensor.battery",
-            "unit": "%",
-        },
-        "capacity": {
-            "entity_id": "sensor.battery",
-            "unit": "kWh",
-            "attribute": "capacity_kwh",
-        },
-        "minimum_soc": {
-            "entity_id": "sensor.battery",
-            "unit": "kWh",
-            "attribute": "minimum_soc_kwh",
-        },
-        "maximum_soc": {
-            "entity_id": "sensor.battery",
-            "unit": "kWh",
-            "attribute": "maximum_soc_kwh",
-        },
-        "maximum_charge": {
-            "entity_id": "sensor.battery",
-            "unit": "kW",
-            "attribute": "maximum_charge_kw",
-        },
-        "maximum_discharge": {
-            "entity_id": "sensor.battery",
-            "unit": "kW",
-            "attribute": "maximum_discharge_kw",
-        },
-        "battery_efficiency": {
-            "entity_id": "sensor.battery",
-            "unit": "ratio",
-            "attribute": "battery_efficiency",
-        },
+        "state_of_charge": {"entity_id": "sensor.battery", "unit": "%"},
+        **attribute_mapping(
+            {
+                "capacity": "capacity_kwh",
+                "minimum_soc": "minimum_soc_kwh",
+                "maximum_soc": "maximum_soc_kwh",
+                "maximum_charge": "maximum_charge_kw",
+                "maximum_discharge": "maximum_discharge_kw",
+                "battery_efficiency": "battery_efficiency",
+            }
+        ),
     }
     requests = 0
 
@@ -158,11 +158,7 @@ def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> No
             },
         )
 
-    provider, client = importer(httpx.MockTransport(handler), battery=mapping)
-    try:
-        data = provider.fetch(now=START)
-    finally:
-        client.close()
+    data = fetch(handler, battery=mapping)
 
     assert requests == 1
     assert data.capacity_kwh == 10
@@ -171,10 +167,7 @@ def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> No
 
 def test_fetch_uses_constants_without_requesting_static_entities() -> None:
     mapping = {
-        "state_of_charge": {
-            "entity_id": "sensor.battery_soc",
-            "unit": "%",
-        },
+        "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
         "capacity": {"value": 10, "unit": "kWh"},
         "minimum_soc": {"value": 2, "unit": "kWh"},
         "maximum_soc": {"value": 10, "unit": "kWh"},
@@ -189,11 +182,7 @@ def test_fetch_uses_constants_without_requesting_static_entities() -> None:
         requests.append(entity_id)
         return httpx.Response(200, json=payload(entity_id, 50))
 
-    provider, client = importer(httpx.MockTransport(handler), battery=mapping)
-    try:
-        data = provider.fetch(now=START)
-    finally:
-        client.close()
+    data = fetch(handler, battery=mapping)
 
     assert requests == ["sensor.battery_soc"]
     assert data.capacity_kwh == 10
@@ -202,127 +191,87 @@ def test_fetch_uses_constants_without_requesting_static_entities() -> None:
     assert data.maximum_charge_kw == 4
     assert data.maximum_discharge_kw == 4
     assert data.battery_efficiency == 0.85
-    assert data.latest_observation_at == datetime(2026, 1, 1, 5, tzinfo=timezone.utc)
+    assert data.latest_observation_at == OBSERVED_AT
 
 
 def test_fetch_allows_unavailable_entity_state_when_all_values_use_attributes() -> None:
-    mapping = {
-        name: {
-            "entity_id": "sensor.battery",
-            "unit": "kWh"
-            if name in {"capacity", "minimum_soc", "maximum_soc"}
-            else ("kW" if name in {"maximum_charge", "maximum_discharge"} else "ratio"),
-            "attribute": name,
-        }
-        for name in (
-            "capacity",
-            "minimum_soc",
-            "maximum_soc",
-            "maximum_charge",
-            "maximum_discharge",
-            "battery_efficiency",
-        )
-    }
-    mapping["state_of_charge"] = {
-        "entity_id": "sensor.battery",
-        "unit": "%",
-        "attribute": "state_of_charge",
+    attributes = {
+        "state_of_charge": 50,
+        "capacity": 10,
+        "minimum_soc": 2,
+        "maximum_soc": 10,
+        "maximum_charge": 4,
+        "maximum_discharge": 4,
+        "battery_efficiency": 0.85,
     }
 
-    provider, client = importer(
-        httpx.MockTransport(
-            lambda _: httpx.Response(
-                200,
-                json={
-                    **payload("sensor.battery", "unavailable"),
-                    "attributes": {
-                        "state_of_charge": 50,
-                        "capacity": 10,
-                        "minimum_soc": 2,
-                        "maximum_soc": 10,
-                        "maximum_charge": 4,
-                        "maximum_discharge": 4,
-                        "battery_efficiency": 0.85,
-                    },
-                },
-            )
+    data = fetch(
+        lambda _: httpx.Response(
+            200,
+            json={**payload("sensor.battery", "unavailable"), "attributes": attributes},
         ),
-        battery=mapping,
+        battery=attribute_mapping({name: name for name in ATTRIBUTE_UNITS}),
     )
-    try:
-        data = provider.fetch(now=START)
-    finally:
-        client.close()
 
     assert data.state_of_charge_kwh == (5,)
 
 
 @pytest.mark.parametrize(
-    ("entity_id", "state", "message"),
+    ("replacement", "message"),
     [
-        ("sensor.battery_soc", "unavailable", "unavailable"),
-        ("sensor.battery_capacity", "not-a-number", "non-numeric"),
-        ("sensor.battery_maximum_charge", "nan", "non-finite"),
+        pytest.param(
+            payload("sensor.battery_soc", "unavailable"),
+            "unavailable",
+            id="unavailable-state",
+        ),
+        pytest.param(
+            payload("sensor.battery_capacity", "not-a-number"),
+            "non-numeric",
+            id="non-numeric-state",
+        ),
+        pytest.param(
+            payload("sensor.battery_maximum_charge", "nan"),
+            "non-finite",
+            id="non-finite-state",
+        ),
+        pytest.param(
+            payload("sensor.battery_maximum_soc", 11),
+            "exceeds capacity",
+            id="soc-limit-above-capacity",
+        ),
+        pytest.param(
+            payload("sensor.battery_soc", 50, "2026-01-01T05:00:00"),
+            "must include a timezone",
+            id="naive-observation-timestamp",
+        ),
     ],
 )
-def test_fetch_rejects_unsafe_values(
-    entity_id: str, state: object, message: str
+def test_fetch_rejects_invalid_observations(
+    replacement: dict[str, object], message: str
 ) -> None:
-    responses = standard_payloads()
-    responses[entity_id] = payload(entity_id, state)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        requested_entity = request.url.path.rsplit("/", 1)[-1]
-        return httpx.Response(200, json=responses[requested_entity])
-
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match=message):
-            provider.fetch(now=START)
-    finally:
-        client.close()
-
-
-def test_fetch_rejects_inconsistent_soc_limits() -> None:
-    responses = standard_payloads()
-    responses["sensor.battery_maximum_soc"] = payload("sensor.battery_maximum_soc", 11)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
-
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match="exceeds capacity"):
-            provider.fetch(now=START)
-    finally:
-        client.close()
-
-
-def test_fetch_reports_authentication_failures_without_exposing_token() -> None:
-    provider, client = importer(httpx.MockTransport(lambda _: httpx.Response(401)))
-    try:
-        with pytest.raises(HomeAssistantError, match="authentication failed"):
-            provider.fetch(now=START)
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match=message):
+        fetch(serve(standard_payloads(replacement)))
 
 
 @pytest.mark.parametrize(
     ("response", "message"),
     [
-        (httpx.Response(404), "was not found"),
-        (httpx.Response(200, content=b"not-json"), "malformed JSON"),
+        pytest.param(
+            httpx.Response(401), "authentication failed", id="authentication-failure"
+        ),
+        pytest.param(httpx.Response(404), "was not found", id="missing-entity"),
+        pytest.param(
+            httpx.Response(200, content=b"not-json"),
+            "malformed JSON",
+            id="malformed-json",
+        ),
     ],
 )
-def test_fetch_reports_missing_entities_and_malformed_responses(
+def test_fetch_reports_failed_and_malformed_responses(
     response: httpx.Response, message: str
 ) -> None:
-    provider, client = importer(httpx.MockTransport(lambda _: response))
-    try:
-        with pytest.raises(HomeAssistantError, match=message):
-            provider.fetch(now=START)
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match=message):
+        fetch(lambda _: response)
 
 
 def test_fetch_reports_missing_mapped_attribute() -> None:
@@ -334,87 +283,43 @@ def test_fetch_reports_missing_mapped_attribute() -> None:
             "unit": "kWh",
         },
     }
-    provider, client = importer(
-        httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                json=standard_payloads()[request.url.path.rsplit("/", 1)[-1]],
-            )
-        ),
-        battery=mapping,
-    )
-    try:
-        with pytest.raises(HomeAssistantError, match="missing.*attribute"):
-            provider.fetch(now=START)
-    finally:
-        client.close()
 
-
-def test_fetch_rejects_naive_observation_timestamp() -> None:
-    responses = standard_payloads()
-    responses["sensor.battery_soc"] = payload(
-        "sensor.battery_soc", 50, "2026-01-01T05:00:00"
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
-
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match="must include a timezone"):
-            provider.fetch(now=START)
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match="missing.*attribute"):
+        fetch(serve(standard_payloads()), battery=mapping)
 
 
 def test_fetch_does_not_return_partial_data_when_one_entity_fails() -> None:
     calls = 0
-    responses = standard_payloads()
+    served = serve(standard_payloads())
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            entity_id = request.url.path.rsplit("/", 1)[-1]
-            return httpx.Response(200, json=responses[entity_id])
-        return httpx.Response(503)
+        return served(request) if calls == 1 else httpx.Response(503)
 
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match="HTTP 503"):
-            provider.fetch(now=START)
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match="HTTP 503"):
+        fetch(handler)
 
     assert calls == 2
 
 
 def test_freshness_uses_the_oldest_mapped_observation() -> None:
-    responses = standard_payloads()
-    responses["sensor.battery_capacity"] = payload(
-        "sensor.battery_capacity", 10, "2026-01-01T03:00:00+00:00"
+    responses = standard_payloads(
+        payload("sensor.battery_capacity", 10, "2026-01-01T03:00:00+00:00")
     )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
-
-    provider, client = importer(httpx.MockTransport(handler), max_data_age_seconds=7200)
-    try:
+    provider, client = importer(
+        httpx.MockTransport(serve(responses)), max_data_age_seconds=7200
+    )
+    with client:
         data = provider.fetch(now=START)
-    finally:
-        client.close()
 
     assert data.latest_observation_at == datetime(2026, 1, 1, 3, tzinfo=timezone.utc)
     assert not provider.is_fresh(data, now=START)
 
 
 def test_fetch_requires_timezone_aware_retrieval_time() -> None:
-    provider, client = importer(httpx.MockTransport(lambda _: httpx.Response(200)))
-    try:
-        with pytest.raises(HomeAssistantError, match="timezone"):
-            provider.fetch(now=datetime(2026, 1, 1, 5, 30))
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match="timezone"):
+        fetch(lambda _: httpx.Response(200), now=datetime(2026, 1, 1, 5, 30))
 
 
 def _calculated_mode_configuration() -> HomeAssistantConfiguration:
@@ -430,103 +335,68 @@ def _calculated_mode_configuration() -> HomeAssistantConfiguration:
         }
 
     mapping: dict[str, object] = {
-        name: value
-        for name, value in BATTERY_MAPPINGS.items()
-        if name != "battery_efficiency"
+        **BATTERY_MAPPINGS,
+        "efficiency_calculation": {
+            "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
+            "battery": leg("battery"),
+            "inverter_charge": leg("charge"),
+            "inverter_discharge": leg("discharge"),
+        },
     }
-    mapping["efficiency_calculation"] = {
-        "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
-        "battery": leg("battery"),
-        "inverter_charge": leg("charge"),
-        "inverter_discharge": leg("discharge"),
-    }
-    factory = home_assistant_configuration_factory(battery=mapping)
-    return factory()
+    del mapping["battery_efficiency"]
+    return configuration(battery=mapping)
 
 
-def test_fetch_defaults_to_95_percent_before_the_first_complete_cycle() -> None:
+INSUFFICIENT_EFFICIENCY = BatteryEfficiencyData(
+    schema_version="1",
+    status="insufficient_data",
+    inverter_charge_efficiency=None,
+    inverter_discharge_efficiency=None,
+    battery_efficiency=None,
+    round_trip_efficiency=None,
+    history_start=START,
+    history_end=START,
+    battery_throughput_kwh=0,
+    charge_throughput_kwh=0,
+    discharge_throughput_kwh=0,
+    complete_cycle_count=0,
+    unit="ratio",
+    source=SourceMetadata(provider="home-assistant", entity_id="battery_efficiency"),
+    retrieved_at=START,
+    latest_observation_at=START,
+)
+COMPLETED_EFFICIENCY = replace(
+    INSUFFICIENT_EFFICIENCY,
+    status="ok",
+    inverter_charge_efficiency=0.9,
+    inverter_discharge_efficiency=0.85,
+    battery_efficiency=0.8,
+    round_trip_efficiency=0.612,
+    battery_throughput_kwh=10,
+    charge_throughput_kwh=10,
+    discharge_throughput_kwh=10,
+    complete_cycle_count=1,
+)
+
+
+@pytest.mark.parametrize(
+    ("efficiency_data", "expected"),
+    [
+        pytest.param(None, 0.95, id="before-the-first-complete-cycle"),
+        pytest.param(INSUFFICIENT_EFFICIENCY, 0.95, id="insufficient-calculation"),
+        pytest.param(COMPLETED_EFFICIENCY, 0.8, id="completed-calculation"),
+    ],
+)
+def test_fetch_uses_the_calculated_battery_efficiency_or_the_95_percent_default(
+    efficiency_data: BatteryEfficiencyData | None, expected: float
+) -> None:
     responses = standard_payloads()
     del responses["sensor.battery_efficiency"]
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+    with httpx.Client(transport=httpx.MockTransport(serve(responses))) as client:
         provider = HomeAssistantBatteryImporter(
             _calculated_mode_configuration(), client
         )
-        data = provider.fetch(now=START, efficiency_data=None)
+        data = provider.fetch(now=START, efficiency_data=efficiency_data)
 
-    assert data.battery_efficiency == 0.95
-
-
-def test_fetch_uses_insufficient_calculated_result_as_95_percent_default() -> None:
-    responses = standard_payloads()
-    del responses["sensor.battery_efficiency"]
-    insufficient = BatteryEfficiencyData(
-        schema_version="1",
-        status="insufficient_data",
-        inverter_charge_efficiency=None,
-        inverter_discharge_efficiency=None,
-        battery_efficiency=None,
-        round_trip_efficiency=None,
-        history_start=START,
-        history_end=START,
-        battery_throughput_kwh=0,
-        charge_throughput_kwh=0,
-        discharge_throughput_kwh=0,
-        complete_cycle_count=0,
-        unit="ratio",
-        source=SourceMetadata(
-            provider="home-assistant", entity_id="battery_efficiency"
-        ),
-        retrieved_at=START,
-        latest_observation_at=START,
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        provider = HomeAssistantBatteryImporter(
-            _calculated_mode_configuration(), client
-        )
-        data = provider.fetch(now=START, efficiency_data=insufficient)
-
-    assert data.battery_efficiency == 0.95
-
-
-def test_fetch_uses_completed_calculated_battery_efficiency_once_ok() -> None:
-    responses = standard_payloads()
-    del responses["sensor.battery_efficiency"]
-    completed = BatteryEfficiencyData(
-        schema_version="1",
-        status="ok",
-        inverter_charge_efficiency=0.9,
-        inverter_discharge_efficiency=0.85,
-        battery_efficiency=0.8,
-        round_trip_efficiency=0.612,
-        history_start=START,
-        history_end=START,
-        battery_throughput_kwh=10,
-        charge_throughput_kwh=10,
-        discharge_throughput_kwh=10,
-        complete_cycle_count=1,
-        unit="ratio",
-        source=SourceMetadata(
-            provider="home-assistant", entity_id="battery_efficiency"
-        ),
-        retrieved_at=START,
-        latest_observation_at=START,
-    )
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=responses[request.url.path.rsplit("/", 1)[-1]])
-
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        provider = HomeAssistantBatteryImporter(
-            _calculated_mode_configuration(), client
-        )
-        data = provider.fetch(now=START, efficiency_data=completed)
-
-    assert data.battery_efficiency == 0.8
+    assert data.battery_efficiency == expected

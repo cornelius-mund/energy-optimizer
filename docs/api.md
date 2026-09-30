@@ -1,106 +1,82 @@
 # API Reference
 
+The OpenAPI contract, `src/energy_optimizer/openapi-docs.yml`, defines every
+request and response field, type, range, and status enum; this reference documents
+behavior, limits, and examples. `GET /health` returns the service status and
+version: `{"status":"ok","version":"0.1.0"}`.
+
+All versioned `POST /api/v1/*` endpoints below (electricity prices, battery,
+household load, PV generation, grid flow) take `schema_version: "1"` and
+`interval_minutes: 60`, accept one to 87,672 hourly values, and echo the
+normalized data with `status: "validated"`. Missing fields, unknown fields,
+unsupported versions or units, naive timestamps, invalid values, and series longer
+than ten years (87,672 hourly values) return HTTP 422 with field-level validation
+details; each section lists only its additional 422 causes.
+
 ## Hourly optimization API
 
-`POST /optimize` validates an hourly request. The request must contain a
-timezone-aware `start_time`, `interval_minutes: 60`, and equally sized series
-of `load_kw`, `pv_generation_kw`, `import_price_eur_per_kwh`, and
-`export_price_eur_per_kwh`. Series contain one value per hour, from one to 168
-hours, and values are expressed in kW or EUR/kWh as named by their fields.
-
-Requests that pass validation return a `validated` response containing the
-horizon metadata. Invalid JSON or values return HTTP 422 with field-level
-validation details. The endpoint is the API boundary for the optimizer; solver
-schedule results will be added by a later vertical slice.
+`POST /optimize` validates an hourly request: a timezone-aware `start_time`,
+`interval_minutes: 60`, and equally sized series of `load_kw`, `pv_generation_kw`,
+`import_price_eur_per_kwh`, and `export_price_eur_per_kwh`, with one value per hour
+from one to 168 hours, in kW or EUR/kWh as named by their fields. A valid request
+returns a `validated` response containing the horizon metadata; invalid JSON or
+values return HTTP 422 with field-level validation details. The endpoint is the API
+boundary for the optimizer; solver schedule results will be added by a later
+vertical slice.
 
 ## Electricity-price API
 
 `POST /api/v1/electricity-prices` validates normalized hourly import and export
-prices. The versioned request contains ascending, unique, timezone-aware
-`timestamps` for one to 87,672 hours, spaced by `interval_minutes: 60`, aligned
-`import_price_eur_per_kwh` and `export_price_eur_per_kwh` values in `EUR/kWh`,
-provider-independent `source` metadata, and timezone-aware `retrieved_at` and
-`expires_at` freshness bounds.
-
+prices: ascending, unique, timezone-aware `timestamps` (one to 87,672 hours, spaced
+by `interval_minutes: 60`), aligned `import_price_eur_per_kwh` and
+`export_price_eur_per_kwh` values in `EUR/kWh`, provider-independent `source`
+metadata, and timezone-aware `retrieved_at` and `expires_at` freshness bounds.
 Prices may be negative for markets that support negative rates, but must remain
-within the documented range of -100 to 100 EUR/kWh. Coverage must begin at or
-after retrieval and end before expiry.
-
-Example:
+within -100 to 100 EUR/kWh. Coverage must begin at or after retrieval and end
+before expiry. Additional 422 causes are duplicate or incorrectly spaced
+timestamps, misaligned series, stale coverage, invalid freshness bounds, and
+out-of-range values.
 
 ```json
 {
-  "schema_version": "1",
-  "timestamps": [
-    "2026-01-01T00:00:00+00:00",
-    "2026-01-01T01:00:00+00:00"
-  ],
-  "interval_minutes": 60,
-  "import_price_eur_per_kwh": [0.30, 0.25],
-  "export_price_eur_per_kwh": [0.08, 0.08],
-  "unit": "EUR/kWh",
+  "schema_version": "1", "interval_minutes": 60, "unit": "EUR/kWh",
+  "timestamps": ["2026-01-01T00:00:00+00:00", "2026-01-01T01:00:00+00:00"],
+  "import_price_eur_per_kwh": [0.30, 0.25], "export_price_eur_per_kwh": [0.08, 0.08],
   "source": {"provider": "day-ahead-market"},
-  "retrieved_at": "2025-12-31T23:00:00+00:00",
-  "expires_at": "2026-01-01T03:00:00+00:00"
+  "retrieved_at": "2025-12-31T23:00:00+00:00", "expires_at": "2026-01-01T03:00:00+00:00"
 }
 ```
-
-The response echoes the normalized prices with `status: "validated"`.
-Missing fields, unknown fields, unsupported versions or units, naive or
-duplicate timestamps, incorrectly spaced timestamps, misaligned series, stale
-coverage, invalid freshness bounds, out-of-range values, and series longer than
-ten years (87,672 hourly values) return HTTP 422 with field-level validation
-details.
 
 ## Battery API
 
 `POST /api/v1/battery` validates normalized hourly battery state and capability
-data. The versioned request contains timezone-aware `start_time`,
-`interval_minutes: 60`, one to 87,672 `state_of_charge_kwh` values, capacity and
-SOC bounds in kWh, initial SOC, charge and discharge power limits in kW, one
-battery round-trip efficiency from greater than zero through one,
-`unit: "kWh"`, `power_unit: "kW"`, and optional source metadata.
-
-Example:
+data: timezone-aware `start_time`, `state_of_charge_kwh` values, capacity and SOC
+bounds in kWh, initial SOC, charge and discharge power limits in kW, one battery
+round-trip efficiency from greater than zero through one, `unit: "kWh"`,
+`power_unit: "kW"`, and optional source metadata. Additional 422 causes are
+out-of-range state of charge, inconsistent limits, and invalid efficiencies.
 
 ```json
 {
-  "schema_version": "1",
-  "start_time": "2026-01-01T00:00:00+00:00",
-  "interval_minutes": 60,
-  "state_of_charge_kwh": [5.0, 5.5],
-  "capacity_kwh": 10.0,
-  "minimum_soc_kwh": 2.0,
-  "maximum_soc_kwh": 10.0,
-  "initial_soc_kwh": 5.0,
-  "maximum_charge_kw": 4.0,
-  "maximum_discharge_kw": 4.0,
-  "battery_efficiency": 0.9,
-  "unit": "kWh",
-  "power_unit": "kW",
-  "source": {
-    "provider": "home-assistant",
-    "entity_id": "sensor.battery_soc"
-  }
+  "schema_version": "1", "start_time": "2026-01-01T00:00:00+00:00", "interval_minutes": 60,
+  "state_of_charge_kwh": [5.0, 5.5], "unit": "kWh", "power_unit": "kW",
+  "capacity_kwh": 10.0, "minimum_soc_kwh": 2.0, "maximum_soc_kwh": 10.0, "initial_soc_kwh": 5.0,
+  "maximum_charge_kw": 4.0, "maximum_discharge_kw": 4.0, "battery_efficiency": 0.9,
+  "source": {"provider": "home-assistant", "entity_id": "sensor.battery_soc"}
 }
 ```
-
-The response echoes the validated battery data with `status: "validated"`.
-Missing fields, unknown fields, unsupported versions or units, naive
-timestamps, out-of-range state of charge, inconsistent limits, invalid
-efficiencies, and series longer than ten years (87,672 hourly values) return
-HTTP 422 with field-level validation details.
 
 ## Home Assistant battery import
 
 The Home Assistant battery provider retrieves a current snapshot from the REST
-state endpoint for each configured entity mapping. Static numeric values may
-instead be configured as constants with `{value, unit}`. Numeric shorthand uses
-the canonical unit for that field. Entity values may come from either the entity
-state or a named entity attribute and normalize to the battery API units.
-State-of-charge and SOC limits accept `%`, `Wh`, or `kWh`; capacity accepts `Wh`
-or `kWh`; power limits accept `W` or `kW`; and efficiencies accept `%` or a
-unitless `ratio`.
+state endpoint for each configured entity mapping. Entity values come from the
+entity state or a named entity attribute and normalize to the battery API units:
+state of charge and SOC limits accept `%`, `Wh`, or `kWh`; capacity accepts `Wh` or
+`kWh`; power limits accept `W` or `kW`; and efficiencies accept `%` or a unitless
+`ratio`. Static numeric values may instead be configured as constants with
+`{value, unit}`; numeric shorthand uses the canonical unit for that field. Live
+state, cumulative counters, and historical measurements remain provider backed;
+constants are intended for static installation parameters only.
 
 Configure the provider under `home_assistant.battery` and add the `battery`
 source to `orchestration.sources`. The snapshot contains one current
@@ -113,13 +89,11 @@ authentication failures, missing entities, malformed values, invalid timestamps,
 inconsistent SOC limits, and stale data are reported as provider errors or stale
 orchestration runs.
 
-Static battery values can use the following form:
+Example:
 
 ```yaml
 battery:
-  state_of_charge:
-    entity_id: sensor.battery_state_of_charge
-    unit: '%'
+  state_of_charge: {entity_id: sensor.battery_state_of_charge, unit: '%'}
   capacity: {value: 28.7, unit: kWh}
   minimum_soc: {value: 5, unit: '%'}
   maximum_soc: {value: 100, unit: '%'}
@@ -131,26 +105,15 @@ battery:
     history_start: 2020-01-01T00:00:00+00:00
     full_soc_threshold_percent: 100
     battery:
-      energy_in:
-        terms:
-          - operation: add
-            entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]
-      energy_out:
-        terms:
-          - operation: add
-            entities: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}]
+      energy_in: {terms: [{operation: add, entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]}]}
+      energy_out: {terms: [{operation: add, entities: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}]}]}
     inverter_charge:
-      energy_in:
-        terms:
-          - operation: add
-            entities: [{entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh}]
+      energy_in: {terms: [{operation: add, entities: [{entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh}]}]}
       energy_out:
         part: positive
         terms:
-          - operation: add
-            entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]
-          - operation: subtract
-            entities: [{entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}]
+          - {operation: add, entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]}
+          - {operation: subtract, entities: [{entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}]}
     inverter_discharge:
       energy_in:
         part: positive
@@ -159,82 +122,78 @@ battery:
             entities:
               - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}
               - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}
-          - operation: subtract
-            entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]
-      energy_out:
-        terms:
-          - operation: add
-            entities: [{entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh}]
+          - {operation: subtract, entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]}
+      energy_out: {terms: [{operation: add, entities: [{entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh}]}]}
 ```
 
-Calculated efficiency is configured separately under `battery.efficiency_calculation`.
-It contains an `energy_in` and an `energy_out` energy aggregation for the battery,
-inverter charge, and inverter discharge components, plus the historical state of
-charge entity. Battery efficiency is one full-cycle round-trip value detected
-from consecutive full-SoC boundaries. Inverter charge and discharge efficiencies
-are independent inverter measurements. The complete ratio is their product with
-the battery ratio. A configured `battery_efficiency` takes precedence over the
-calculated battery value and emits a warning. The dashboard exposes these values
-through `scenario_kind=efficiency`. Before the first complete full-SoC cycle is
-available (or while the calculated result is otherwise not `"ok"`), the live
-battery snapshot uses a documented 95% default for `battery_efficiency` instead
-of failing; this only applies to calculated mode without a fixed
-`battery_efficiency` override.
+Calculated efficiency is configured separately under
+`battery.efficiency_calculation`: an `energy_in` and an `energy_out` energy
+aggregation for each of the battery, inverter charge, and inverter discharge
+components, plus the historical state of charge entity. Battery efficiency is one
+full-cycle round-trip value detected from consecutive full-SoC boundaries; inverter
+charge and discharge efficiencies are independent inverter measurements; the
+complete ratio is their product with the battery ratio. A configured
+`battery_efficiency` takes precedence over the calculated battery value and emits
+a warning. The dashboard exposes these values through `scenario_kind=efficiency`.
+Before the first complete full-SoC cycle is available (or while the calculated
+result is otherwise not `"ok"`), the live battery snapshot uses a 95% default for
+`battery_efficiency` instead of failing, but only in calculated mode without a
+fixed `battery_efficiency` override.
 
 The dashboard Efficiency tab renders each available component as one accessible
 numeric summary row with its raw `ratio` value. These values summarize the
 complete retained battery and inverter history; they are not hourly chart
-observations and the tab does not offer a selectable calculation time window.
-If a component cannot be calculated, it uses the `0.95` ratio fallback and is
-marked as `defaulted`, `unavailable`, or `invalid` in the response and UI. A
-measured component is `calculated`; complete round-trip efficiency is
-`calculated_with_defaults` when any input uses a fallback. Each series carries
-its structured `calculation_status`, and the UI renders exactly one annotation
-per row from it: `(calculated)`, `(default)`, `(unavailable)`, `(invalid)`, or
+observations, and the tab has no selectable calculation time window. A component
+that cannot be calculated uses the `0.95` ratio fallback and is marked
+`defaulted`, `unavailable`, or `invalid` in the response and UI; a measured
+component is `calculated`, and complete round-trip efficiency is
+`calculated_with_defaults` when any input uses a fallback. Each series carries its
+structured `calculation_status`, and the UI renders exactly one annotation per row
+from it: `(calculated)`, `(default)`, `(unavailable)`, `(invalid)`, or
 `(calculated with defaults)`. The `is_default` flag remains in the response as
-compatibility metadata that is `true` for the three fallback statuses
-(`defaulted`, `unavailable`, `invalid`) and `false` otherwise; the UI does not
-render it separately, so a fallback is never annotated twice. The fallback
-annotations carry a tooltip explaining that the fallback ratio was used. The
-source, coverage, freshness, retrieval, and calculation diagnostics remain
-available beside the summary. The response also exposes battery throughput,
-inverter charge and discharge throughput, and `Completed battery cycles` as
-structured scalar metrics rather than diagnostics. The UI formats every
-displayed ratio to four digits after the decimal point while retaining the raw
-API value in the data element. It formats the three throughput metrics, which
-carry the `kWh` unit, to exactly two digits after the decimal point, including
-trailing zeroes for whole and zero values such as `5.00 kWh` and `0.00 kWh`,
-and shows `Completed battery cycles` as a whole number. The metric values in
-the API response are not rounded.
+compatibility metadata, `true` for the three fallback statuses (`defaulted`,
+`unavailable`, `invalid`) and `false` otherwise; the UI does not render it, so a
+fallback is never annotated twice. Fallback annotations carry a tooltip explaining
+that the fallback ratio was used. Source, coverage, freshness, retrieval, and
+calculation diagnostics remain available beside the summary. Battery throughput,
+inverter charge and discharge throughput, and `Completed battery cycles` are
+exposed as structured scalar metrics rather than diagnostics. The UI formats every
+displayed ratio to four digits after the decimal point (the raw API value stays in
+the data element), the three throughput metrics, which carry the `kWh` unit, to
+exactly two digits, including trailing zeroes (`5.00 kWh`, `0.00 kWh`), and
+`Completed battery cycles` as a whole number. Metric values in the API response
+are not rounded.
 
-Ingestion persists the aligned hourly history under its own record and requests
-only the hours after the previously persisted history on every scheduled run,
-so the daily recompute does not re-fetch the complete history from Home
-Assistant each time. Empty Home Assistant chunks before an entity's retained
-history begins are skipped during bootstrap; the resulting history starts at
-the earliest complete retained hour and does not fabricate earlier values. The
-calculator itself uses all retained history, or all history since `history_start`,
-and never uses a rolling window.
+Calculated-efficiency ingestion reconstructs historical state of charge through
+the dedicated history endpoint and persists the aligned hourly battery/inverter
+history under its own record before the daily calculation. Every scheduled run
+requests only the hours after the previously persisted history, merges them into
+the retained record, and bounds retention to 87,672 hours (ten years), so the
+daily recompute does not re-fetch the complete history from Home Assistant each
+time. Empty Home Assistant chunks before an entity's retained history begins are
+skipped during bootstrap; the resulting history starts at the earliest complete
+retained hour and does not fabricate earlier values. The calculator itself uses
+all retained history, or all history since `history_start`, and never uses a
+rolling window.
 
-Each side of a leg is an energy aggregation: the energy of the entities of its
-`add` term minus the energy of the entities of its `subtract` term, per hour. It
-is a net directional energy flow, not an absolute cumulative total. For a
-DC-coupled installation, `inverter_charge.energy_out` above nets the battery's
-total charging energy against the directly consumed PV yield to isolate the
-AC-sourced share; in any hour where PV production exceeds the battery's charging
-energy, that sum is negative because the surplus was exported rather than stored.
-Likewise `inverter_discharge.energy_in` is the energy the inverter draws from the
-DC bus: PV yield reaches the inverter directly, so it is added to the battery's
-discharge energy, and the energy the battery took in during the same hour is
-subtracted because it never reached the inverter. In any hour where the battery
-takes in more than it discharges plus the PV yield, that sum is negative because
-the inverter was not discharging.
+Each side of a leg is an energy aggregation: per hour, the energy of the entities
+of its `add` term minus the energy of the entities of its `subtract` term. It is a
+net directional energy flow, not an absolute cumulative total. For a DC-coupled
+installation, `inverter_charge.energy_out` above nets the battery's total charging
+energy against the directly consumed PV yield to isolate the AC-sourced share; in
+any hour where PV production exceeds the battery's charging energy, that sum is
+negative because the surplus was exported rather than stored. Likewise
+`inverter_discharge.energy_in` is the energy the inverter draws from the DC bus:
+PV yield reaches the inverter directly, so it is added to the battery's discharge
+energy, and the energy the battery took in during the same hour is subtracted
+because it never reached the inverter. In any hour where the battery takes in more
+than it discharges plus the PV yield, that sum is negative because the inverter
+was not discharging.
 
 `part` decides what such a negative sum means. With the default `net` it is
 invalid data and never fails the refresh: like every other invalid data point it
-excludes the hour (`combined_negative`), and the hour is excluded in all six
-energy legs and the state of charge. Hours excluded this way are listed on the
-dashboard's Excluded hours tab and through
+excludes the hour (`combined_negative`) in all six energy legs and the state of
+charge, and the hour is listed on the dashboard's Excluded hours tab and through
 `GET /api/v1/dashboard/excluded-hours`. A full-charge cycle that contains an
 excluded hour is not used for the ratios, so the result rests on fewer cycles
 instead of a wrong value. On a DC-coupled installation these two sums are
@@ -253,61 +212,33 @@ was removed from storage, beyond `soc_balance_tolerance_kwh`. A violation
 means the measured data is inconsistent (e.g. a misconfigured or drifting
 entity), not that the battery has ordinary conversion losses.
 
-Live state, cumulative counters, and historical measurements remain provider
-backed; constants are intended for static installation parameters only.
-
-Calculated efficiency ingestion reconstructs historical state of charge through
-the dedicated history endpoint and persists aligned hourly battery/inverter
-measurements before the daily calculation.
-
 ## Household-load API
 
-`POST /api/v1/household-load` validates a normalized hourly household-load
-series. When the source matches the configured Home Assistant provider, its
-persisted history is merged by hourly timestamp with incoming values taking
-precedence and a maximum of 87,672 values retained. The versioned request
-contains:
-
-- `schema_version: "1"`
-- A timezone-aware `start_time`
-- `interval_minutes: 60`
-- `load_kw`, containing one non-negative value per hour for one to 87,672 hours
-- `unit: "kW"`
-- Optional `source` metadata with a provider and entity identifier
-- Timezone-aware `retrieved_at` and `latest_observation_at` metadata
-
-Example:
+`POST /api/v1/household-load` validates a normalized hourly household-load series:
+a timezone-aware `start_time`, `load_kw` (one non-negative value per hour for one
+to 87,672 hours), `unit: "kW"`, optional `source` metadata with a provider and
+entity identifier, and timezone-aware `retrieved_at` and `latest_observation_at`
+metadata.
 
 ```json
 {
-  "schema_version": "1",
-  "start_time": "2026-01-01T00:00:00+00:00",
-  "interval_minutes": 60,
-  "load_kw": [1.2, 1.0],
-  "unit": "kW",
-  "source": {
-    "provider": "home-assistant",
-    "entity_id": "sensor.household_load"
-  },
-  "retrieved_at": "2026-01-01T00:00:00+00:00",
-  "latest_observation_at": "2026-01-01T01:00:00+00:00"
+  "schema_version": "1", "start_time": "2026-01-01T00:00:00+00:00", "interval_minutes": 60,
+  "load_kw": [1.2, 1.0], "unit": "kW",
+  "source": {"provider": "home-assistant", "entity_id": "sensor.household_load"},
+  "retrieved_at": "2026-01-01T00:00:00+00:00", "latest_observation_at": "2026-01-01T01:00:00+00:00"
 }
 ```
 
-The response echoes the normalized data with `status: "validated"`. In a
-response, `load_kw` holds `null` for an hour that the Home Assistant import
-excluded; a submission never contains `null`. Missing
-fields, unknown fields, unsupported versions or units, naive timestamps,
-invalid values, and series longer than ten years (87,672 hourly values) return
-HTTP 422 with field-level validation details. Historical data is not rejected
+In a response, `load_kw` holds `null` for an hour that the Home Assistant import
+excluded; a submission never contains `null`. Historical data is not rejected
 because it is old; polling health is assessed separately with the provider's
 optional freshness threshold.
 
 When configured, `POST /api/v1/household-load` persists data only when its
 source matches the configured Home Assistant household-load provider.
 Source-less submissions and other providers are validated and returned but are
-not persisted. Matching household-load submissions merge by hourly timestamp,
-with incoming values overwriting duplicates and the oldest values removed
+not persisted. Matching submissions merge by hourly timestamp with the persisted
+history, with incoming values overwriting duplicates and the oldest values removed
 beyond 87,672 hours. A submission that starts after the persisted history ends
 stores every hour in between as an excluded hour with the reason
 `history_unavailable` (`null` in the series), which a later submission of those
@@ -318,12 +249,8 @@ persistence boundary.
 ## Historic multi-asset dashboard
 
 Open `/dashboard/` to inspect imported actuals. The Historic actuals tab and every
-other consumer read one endpoint using the unified dashboard contract:
-
-```text
-GET /api/v1/dashboard/data?scenario_kind=actual&start_time=<inclusive>&end_time=<exclusive>
-```
-
+other consumer read one endpoint using the unified dashboard contract,
+`GET /api/v1/dashboard/data?scenario_kind=actual&start_time=<inclusive>&end_time=<exclusive>`.
 `scenario_kind=actual` is the default. The range follows the same rules for every
 scenario: both boundaries are timezone-aware and normalized to UTC, must be
 aligned to the hour, `end_time` must be later than `start_time`, and the range must
@@ -332,14 +259,7 @@ not exceed 87,672 hours; violations return HTTP 422. The range is half-open
 
 ### Dashboard settings and time zone
 
-```text
-GET /api/v1/dashboard/settings
-```
-
-```json
-{"timezone": "Europe/Berlin"}
-```
-
+`GET /api/v1/dashboard/settings` returns `{"timezone": "Europe/Berlin"}`.
 `timezone` is the top-level configuration setting: an IANA name matched exactly and
 case-sensitively (default `UTC`) whose UTC offset is a whole number of hours all
 year. It is validated at startup; an unknown name, a lowercase `utc`, a path-like
@@ -398,7 +318,8 @@ Every series identifies its `source`, requested and `available_*` coverage,
   history used for the calculated battery efficiency, so it is available only when
   `home_assistant.battery.efficiency_calculation` is configured.
 
-Historic actuals never contain forecasts or optimizer plan snapshots.
+Historic actuals never contain forecasts or optimizer plan snapshots, so the view
+never mixes them with predicted inputs or optimization plans.
 
 ### Response status and asset availability
 
@@ -412,23 +333,19 @@ invalidates the series of other assets.
 
 `assets` lists one entry for each of `household_load`, `pv_generation`,
 `grid_flow`, `electricity_prices`, `battery`, `electric_vehicle`, and `heat_pump`
-so a client can tell what is missing and why:
-
-| Asset status | Meaning |
-| --- | --- |
-| `available` | Series were returned. |
-| `empty` | History exists but has no observation in the requested range. |
-| `stale` | Series were returned; the newest observation exceeds the polling threshold. |
-| `not_configured` | The installation has no source for this asset. This is not a warning. |
-| `unavailable` | The asset is configured but persistence is missing or no data has been persisted yet. |
-| `invalid` | Persisted data is corrupt or could not be recovered from its backup and is withheld. |
-
-Every status other than `available` carries an actionable `reason`. Assets in
-the `empty`, `stale`, `unavailable`, and `invalid` states are also summarized in
+so a client can tell what is missing and why. The asset `status` is `available`
+(series were returned), `empty` (history exists but has no observation in the
+requested range), `stale` (series were returned; the newest observation exceeds
+the polling threshold), `not_configured` (the installation has no source for this
+asset; this is not a warning), `unavailable` (the asset is configured but
+persistence is missing or no data has been persisted yet), or `invalid` (persisted
+data is corrupt or could not be recovered from its backup and is withheld). Every
+status other than `available` carries an actionable `reason`. Assets in the
+`empty`, `stale`, `unavailable`, and `invalid` states are also summarized in
 `diagnostics`; `not_configured` assets are not, unless nothing at all is
-configured. Corrupt or unrecoverable persisted data is never returned as valid
-actuals; the technical cause is written to the service log with the request ID
-rather than returned to clients. The dashboard endpoint reports these states in
+configured. Corrupt or unrecoverable persisted data is never returned as
+valid actuals; the technical cause is written to the service log with the request
+ID rather than returned to clients. The dashboard endpoint reports these states in
 the response body (HTTP 200); `GET /api/v1/historic/household-load` keeps
 returning HTTP 503 for corrupt household-load persistence.
 
@@ -442,31 +359,18 @@ Example (abridged) for a two-hour range with household load and grid flow:
 
 ```json
 {
-  "schema_version": "1",
-  "status": "validated",
-  "requested_start_time": "2026-01-01T00:00:00Z",
-  "requested_end_time": "2026-01-01T02:00:00Z",
-  "interval_minutes": 60,
-  "series": [
-    {
-      "id": "household_load_actual",
-      "data_type": "household_load",
-      "scenario_kind": "actual",
-      "timestamps": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"],
-      "values": [1.2, 1.0],
-      "unit": "kW",
-      "source": {"provider": "home-assistant", "entity_id": "household_load"},
-      "available_start_time": "2026-01-01T00:00:00Z",
-      "available_end_time": "2026-01-01T02:00:00Z",
-      "retrieved_at": "2026-01-01T02:00:00Z",
-      "freshness": "fresh",
-      "validation_status": "valid",
-      "missing_intervals": []
-    }
-  ],
+  "schema_version": "1", "status": "validated", "interval_minutes": 60,
+  "requested_start_time": "2026-01-01T00:00:00Z", "requested_end_time": "2026-01-01T02:00:00Z",
+  "series": [{
+    "id": "household_load_actual", "data_type": "household_load", "scenario_kind": "actual",
+    "timestamps": ["2026-01-01T00:00:00Z", "2026-01-01T01:00:00Z"], "values": [1.2, 1.0], "unit": "kW",
+    "source": {"provider": "home-assistant", "entity_id": "household_load"},
+    "available_start_time": "2026-01-01T00:00:00Z", "available_end_time": "2026-01-01T02:00:00Z",
+    "retrieved_at": "2026-01-01T02:00:00Z", "freshness": "fresh", "validation_status": "valid",
+    "missing_intervals": []
+  }],
   "assets": [
-    {"asset": "household_load", "status": "available",
-     "series_ids": ["household_load_actual"], "reason": null},
+    {"asset": "household_load", "status": "available", "series_ids": ["household_load_actual"], "reason": null},
     {"asset": "pv_generation", "status": "not_configured", "series_ids": [],
      "reason": "no historic PV-generation importer is available; PV forecasts are served by scenario_kind=forecast"},
     {"asset": "grid_flow", "status": "unavailable", "series_ids": [],
@@ -482,13 +386,11 @@ Household load and grid flow are retained as one contiguous hourly history of at
 most 87,672 values (about ten years), bootstrapped from all history Home
 Assistant retains and extended by scheduled runs with only the completed hours
 after the retained history. Price history is retained for the same number of
-hours and may skip hours. Retention, backup recovery, and provider import
-behavior are otherwise unchanged. A failed provider run keeps the last valid
+hours and may skip hours. A failed provider run keeps the last valid
 history, and the assets above report `unavailable` until the first successful run
 persists data. Hours that Home Assistant no longer held when a run resumed after a
 long downtime stay in the history as excluded hours with the reason
-`history_unavailable`, so they are `null` in the series like any other excluded
-hour and the history stays contiguous.
+`history_unavailable` (`null` in the series), so the history stays contiguous.
 
 ### Dashboard view
 
@@ -498,8 +400,7 @@ power (`kW`) with household load, grid import, and grid export; prices
 source, unit, freshness, coverage, retrieval time, and validation status of each
 series, and names every asset that is not available with its reason. When some
 asset data is withheld as invalid, the status line says so and the remaining
-series are still drawn. The view labels the series as historic actuals and
-deliberately does not mix them with predicted inputs or optimization plans.
+series are still drawn. The view labels the series as historic actuals.
 
 The range controls use an end-exclusive boundary: the end time must be later
 than the start time. If a requested actual or forecast range falls outside the
@@ -540,19 +441,16 @@ through its legend entry removes it from both. When every line is hidden, the na
 `No series shown (kW)`.
 
 The dashboard also provides a Forecast tab backed by
-`GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify
-their source, unit, coverage, retrieval time, and freshness. PV generation uses
-`kW`; market prices use `EUR/kWh`. The Forecast tab renders power and price data
-in separate charts, each with its own unit axis, data-driven scale, legend,
-and accessible description. Each scale uses finite visible values with
-small padding, while flat or empty data receives a safe non-zero fallback
-domain. API boundaries and point timestamps are UTC hourly half-open ranges, which
-the dashboard shows in the configured time zone. The aWATTar price forecast is
-requested for a window that reaches 48 hours past the current hour, so it covers
-the next local day as soon as the day-ahead prices are published at 14:00 local
-time. Missing or partial observations remain gaps and are not interpolated or treated
-as zero. The forecast charts have the same per-chart legends, show and hide
-behavior, and point tooltips as the Historic actuals tab.
+`GET /api/v1/dashboard/data?scenario_kind=forecast`. PV generation uses `kW`;
+market prices use `EUR/kWh`. The Forecast tab renders power and price data in
+separate charts, each with its own unit axis, data-driven scale, legend, and
+accessible description. Each scale uses finite visible values with small padding,
+while flat or empty data receives a safe non-zero fallback domain. The aWATTar
+price forecast is requested for a window that reaches 48 hours past the current
+hour, so it covers the next local day as soon as the day-ahead prices are
+published at 14:00 local time. Missing or partial observations remain gaps and are
+not interpolated or treated as zero. The forecast charts have the same per-chart
+legends, show and hide behavior, and point tooltips as the Historic actuals tab.
 
 The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so the
 dashboard remains available after the Python application is installed into the
@@ -571,23 +469,16 @@ the request log without recording query payloads or provider credentials.
 
 An hour of Home Assistant history is imported only if every data point that
 contributes to it is valid. Every other hour has no value (`null`) and is
-recorded with each cause. The dashboard's **Excluded hours** tab and this endpoint
-list them:
-
-```text
-GET /api/v1/dashboard/excluded-hours?start_time=<inclusive>&end_time=<exclusive>
-```
-
-The range follows the rules of the dashboard data endpoint: timezone-aware, aligned
-to the hour, `end_time` later than `start_time`, at most 87,672 hours; violations
-return HTTP 422. The response lists the sources that were checked, a summary by
+recorded with each cause. The dashboard's **Excluded hours** tab and
+`GET /api/v1/dashboard/excluded-hours?start_time=<inclusive>&end_time=<exclusive>`
+list them. The range follows the rules of the dashboard data endpoint (violations
+return HTTP 422). The response lists the sources that were checked, a summary by
 source and reason, and every excluded hour in ascending order:
 
 ```json
 {
   "schema_version": "1",
-  "requested_start_time": "2026-01-01T00:00:00Z",
-  "requested_end_time": "2026-01-01T06:00:00Z",
+  "requested_start_time": "2026-01-01T00:00:00Z", "requested_end_time": "2026-01-01T06:00:00Z",
   "excluded_hour_count": 1,
   "sources": [
     {"source": "household_load", "status": "available", "reason": null, "excluded_hour_count": 1},
@@ -598,36 +489,20 @@ source and reason, and every excluded hour in ascending order:
      "reason": "no persisted battery efficiency history is available yet",
      "excluded_hour_count": 0}
   ],
-  "summary": [
-    {"source": "household_load", "reason": "counter_decrease", "excluded_hour_count": 1}
-  ],
-  "hours": [
-    {
-      "hour_start": "2026-01-01T03:00:00Z",
-      "source": "household_load",
-      "causes": [
-        {
-          "reason": "counter_decrease",
-          "message": "sensor.household_energy decreased from 700 kWh at 2026-01-01T02:59:50+00:00 to 0 kWh at 2026-01-01T03:00:10+00:00.",
-          "entity_id": "sensor.household_energy",
-          "data_point_count": 1,
-          "data_points": [
-            {
-              "timestamp": "2026-01-01T03:00:10Z",
-              "state": "0",
-              "unit": "kWh",
-              "entity_id": null,
-              "previous_timestamp": "2026-01-01T02:59:50Z",
-              "previous_value": 700.0,
-              "value": 0.0,
-              "step_kwh": -700.0,
-              "maximum_kwh": 100.0
-            }
-          ]
-        }
-      ]
-    }
-  ]
+  "summary": [{"source": "household_load", "reason": "counter_decrease", "excluded_hour_count": 1}],
+  "hours": [{
+    "hour_start": "2026-01-01T03:00:00Z", "source": "household_load",
+    "causes": [{
+      "reason": "counter_decrease",
+      "message": "sensor.household_energy decreased from 700 kWh at 2026-01-01T02:59:50+00:00 to 0 kWh at 2026-01-01T03:00:10+00:00.",
+      "entity_id": "sensor.household_energy", "data_point_count": 1,
+      "data_points": [{
+        "timestamp": "2026-01-01T03:00:10Z", "state": "0", "unit": "kWh", "entity_id": null,
+        "previous_timestamp": "2026-01-01T02:59:50Z", "previous_value": 700.0, "value": 0.0,
+        "step_kwh": -700.0, "maximum_kwh": 100.0
+      }]
+    }]
+  }]
 }
 ```
 
@@ -641,12 +516,11 @@ source and reason, and every excluded hour in ascending order:
   history has been persisted yet, and `invalid` when persisted data is corrupt and
   withheld. One source never hides the others.
 - Every cause has a `reason` from the closed set below, a human-readable
-  `message`, the `entity_id`, and its `data_points`. A data point carries the time
-  Home Assistant recorded it, the raw `state` exactly as reported, and, for a
-  counter step, the previous and current observation (`previous_timestamp`,
-  `previous_value`, `value`, in the entity's unit), `step_kwh`, and `maximum_kwh`.
-  For a combined hour, each data point names one component `entity_id` and its
-  signed `step_kwh`. At most 50 data points are kept per entity and hour;
+  `message`, the `entity_id`, and its `data_points` (the recorded time, the raw
+  `state`, and for a counter step the previous and current observation, `step_kwh`,
+  and `maximum_kwh`; field definitions: `ExcludedDataPoint` in the OpenAPI
+  contract). For a combined hour, each data point names one component `entity_id`
+  and its signed `step_kwh`. At most 50 data points are kept per entity and hour;
   `data_point_count` is the number before that bound. A `history_unavailable` cause
   has `entity_id: null`, no data points, and `data_point_count: 0`; its `message`
   names the whole missing range, for example "The provider holds no history from
@@ -678,82 +552,44 @@ window whose sources have no history does not claim that nothing was excluded.
 
 ## PV-generation API
 
-`POST /api/v1/pv-generation` validates a normalized hourly PV-generation
-series. The versioned request contains:
-
-- `schema_version: "1"`
-- A timezone-aware `start_time`
-- `interval_minutes: 60`
-- `generation_kw`, containing one non-negative value per hour for one to 87,672 hours
-- `unit: "kW"`
-- Optional `source` metadata with a provider and entity identifier
-
-Example:
+`POST /api/v1/pv-generation` validates a normalized hourly PV-generation series: a
+timezone-aware `start_time`, `generation_kw` (one non-negative value per hour for
+one to 87,672 hours), `unit: "kW"`, and optional `source` metadata with a provider
+and entity identifier.
 
 ```json
 {
-  "schema_version": "1",
-  "start_time": "2026-01-01T00:00:00+00:00",
-  "interval_minutes": 60,
-  "generation_kw": [0.0, 2.4],
-  "unit": "kW",
-  "source": {
-    "provider": "home-assistant",
-    "entity_id": "sensor.pv_generation"
-  }
+  "schema_version": "1", "start_time": "2026-01-01T00:00:00+00:00", "interval_minutes": 60,
+  "generation_kw": [0.0, 2.4], "unit": "kW",
+  "source": {"provider": "home-assistant", "entity_id": "sensor.pv_generation"}
 }
 ```
-
-The response echoes the normalized series with `status: "validated"`. Missing
-fields, unknown fields, unsupported versions or units, naive timestamps,
-invalid values, and series longer than ten years (87,672 hourly values) return
-HTTP 422 with field-level validation details.
 
 ## Grid-flow API
 
 `POST /api/v1/grid-flow` validates normalized hourly grid import and export
-data. The versioned request contains timezone-aware `start_time`,
-`interval_minutes: 60`, equally sized non-negative `import_kw` and `export_kw`
-series for one to 87,672 hours, `unit: "kW"`, optional source metadata, and
-timezone-aware `retrieved_at` and `latest_observation_at` metadata.
-
-Example:
+data: timezone-aware `start_time`, equally sized non-negative `import_kw` and
+`export_kw` series for one to 87,672 hours, `unit: "kW"`, optional source metadata,
+and timezone-aware `retrieved_at` and `latest_observation_at` metadata. Mismatched
+series lengths are an additional 422 cause.
 
 ```json
 {
-  "schema_version": "1",
-  "start_time": "2026-01-01T00:00:00+00:00",
-  "interval_minutes": 60,
-  "import_kw": [1.2, 1.0],
-  "export_kw": [0.0, 0.4],
-  "unit": "kW",
-  "source": {
-    "provider": "home-assistant",
-    "entity_id": "grid_flow"
-  },
-  "retrieved_at": "2026-01-01T00:00:00+00:00",
-  "latest_observation_at": "2026-01-01T01:00:00+00:00"
+  "schema_version": "1", "start_time": "2026-01-01T00:00:00+00:00", "interval_minutes": 60,
+  "import_kw": [1.2, 1.0], "export_kw": [0.0, 0.4], "unit": "kW",
+  "source": {"provider": "home-assistant", "entity_id": "grid_flow"},
+  "retrieved_at": "2026-01-01T00:00:00+00:00", "latest_observation_at": "2026-01-01T01:00:00+00:00"
 }
 ```
 
-The response echoes the normalized import and export series with
-`status: "validated"`. Missing fields, unknown fields, unsupported versions
-or units, naive timestamps, mismatched series lengths, invalid values, and
-series longer than ten years (87,672 hourly values) return HTTP 422 with
-field-level validation details. When the source matches the configured Home
-Assistant grid-flow provider, `POST /api/v1/grid-flow` merges the submission into
-the retained history like household load does: incoming values replace
-overlapping hours, and at most 87,672 hourly values are kept. A submission that
-starts after the retained history ends stores every hour in between as an excluded
-hour with the reason `history_unavailable`, which a later submission of those hours
-replaces. A submission that ends before the retained history starts, with hours
-between them, would leave a gap in the contiguous history and is rejected with
-HTTP 503 without changing the retained data. `GET /api/v1/grid-flow` returns the complete retained
+When the source matches the configured Home Assistant grid-flow provider,
+`POST /api/v1/grid-flow` merges the submission into the retained history like
+household load does: incoming values replace overlapping hours, and at most 87,672
+hourly values are kept. A submission that starts after the retained history ends
+stores every hour in between as an excluded hour with the reason
+`history_unavailable`, which a later submission of those hours replaces. A
+submission that ends before the retained history starts, with hours between them,
+would leave a gap in the contiguous history and is rejected with HTTP 503 without
+changing the retained data. `GET /api/v1/grid-flow` returns the complete retained
 history for the configured provider, or HTTP 404 when none is available. Range
-queries over this history use the historic multi-asset API described below.
-
-The health endpoint returns the service status and version, for example:
-
-```json
-{"status":"ok","version":"0.1.0"}
-```
+queries over this history use the historic multi-asset API described above.

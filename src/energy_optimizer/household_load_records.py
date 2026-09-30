@@ -1,12 +1,12 @@
 """Validated household-load records and pure history transformations."""
 
-from __future__ import annotations
-
 import json
 import logging
 import math
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -19,15 +19,11 @@ from pydantic import (
     model_validator,
 )
 
-from energy_optimizer.exclusions import (
-    HourExclusion,
-    history_unavailable_exclusions,
-)
+from energy_optimizer.exclusions import HourExclusion, history_unavailable_exclusions
 from energy_optimizer.legacy_quality import legacy_exclusion
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     HouseholdLoadData,
-    IntervalQuality,
     SourceMetadata,
 )
 from energy_optimizer.storage_errors import ProviderDataStoreError
@@ -98,7 +94,6 @@ class HouseholdLoadRecord(BaseModel):
     )
     @classmethod
     def validate_timestamp(cls, value: object) -> datetime:
-        """Parse persisted timestamps and normalize them to UTC."""
         return _normalize_record_timestamp(value)
 
     @field_validator("timestamp")
@@ -123,10 +118,8 @@ class HouseholdLoadRecord(BaseModel):
     @model_validator(mode="after")
     def validate_exclusion(self) -> HouseholdLoadRecord:
         """An hour has a value or an explanation for its absence, never both."""
-        legacy_suspect = self.quality is not None and self.quality.status == "suspect"
-        if (self.load_kw is None) != (self.exclusion is not None) and not (
-            legacy_suspect
-        ):
+        suspect = self.quality is not None and self.quality.status == "suspect"
+        if (self.load_kw is None) != (self.exclusion is not None) and not suspect:
             raise ValueError("record load and exclusion do not match")
         if self.exclusion is not None and (
             _normalize_record_timestamp(self.exclusion.hour_start) != self.timestamp
@@ -142,23 +135,14 @@ class HouseholdLoadRecord(BaseModel):
             record = cls.model_validate(value)
         except (TypeError, ValidationError) as error:
             raise ValueError("record does not match the NDJSON contract") from error
+        update: dict[str, object] = {"quality": None}
         quality = record.quality
         if quality is not None and quality.status == "suspect":
-            return record.model_copy(
-                update={
-                    "load_kw": None,
-                    "exclusion": legacy_exclusion(
-                        record.timestamp,
-                        IntervalQuality(
-                            status="suspect",
-                            reason=quality.reason,
-                            entity_id=quality.entity_id,
-                        ),
-                    ),
-                    "quality": None,
-                }
+            update["load_kw"] = None
+            update["exclusion"] = legacy_exclusion(
+                record.timestamp, quality.reason, quality.entity_id
             )
-        return record.model_copy(update={"quality": None})
+        return record.model_copy(update=update)
 
     def encode(self) -> bytes:
         """Encode this record using the established compact NDJSON format."""
@@ -167,10 +151,7 @@ class HouseholdLoadRecord(BaseModel):
             "load_kw": self.load_kw,
             "schema_version": self.schema_version,
             "unit": self.unit,
-            "source": {
-                "provider": self.source.provider,
-                "entity_id": self.source.entity_id,
-            },
+            "source": self.source.model_dump(),
             "retrieved_at": self.retrieved_at.isoformat(),
             "latest_observation_at": self.latest_observation_at.isoformat(),
         }
@@ -178,19 +159,7 @@ class HouseholdLoadRecord(BaseModel):
             payload["exclusion"] = _EXCLUSION_ADAPTER.dump_python(
                 self.exclusion, mode="json"
             )
-        return (
-            json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode(
-                "utf-8"
-            )
-            + b"\n"
-        )
-
-    def source_metadata(self) -> SourceMetadata:
-        """Return the embedded source identity as normalized domain metadata."""
-        return SourceMetadata(
-            provider=self.source.provider,
-            entity_id=self.source.entity_id,
-        )
+        return json.dumps(payload, separators=(",", ":")).encode() + b"\n"
 
 
 @dataclass(frozen=True)
@@ -203,8 +172,7 @@ class HouseholdLoadHistory:
 
 
 def bridge_household_load_gap(
-    existing: HouseholdLoadData,
-    incoming: HouseholdLoadData,
+    existing: HouseholdLoadData, incoming: HouseholdLoadData
 ) -> HouseholdLoadData:
     """Extend ``incoming`` back to the end of ``existing`` over a gap.
 
@@ -220,22 +188,36 @@ def bridge_household_load_gap(
         return incoming
     household_load_points(incoming)
     gap = history_unavailable_exclusions("household_load", existing_end, incoming_start)
-    return HouseholdLoadData(
-        schema_version=incoming.schema_version,
+    return replace(
+        incoming,
         start_time=existing_end,
-        interval_minutes=60,
         load_kw=(None,) * len(gap) + incoming.load_kw,
-        unit=incoming.unit,
-        source=incoming.source,
-        retrieved_at=incoming.retrieved_at,
-        latest_observation_at=incoming.latest_observation_at,
         exclusions=gap + incoming.exclusions,
+        quality=(),
+    )
+
+
+def _with_points(
+    template: HouseholdLoadData,
+    points: Sequence[tuple[datetime, float | None]],
+    exclusions: dict[datetime, HourExclusion],
+) -> HouseholdLoadData:
+    """Build a series of ordered ``points`` that keeps the metadata of ``template``."""
+    return replace(
+        template,
+        start_time=points[0][0],
+        load_kw=tuple(value for _, value in points),
+        retrieved_at=as_utc(template.retrieved_at),
+        latest_observation_at=as_utc(template.latest_observation_at),
+        exclusions=tuple(
+            exclusions[timestamp] for timestamp, _ in points if timestamp in exclusions
+        ),
+        quality=(),
     )
 
 
 def merge_household_load_history(
-    existing: HouseholdLoadData,
-    incoming: HouseholdLoadData,
+    existing: HouseholdLoadData, incoming: HouseholdLoadData
 ) -> HouseholdLoadData:
     """Merge hourly household-load data, preferring the incoming hours.
 
@@ -260,37 +242,13 @@ def merge_household_load_history(
         len(incoming_points),
         len(points),
     )
-    ordered_points = sorted(points.items())
-    if len(ordered_points) > HOUSEHOLD_LOAD_MAX_VALUES:
-        ordered_points = ordered_points[-HOUSEHOLD_LOAD_MAX_VALUES:]
-
-    timestamps = [timestamp for timestamp, _ in ordered_points]
-    if not timestamps or any(
-        later - earlier != _HOUR for earlier, later in zip(timestamps, timestamps[1:])
-    ):
-        raise ProviderDataStoreError(
-            "household-load history must contain contiguous hourly timestamps"
-        )
-
-    return HouseholdLoadData(
-        schema_version=incoming.schema_version,
-        start_time=timestamps[0],
-        interval_minutes=60,
-        load_kw=tuple(value for _, value in ordered_points),
-        unit=incoming.unit,
-        source=incoming.source,
-        retrieved_at=as_utc(incoming.retrieved_at),
-        latest_observation_at=as_utc(incoming.latest_observation_at),
-        exclusions=tuple(
-            exclusions[timestamp] for timestamp in timestamps if timestamp in exclusions
-        ),
-    )
+    ordered_points = sorted(points.items())[-HOUSEHOLD_LOAD_MAX_VALUES:]
+    require_contiguous_hours(ordered_points, "household-load")
+    return _with_points(incoming, ordered_points, exclusions)
 
 
 def slice_household_load(
-    data: HouseholdLoadData,
-    start_time: datetime,
-    end_time: datetime,
+    data: HouseholdLoadData, start_time: datetime, end_time: datetime
 ) -> HouseholdLoadData | None:
     """Return hourly observations overlapping a half-open range."""
     points = household_load_points(data)
@@ -300,35 +258,16 @@ def slice_household_load(
         for timestamp, value in sorted(points.items())
         if start_time <= timestamp < end_time
     ]
-    if not selected:
-        return None
-    return HouseholdLoadData(
-        schema_version=data.schema_version,
-        start_time=selected[0][0],
-        interval_minutes=60,
-        load_kw=tuple(value for _, value in selected),
-        unit=data.unit,
-        source=data.source,
-        retrieved_at=as_utc(data.retrieved_at),
-        latest_observation_at=as_utc(data.latest_observation_at),
-        exclusions=tuple(
-            exclusions[timestamp]
-            for timestamp, _ in selected
-            if timestamp in exclusions
-        ),
-    )
+    return _with_points(data, selected, exclusions) if selected else None
 
 
-def household_load_records(
-    data: HouseholdLoadData,
-) -> tuple[HouseholdLoadRecord, ...]:
+def household_load_records(data: HouseholdLoadData) -> tuple[HouseholdLoadRecord, ...]:
     """Convert a validated model into self-contained NDJSON records."""
     points = household_load_points(data)
     exclusions = household_load_exclusion_points(data)
-    source = {
-        "provider": data.source.provider,
-        "entity_id": data.source.entity_id,
-    }
+    source = _HouseholdLoadRecordSource(
+        provider=data.source.provider, entity_id=data.source.entity_id
+    )
     return tuple(
         HouseholdLoadRecord(
             timestamp=timestamp,
@@ -336,7 +275,7 @@ def household_load_records(
             exclusion=exclusions.get(timestamp),
             schema_version=data.schema_version,
             unit=data.unit,
-            source=_HouseholdLoadRecordSource.model_validate(source),
+            source=source,
             retrieved_at=as_utc(data.retrieved_at),
             latest_observation_at=as_utc(data.latest_observation_at),
         )
@@ -349,35 +288,19 @@ def encode_household_records(records: tuple[HouseholdLoadRecord, ...]) -> bytes:
     return b"".join(record.encode() for record in records)
 
 
+def encode_household_load(data: HouseholdLoadData) -> bytes:
+    """Encode a validated model as newline-delimited JSON records."""
+    return encode_household_records(household_load_records(data))
+
+
 def bounded_household_load(data: HouseholdLoadData) -> HouseholdLoadData:
     """Trim an incoming or migrated model to the retained hourly window."""
     all_points = sorted(household_load_points(data).items())
-    all_timestamps = [timestamp for timestamp, _ in all_points]
-    if any(
-        later - earlier != _HOUR
-        for earlier, later in zip(all_timestamps, all_timestamps[1:])
-    ):
-        raise ProviderDataStoreError(
-            "household-load history must contain contiguous hourly timestamps"
-        )
+    require_contiguous_hours(all_points, "household-load")
     points = all_points[-HOUSEHOLD_LOAD_MAX_VALUES:]
-    timestamps = [timestamp for timestamp, _ in points]
     if len(points) == len(data.load_kw):
         return data
-    exclusions = household_load_exclusion_points(data)
-    return HouseholdLoadData(
-        schema_version=data.schema_version,
-        start_time=timestamps[0],
-        interval_minutes=60,
-        load_kw=tuple(value for _, value in points),
-        unit=data.unit,
-        source=data.source,
-        retrieved_at=as_utc(data.retrieved_at),
-        latest_observation_at=as_utc(data.latest_observation_at),
-        exclusions=tuple(
-            exclusions[timestamp] for timestamp in timestamps if timestamp in exclusions
-        ),
-    )
+    return _with_points(data, points, household_load_exclusion_points(data))
 
 
 def _looks_like_incomplete_household_record(content: bytes) -> bool:
@@ -397,8 +320,7 @@ def _looks_like_incomplete_household_record(content: bytes) -> bool:
                 escaped = True
             elif byte == ord('"'):
                 in_string = False
-            continue
-        if byte == ord('"'):
+        elif byte == ord('"'):
             in_string = True
         elif byte in (ord("{"), ord("[")):
             stack.append(byte)
@@ -408,10 +330,7 @@ def _looks_like_incomplete_household_record(content: bytes) -> bool:
     return in_string or bool(stack)
 
 
-def parse_household_history(
-    payload: bytes,
-    path: Path,
-) -> HouseholdLoadHistory:
+def parse_household_history(payload: bytes, path: Path) -> HouseholdLoadHistory:
     """Parse NDJSON and reconstruct the latest contiguous retained history."""
     records: list[HouseholdLoadRecord] = []
     ignored_incomplete_final_line = False
@@ -419,12 +338,12 @@ def parse_household_history(
     if not lines:
         raise ProviderDataStoreError(f"household-load history is empty: {path}")
 
-    for index, raw_line in enumerate(lines):
+    for raw_line in lines:
         content = raw_line.rstrip(b"\r\n")
-        is_final_line = index == len(lines) - 1
-        has_line_ending = raw_line.endswith((b"\n", b"\r"))
+        # Only the final line can lack a line ending.
+        is_unterminated = not raw_line.endswith((b"\n", b"\r"))
         if not content.strip():
-            if is_final_line and not has_line_ending:
+            if is_unterminated:
                 ignored_incomplete_final_line = True
                 break
             raise ProviderDataStoreError(
@@ -433,11 +352,7 @@ def parse_household_history(
         try:
             value = json.loads(content)
         except (UnicodeDecodeError, ValueError) as error:
-            if (
-                is_final_line
-                and not has_line_ending
-                and _looks_like_incomplete_household_record(content)
-            ):
+            if is_unterminated and _looks_like_incomplete_household_record(content):
                 ignored_incomplete_final_line = True
                 break
             raise ProviderDataStoreError(
@@ -454,40 +369,27 @@ def parse_household_history(
         raise ProviderDataStoreError(
             f"household-load history contains no complete records: {path}"
         )
-    first_source = records[0].source
-    if any(record.source != first_source for record in records[1:]):
+    if any(record.source != records[0].source for record in records):
         raise ProviderDataStoreError(
             "household-load history contains inconsistent source identity"
         )
 
-    points: dict[datetime, float | None] = {}
-    exclusions: dict[datetime, HourExclusion] = {}
-    for record in records:
-        points[record.timestamp] = record.load_kw
-        if record.exclusion is not None:
-            exclusions[record.timestamp] = record.exclusion
-        else:
-            exclusions.pop(record.timestamp, None)
-    ordered_points = sorted(points.items())[-HOUSEHOLD_LOAD_MAX_VALUES:]
-    timestamps = [timestamp for timestamp, _ in ordered_points]
-    if any(
-        later - earlier != _HOUR for earlier, later in zip(timestamps, timestamps[1:])
-    ):
-        raise ProviderDataStoreError(
-            "household-load history must contain contiguous hourly timestamps"
-        )
+    # The latest record of an hour defines both its value and its exclusion.
+    latest_by_hour = {record.timestamp: record for record in records}
+    ordered = sorted(latest_by_hour.items())[-HOUSEHOLD_LOAD_MAX_VALUES:]
+    require_contiguous_hours(ordered, "household-load")
     latest = records[-1]
     model = HouseholdLoadData(
         schema_version=latest.schema_version,
-        start_time=timestamps[0],
+        start_time=ordered[0][0],
         interval_minutes=60,
-        load_kw=tuple(value for _, value in ordered_points),
+        load_kw=tuple(record.load_kw for _, record in ordered),
         unit=latest.unit,
-        source=latest.source_metadata(),
+        source=SourceMetadata(latest.source.provider, latest.source.entity_id),
         retrieved_at=latest.retrieved_at,
         latest_observation_at=latest.latest_observation_at,
         exclusions=tuple(
-            exclusions[timestamp] for timestamp in timestamps if timestamp in exclusions
+            record.exclusion for _, record in ordered if record.exclusion is not None
         ),
     )
     return HouseholdLoadHistory(
@@ -533,15 +435,32 @@ def household_load_exclusion_points(
     data: HouseholdLoadData,
 ) -> dict[datetime, HourExclusion]:
     """Index the exclusions of one series by their UTC hour."""
-    exclusions: dict[datetime, HourExclusion] = {}
-    for item in data.exclusions:
+    return index_exclusions(data.exclusions, "household-load")
+
+
+def index_exclusions(
+    exclusions: Iterable[HourExclusion], label: str
+) -> dict[datetime, HourExclusion]:
+    """Index the exclusions of a ``label`` history by their UTC hour."""
+    indexed: dict[datetime, HourExclusion] = {}
+    for item in exclusions:
         timestamp = as_utc(item.hour_start)
-        if timestamp in exclusions:
+        if timestamp in indexed:
             raise ProviderDataStoreError(
-                "household-load history has two exclusions for one hour"
+                f"{label} history has two exclusions for one hour"
             )
-        exclusions[timestamp] = item
-    return exclusions
+        indexed[timestamp] = item
+    return indexed
+
+
+def require_contiguous_hours(
+    points: Sequence[tuple[datetime, object]], label: str
+) -> None:
+    """Reject ordered hourly points of a ``label`` history that skip an hour."""
+    if any(later - earlier != _HOUR for (earlier, _), (later, _) in pairwise(points)):
+        raise ProviderDataStoreError(
+            f"{label} history must contain contiguous hourly timestamps"
+        )
 
 
 def as_utc(value: datetime) -> datetime:

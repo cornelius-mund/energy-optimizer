@@ -85,8 +85,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 and configuration.orchestration.enabled,
             )
             application.state.orchestrator = build_configured_orchestrator(
-                configuration,
-                application.state.provider_data_store,
+                configuration, application.state.provider_data_store
             )
             logger.info(
                 "event=service_orchestrator_built component=orchestration "
@@ -120,14 +119,6 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 perf_counter() - startup_started_at,
             )
             service_started = True
-        except ConfigurationError as error:
-            logger.critical(
-                "event=service_startup_failed component=api operation=startup "
-                "error_type=%s",
-                error.__class__.__name__,
-                exc_info=True,
-            )
-            raise
         except Exception as error:
             logger.critical(
                 "event=service_startup_failed component=api operation=startup "
@@ -140,12 +131,8 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     finally:
         if service_started:
             logger.info("event=service_stopping component=api operation=shutdown")
-            configured_stop_event = getattr(
-                application.state, "orchestration_stop_event", None
-            )
-            task = getattr(application.state, "orchestration_task", None)
-            if configured_stop_event is not None:
-                configured_stop_event.set()
+            application.state.orchestration_stop_event.set()
+            task = application.state.orchestration_task
             if task is not None:
                 try:
                     await task

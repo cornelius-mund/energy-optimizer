@@ -53,7 +53,6 @@ INVALID_STATES = {
 
 @st.composite
 def counter_states(draw: st.DrawFn) -> list[tuple[datetime, str]]:
-    """Draw the state changes of one counter over about a day."""
     steps = draw(
         st.lists(
             st.tuples(st.integers(1, 60), st.integers(0, 3000), STEP_KINDS),
@@ -96,7 +95,6 @@ WINDOWS = st.lists(
 def build_or_none(
     aggregate: EnergyAggregate, history: HomeAssistantHistory
 ) -> HomeAssistantEnergySeries | None:
-    """Return the built series, or ``None`` when the consumer's build fails."""
     try:
         return aggregate.build(history)
     except HomeAssistantError:
@@ -153,8 +151,7 @@ def as_seen_by_an_independent_request(
 @settings(max_examples=200, deadline=None, derandomize=True)
 @given(states=counter_states(), windows=WINDOWS)
 def test_a_window_of_the_shared_series_equals_an_independent_fetch_of_it(
-    states: list[tuple[datetime, str]],
-    windows: list[tuple[int, int, int]],
+    states: list[tuple[datetime, str]], windows: list[tuple[int, int, int]]
 ) -> None:
     aggregates = [
         EnergyAggregate(
@@ -167,25 +164,16 @@ def test_a_window_of_the_shared_series_equals_an_independent_fetch_of_it(
         for start_hour, length_hours, lookback_seconds in windows
     ]
 
-    def import_needs(
-        aggregates_to_import: list[EnergyAggregate],
-    ) -> HomeAssistantHistory:
-        client = FakeHomeAssistant({ENTITY_ID: states}).client()
-        try:
+    def import_needs(*imported: EnergyAggregate) -> HomeAssistantHistory:
+        with FakeHomeAssistant({ENTITY_ID: states}).client() as client:
             return HomeAssistantHistoryImporter(configuration(), client).import_history(
-                [
-                    need
-                    for aggregate in aggregates_to_import
-                    for need in aggregate.needs()
-                ]
+                [need for aggregate in imported for need in aggregate.needs()]
             )
-        finally:
-            client.close()
 
-    shared_history = import_needs(aggregates)
+    shared_history = import_needs(*aggregates)
     shared = [build_or_none(aggregate, shared_history) for aggregate in aggregates]
     independent = [
-        build_or_none(aggregate, import_needs([aggregate])) for aggregate in aggregates
+        build_or_none(aggregate, import_needs(aggregate)) for aggregate in aggregates
     ]
 
     for series in independent:

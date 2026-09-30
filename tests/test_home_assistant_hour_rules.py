@@ -8,6 +8,7 @@ pinned independently of the HTTP layer.
 
 import logging
 import math
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -150,20 +151,8 @@ def test_an_outage_excludes_every_hour_it_is_in_force_including_the_return_hour(
     series = normalize(samples, 12)
 
     assert excluded_hours(series) == [4, 5, 6, 7]
-    assert series.values_kw == (
-        0.0,
-        0.0,
-        0.0,
-        4.0,
-        None,
-        None,
-        None,
-        None,
-        0.0,
-        0.0,
-        0.0,
-        4.0,
-    )
+    expected = (0.0, 0.0, 0.0, 4.0, None, None, None, None, 0.0, 0.0, 0.0, 4.0)
+    assert series.values_kw == expected
     # The 8 kWh that accrued during the outage are attributed to no hour.
     assert sum(value or 0 for value in series.values_kw) == 8.0
     assert reasons(series, 7) == ["unavailable"]
@@ -188,16 +177,7 @@ def test_a_trailing_invalid_state_excludes_every_hour_to_the_end() -> None:
 
 
 def test_an_invalid_state_in_force_at_the_start_excludes_until_a_valid_sample() -> None:
-    baseline = HistorySample(
-        at(0),
-        None,
-        "kWh",
-        "total_increasing",
-        None,
-        "unavailable",
-        "unavailable",
-        observed_at=at(-3),
-    )
+    baseline = replace(invalid(0, "unavailable"), observed_at=at(-3))
 
     series = normalize([baseline, valid(2.5, 5), valid(4, 6)], 4)
 
@@ -249,13 +229,7 @@ def test_a_dropout_to_zero_and_back_excludes_its_hours_and_nothing_else() -> Non
 
 def test_a_return_from_zero_within_the_maximum_is_not_trusted() -> None:
     series = normalize(
-        [
-            valid(0, 45),
-            valid(5.99, 45.1),
-            valid(6.01, 0),
-            valid(7.5, 50),
-            valid(9, 51),
-        ],
+        [valid(0, 45), valid(5.99, 45.1), valid(6.01, 0), valid(7.5, 50), valid(9, 51)],
         9,
         config=entity(maximum_interval_energy_kwh=1000),
     )
@@ -299,11 +273,7 @@ def test_the_maximum_is_converted_from_the_unit_of_the_counter() -> None:
     config = entity(unit="Wh", maximum_interval_energy_kwh=2)
 
     series = normalize(
-        [
-            valid(0, 0, unit="Wh"),
-            valid(1, 2000, unit="Wh"),
-            valid(2, 4001, unit="Wh"),
-        ],
+        [valid(0, 0, unit="Wh"), valid(1, 2000, unit="Wh"), valid(2, 4001, unit="Wh")],
         2,
         config=config,
     )
@@ -372,9 +342,7 @@ def test_only_the_recorded_data_points_beyond_the_bound_are_dropped_not_counted(
 
 
 def test_the_first_hour_starts_after_the_first_recorded_state() -> None:
-    series = normalize_counter_history(
-        entity(), (valid(2.5, 5), valid(4, 6), valid(6, 7)), at(0), at(6)
-    )
+    series = normalize([valid(2.5, 5), valid(4, 6), valid(6, 7)], 6)
 
     assert series.start_time == at(3)
     assert series.values_kw == (1.0, 0.0, 1.0)
@@ -455,8 +423,6 @@ def test_hour_arithmetic_attributes_a_boundary_to_the_earlier_hour() -> None:
     assert list(overlapping_hours(at(0), at(-3), at(-1), 5)) == []
 
 
-# --- the partition property -------------------------------------------------
-
 EVENTS = st.one_of(
     st.tuples(st.just("rise"), st.floats(0, 3)),
     st.tuples(st.just("fall"), st.floats(0.0005, 60)),
@@ -476,9 +442,7 @@ def sample_series(draw: st.DrawFn) -> list[HistorySample]:
         if kind == "invalid":
             samples.append(invalid(clock, str(amount)))
             continue
-        if kind == "rise":
-            value += float(amount)
-        elif kind == "jump":
+        if kind in ("rise", "jump"):
             value += float(amount)
         else:
             value = max(0.0, value - float(amount))
@@ -493,7 +457,7 @@ def test_imported_and_excluded_hours_partition_the_covered_window(
 ) -> None:
     hours = 12
     assume(len({sample.timestamp for sample in samples}) == len(samples))
-    series = normalize_counter_history(entity(), tuple(samples), at(0), at(hours))
+    series = normalize(samples, hours)
 
     excluded = set(excluded_hours(series))
     assert len(series.values_kw) == hours

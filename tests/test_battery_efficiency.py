@@ -1,18 +1,19 @@
 """Tests for measured battery and inverter efficiency calculation."""
 
 import logging
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Any, Literal
 
 import httpx
 import pytest
 from _pytest.logging import LogCaptureFixture
+from _pytest.mark.structures import ParameterSet
 
 from energy_optimizer.config import (
-    BatteryEfficiencyLegConfiguration,
     HomeAssistantBatteryEfficiencyConfiguration,
-    HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
 )
 from energy_optimizer.exclusions import (
@@ -29,12 +30,12 @@ from energy_optimizer.providers.home_assistant_battery_efficiency import (
 )
 from energy_optimizer.providers.home_assistant_history import HomeAssistantError
 from energy_optimizer.providers.interfaces import (
+    BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
     SourceMetadata,
 )
 from home_assistant_fixtures import (
     FakeHomeAssistant,
-    aggregate_configuration,
     aggregate_settings,
     home_assistant_configuration_factory,
     home_assistant_history_payload,
@@ -43,34 +44,72 @@ from home_assistant_fixtures import (
 )
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
+SIX_LEGS = (
+    "battery_energy_in_kwh",
+    "battery_energy_out_kwh",
+    "inverter_charge_energy_in_kwh",
+    "inverter_charge_energy_out_kwh",
+    "inverter_discharge_energy_in_kwh",
+    "inverter_discharge_energy_out_kwh",
+)
+RISING_SOC = (50, 60, 70, 80, 90)
+Handler = Callable[[httpx.Request], httpx.Response]
 
 
 def entity(name: str, state_class: str = "total_increasing") -> dict[str, object]:
+    return {"entity_id": f"sensor.{name}", "state_class": state_class, "unit": "kWh"}
+
+
+def leg_settings(name: str, state_class: str = "total_increasing") -> dict[str, Any]:
     return {
-        "entity_id": f"sensor.{name}",
-        "state_class": state_class,
-        "unit": "kWh",
+        f"energy_{side}": aggregate_settings(
+            add=[entity(f"{name}_{side}", state_class)]
+        )
+        for side in ("in", "out")
     }
 
 
-def calculation_configuration() -> HomeAssistantBatteryEfficiencyConfiguration:
-    def leg(name: str) -> BatteryEfficiencyLegConfiguration:
-        return BatteryEfficiencyLegConfiguration(
-            energy_in=aggregate_configuration(add=[entity(f"{name}_in")]),
-            energy_out=aggregate_configuration(add=[entity(f"{name}_out")]),
-        )
+def efficiency_settings(
+    state_class: str = "total_increasing", **legs: Any
+) -> dict[str, Any]:
+    """Configure the efficiency calculation; ``legs`` replace the plain default legs."""
+    return {
+        "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+        "battery": leg_settings("battery", state_class),
+        "inverter_charge": leg_settings("charge", state_class),
+        "inverter_discharge": leg_settings("discharge", state_class),
+        **legs,
+    }
 
-    return HomeAssistantBatteryEfficiencyConfiguration(
-        battery=leg("battery"),
-        inverter_charge=leg("charge"),
-        inverter_discharge=leg("discharge"),
-        state_of_charge=HomeAssistantBatteryEntityConfiguration(
-            entity_id="sensor.soc", unit="%"
-        ),
-        minimum_battery_throughput_kwh=1,
-        minimum_inverter_charge_throughput_kwh=1,
-        minimum_inverter_discharge_throughput_kwh=1,
+
+def calculation_configuration(
+    **overrides: Any,
+) -> HomeAssistantBatteryEfficiencyConfiguration:
+    return HomeAssistantBatteryEfficiencyConfiguration.model_validate(
+        {
+            **efficiency_settings(),
+            "minimum_battery_throughput_kwh": 1,
+            "minimum_inverter_charge_throughput_kwh": 1,
+            "minimum_inverter_discharge_throughput_kwh": 1,
+            **overrides,
+        }
     )
+
+
+def importer_configuration(
+    state_class: str = "total_increasing", **legs: Any
+) -> HomeAssistantConfiguration:
+    return home_assistant_configuration_factory(
+        battery={
+            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+            "capacity": {"value": 10, "unit": "kWh"},
+            "minimum_soc": {"value": 1, "unit": "kWh"},
+            "maximum_soc": {"value": 10, "unit": "kWh"},
+            "maximum_charge": {"value": 4, "unit": "kW"},
+            "maximum_discharge": {"value": 4, "unit": "kW"},
+            "efficiency_calculation": efficiency_settings(state_class, **legs),
+        }
+    )()
 
 
 def exclusion(
@@ -125,10 +164,22 @@ def history(
     )
 
 
-def test_calculation_uses_one_battery_round_trip_and_two_inverter_components() -> None:
-    result = calculate_battery_efficiency(
-        history(), calculation_configuration(), capacity_kwh=10, now=START
+def calculate(
+    data: BatteryEfficiencyHistoryData,
+    configuration: HomeAssistantBatteryEfficiencyConfiguration | None = None,
+    capacity_kwh: float | None = 10,
+    now: datetime = START,
+) -> BatteryEfficiencyData:
+    return calculate_battery_efficiency(
+        data,
+        configuration or calculation_configuration(),
+        capacity_kwh=capacity_kwh,
+        now=now,
     )
+
+
+def test_calculation_uses_one_battery_round_trip_and_two_inverter_components() -> None:
+    result = calculate(history())
 
     assert result.status == "ok"
     assert result.battery_efficiency == pytest.approx(0.8)
@@ -139,21 +190,15 @@ def test_calculation_uses_one_battery_round_trip_and_two_inverter_components() -
 
 
 def test_calculation_clamps_measurement_noise_above_one() -> None:
-    result = calculate_battery_efficiency(
-        history(battery_out=(0, 6, 0, 6, 0, 6)), calculation_configuration(), now=START
-    )
+    result = calculate(history(battery_out=(0, 6, 0, 6, 0, 6)), capacity_kwh=None)
 
     assert result.status == "ok"
     assert result.battery_efficiency == 1
 
 
 def test_calculation_defaults_only_unavailable_components() -> None:
-    configuration = calculation_configuration().model_copy(
-        update={"minimum_inverter_charge_throughput_kwh": 100}
-    )
-
-    result = calculate_battery_efficiency(
-        history(), configuration, capacity_kwh=10, now=START
+    result = calculate(
+        history(), calculation_configuration(minimum_inverter_charge_throughput_kwh=100)
     )
 
     assert result.status == "insufficient_data"
@@ -171,11 +216,7 @@ def test_calculation_defaults_only_unavailable_components() -> None:
 
 
 def test_calculation_requires_a_complete_cycle() -> None:
-    result = calculate_battery_efficiency(
-        history(soc=(50, 100, 50, 80, 50, 80, 50)),
-        calculation_configuration(),
-        now=START,
-    )
+    result = calculate(history(soc=(50, 100, 50, 80, 50, 80, 50)), capacity_kwh=None)
 
     assert result.status == "insufficient_data"
     assert "complete full-SoC" in result.warnings[0]
@@ -190,101 +231,75 @@ def test_calculation_requires_a_complete_cycle() -> None:
 
 
 def test_calculation_rejects_zero_denominator() -> None:
-    result = calculate_battery_efficiency(
-        history(
-            battery_in=(0, 0, 0, 0, 0, 0),
-            battery_out=(0, 0, 0, 0, 0, 0),
-        ),
-        calculation_configuration(),
-        now=START,
+    result = calculate(
+        history(battery_in=(0,) * 6, battery_out=(0,) * 6), capacity_kwh=None
     )
 
     assert result.status == "invalid"
     assert "denominator" in result.warnings[0]
 
 
-def test_calculation_reports_no_balance_warning_when_capacity_available() -> None:
-    result = calculate_battery_efficiency(
-        history(), calculation_configuration(), capacity_kwh=10, now=START
-    )
-
-    assert result.status == "ok"
-    assert not any("inconsistent" in warning for warning in result.warnings)
-
-
 def test_calculation_skips_balance_check_without_capacity() -> None:
-    result = calculate_battery_efficiency(
-        history(), calculation_configuration(), now=START
-    )
+    result = calculate(history(), capacity_kwh=None)
 
     assert result.status == "ok"
     assert any("not checked" in warning for warning in result.warnings)
 
 
-def test_calculation_flags_physically_impossible_soc_change() -> None:
-    data = BatteryEfficiencyHistoryData(
-        schema_version="1",
-        start_time=START,
-        interval_minutes=60,
-        # Hour 0 is physically impossible: only 1 kWh was measured flowing
-        # into the battery, but the state of charge implies 5 kWh was stored.
-        battery_energy_in_kwh=(1, 0, 6, 0),
-        battery_energy_out_kwh=(0, 4, 0, 4),
-        inverter_charge_energy_in_kwh=(10, 10, 10, 10),
-        inverter_charge_energy_out_kwh=(9, 9, 9, 9),
-        inverter_discharge_energy_in_kwh=(10, 10, 10, 10),
-        inverter_discharge_energy_out_kwh=(8, 8, 8, 8),
-        state_of_charge_percent=(50, 100, 50, 100, 50),
-        unit="kWh",
-        source=SourceMetadata(provider="home-assistant", entity_id="history"),
-        retrieved_at=START,
-        latest_observation_at=START,
-    )
+# Hour 0 is physically impossible: only 1 kWh was measured flowing into the
+# battery, but the state of charge implies 5 kWh was stored.
+IMPOSSIBLE_FIRST_HOUR = {"battery_in": (1, 0, 6, 0), "battery_out": (0, 4, 0, 4)}
 
-    result = calculate_battery_efficiency(
-        data, calculation_configuration(), capacity_kwh=10, now=START
-    )
+
+def test_calculation_flags_physically_impossible_soc_change() -> None:
+    result = calculate(history(**IMPOSSIBLE_FIRST_HOUR, soc=(50, 100, 50, 100, 50)))
 
     assert result.status == "ok"
     assert any("physically inconsistent" in warning for warning in result.warnings)
     assert any("1 of 4" in warning for warning in result.warnings)
 
 
-def test_calculation_does_not_flag_ordinary_conversion_losses() -> None:
-    data = BatteryEfficiencyHistoryData(
-        schema_version="1",
-        start_time=START,
-        interval_minutes=60,
+@pytest.mark.parametrize(
+    "history_arguments",
+    [
+        pytest.param({}, id="balanced-history"),
         # Every interval stores or delivers less than measured, i.e. ordinary
         # losses, never more than physically possible.
-        battery_energy_in_kwh=(5, 0, 6, 0),
-        battery_energy_out_kwh=(0, 4, 0, 4),
-        inverter_charge_energy_in_kwh=(10, 10, 10, 10),
-        inverter_charge_energy_out_kwh=(9, 9, 9, 9),
-        inverter_discharge_energy_in_kwh=(10, 10, 10, 10),
-        inverter_discharge_energy_out_kwh=(8, 8, 8, 8),
-        state_of_charge_percent=(50, 100, 50, 100, 50),
-        unit="kWh",
-        source=SourceMetadata(provider="home-assistant", entity_id="history"),
-        retrieved_at=START,
-        latest_observation_at=START,
-    )
-
-    result = calculate_battery_efficiency(
-        data, calculation_configuration(), capacity_kwh=10, now=START
-    )
+        pytest.param(
+            {
+                "battery_in": (5, 0, 6, 0),
+                "battery_out": (0, 4, 0, 4),
+                "soc": (50, 100, 50, 100, 50),
+            },
+            id="ordinary-conversion-losses",
+        ),
+        # Hour 0 stores 5 kWh while only 1 kWh was measured, but it has no data.
+        pytest.param(
+            {
+                **IMPOSSIBLE_FIRST_HOUR,
+                "soc": (None, 100, 50, 100, 50),
+                "excluded": (0,),
+            },
+            id="excluded-hour",
+        ),
+        pytest.param(
+            {**IMPOSSIBLE_FIRST_HOUR, "soc": (None, 100, 50, 100, 50)},
+            id="soc-boundary-without-value",
+        ),
+    ],
+)
+def test_calculation_reports_no_soc_balance_inconsistency(
+    history_arguments: dict[str, Any],
+) -> None:
+    result = calculate(history(**history_arguments))
 
     assert result.status == "ok"
     assert not any("inconsistent" in warning for warning in result.warnings)
 
 
 def test_calculation_uses_all_history_since_configured_start() -> None:
-    configuration = calculation_configuration().model_copy(
-        update={"history_start": START.replace(hour=2)}
-    )
-
-    result = calculate_battery_efficiency(
-        history(), configuration, capacity_kwh=10, now=START
+    result = calculate(
+        history(), calculation_configuration(history_start=START.replace(hour=2))
     )
 
     assert result.status == "ok"
@@ -311,18 +326,10 @@ def test_calculation_skips_a_full_soc_cycle_that_contains_an_excluded_hour(
     battery_in = (0, 5, 0, 10, 0, 5)
     battery_out = (0, 4, 0, 5, 0, 4)
 
-    result = calculate_battery_efficiency(
-        history(battery_in=battery_in, battery_out=battery_out, soc=soc, excluded=(2,)),
-        calculation_configuration(),
-        capacity_kwh=10,
-        now=START,
+    result = calculate(
+        history(battery_in=battery_in, battery_out=battery_out, soc=soc, excluded=(2,))
     )
-    all_valid = calculate_battery_efficiency(
-        history(battery_in=battery_in, battery_out=battery_out),
-        calculation_configuration(),
-        capacity_kwh=10,
-        now=START,
-    )
+    all_valid = calculate(history(battery_in=battery_in, battery_out=battery_out))
 
     assert all_valid.complete_cycle_count == 2
     assert all_valid.battery_efficiency == pytest.approx(0.6)
@@ -342,12 +349,7 @@ def test_calculation_skips_a_full_soc_cycle_that_contains_an_excluded_hour(
 def test_calculation_keeps_full_soc_cycles_that_avoid_the_excluded_hour(
     excluded_hour: int,
 ) -> None:
-    result = calculate_battery_efficiency(
-        history(excluded=(excluded_hour,)),
-        calculation_configuration(),
-        capacity_kwh=10,
-        now=START,
-    )
+    result = calculate(history(excluded=(excluded_hour,)))
 
     assert result.complete_cycle_count == 2
     assert result.battery_throughput_kwh == 10
@@ -358,15 +360,8 @@ def test_calculation_keeps_full_soc_cycles_that_avoid_the_excluded_hour(
 
 def test_calculation_falls_back_to_the_default_when_every_cycle_is_excluded() -> None:
     """Hour 1 lies in the first cycle (hours 1, 2), hour 3 in the second (3, 4)."""
-    one_cycle = calculate_battery_efficiency(
-        history(excluded=(1,)), calculation_configuration(), capacity_kwh=10, now=START
-    )
-    no_cycle = calculate_battery_efficiency(
-        history(excluded=(1, 3)),
-        calculation_configuration(),
-        capacity_kwh=10,
-        now=START,
-    )
+    one_cycle = calculate(history(excluded=(1,)))
+    no_cycle = calculate(history(excluded=(1, 3)))
 
     assert one_cycle.complete_cycle_count == 1
     assert one_cycle.battery_efficiency == pytest.approx(0.8)
@@ -379,113 +374,70 @@ def test_calculation_falls_back_to_the_default_when_every_cycle_is_excluded() ->
     assert any("complete full-SoC" in warning for warning in no_cycle.warnings)
 
 
-@pytest.mark.parametrize(
-    ("excluded", "soc"),
-    [
-        pytest.param((0,), (None, 100, 50, 100, 50), id="excluded-hour"),
-        pytest.param((), (None, 100, 50, 100, 50), id="soc-boundary-without-value"),
-    ],
-)
-def test_calculation_ignores_excluded_hours_in_the_soc_balance_check(
-    excluded: tuple[int, ...], soc: tuple[float | None, ...]
-) -> None:
-    """Hour 0 stores 5 kWh while only 1 kWh was measured, but it has no data."""
-    result = calculate_battery_efficiency(
-        history(
-            battery_in=(1, 0, 6, 0),
-            battery_out=(0, 4, 0, 4),
-            soc=soc,
-            excluded=excluded,
-        ),
-        calculation_configuration(),
-        capacity_kwh=10,
-        now=START,
+def hourly(
+    values: Iterable[object], start: datetime = START
+) -> list[tuple[datetime, str]]:
+    """Return one reading per hour boundary from ``start``."""
+    return [
+        (start + timedelta(hours=hour), str(value)) for hour, value in enumerate(values)
+    ]
+
+
+def history_payload(
+    entity_id: str, readings: list[tuple[datetime, str]], **options: Any
+) -> list[list[dict[str, Any]]]:
+    return home_assistant_history_payload(
+        entity_id,
+        [(timestamp.isoformat(), state) for timestamp, state in readings],
+        **options,
     )
 
-    assert result.status == "ok"
-    assert not any("inconsistent" in warning for warning in result.warnings)
+
+def soc_history(readings: list[tuple[datetime, str]]) -> list[list[dict[str, Any]]]:
+    return history_payload("sensor.soc", readings, unit="%", state_class="measurement")
 
 
-def importer_configuration(state_class: str = "total_increasing") -> Any:
-    def leg(name: str) -> dict[str, dict[str, Any]]:
-        return {
-            "energy_in": aggregate_settings(
-                add=[entity(f"{name}_in", state_class=state_class)]
-            ),
-            "energy_out": aggregate_settings(
-                add=[entity(f"{name}_out", state_class=state_class)]
-            ),
-        }
+def serve(
+    payloads: Mapping[str, object],
+    default: Callable[[str], object] | None = home_assistant_history_payload,
+) -> Handler:
+    """Answer each history request with the payload of its entity.
 
-    factory = home_assistant_configuration_factory(
-        battery={
-            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-            "capacity": {"value": 10, "unit": "kWh"},
-            "minimum_soc": {"value": 1, "unit": "kWh"},
-            "maximum_soc": {"value": 10, "unit": "kWh"},
-            "maximum_charge": {"value": 4, "unit": "kW"},
-            "maximum_discharge": {"value": 4, "unit": "kW"},
-            "efficiency_calculation": {
-                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                "battery": leg("battery"),
-                "inverter_charge": leg("charge"),
-                "inverter_discharge": leg("discharge"),
-            },
-        }
-    )
-    return factory()
-
-
-def test_importer_fetches_and_aligns_home_assistant_history() -> None:
-    configuration = importer_configuration()
-    start = START
-    end = START + timedelta(hours=4)
+    An entity without a payload gets ``default(entity_id)``; without a default the
+    request fails, so an unexpected entity cannot go unnoticed.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         entity_id = request.url.params["filter_entity_id"]
-        if entity_id == "sensor.soc":
-            readings = [
-                (f"2026-01-01T0{hour}:00:00+00:00", str(value))
-                for hour, value in enumerate((50, 60, 70, 80, 90))
-            ]
-            return httpx.Response(
-                200,
-                json=home_assistant_history_payload(
-                    entity_id, readings, unit="%", state_class="measurement"
-                ),
-            )
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(entity_id),
+        if entity_id in payloads or default is None:
+            return httpx.Response(200, json=payloads[entity_id])
+        return httpx.Response(200, json=default(entity_id))
+
+    return handler
+
+
+def build_efficiency_history(
+    handler: Handler,
+    end_hours: int = 4,
+    configuration: HomeAssistantConfiguration | None = None,
+) -> BatteryEfficiencyHistoryData:
+    """Import the history that ``handler`` serves for the first ``end_hours``."""
+    end = START + timedelta(hours=end_hours)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        importer = HomeAssistantBatteryEfficiencyImporter(
+            configuration or importer_configuration()
         )
+        return import_and_build(importer, client, START, end, now=end)
 
-    importer_client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, importer_client, start, end, now=end)
-    finally:
-        importer_client.close()
 
-    assert data.start_time == start
+def test_importer_fetches_and_aligns_home_assistant_history() -> None:
+    data = build_efficiency_history(
+        serve({"sensor.soc": soc_history(hourly(RISING_SOC))})
+    )
+
+    assert data.start_time == START
     assert len(data.battery_energy_in_kwh) == 4
     assert len(data.state_of_charge_percent) == 5
-
-
-SIX_LEGS = (
-    "battery_energy_in_kwh",
-    "battery_energy_out_kwh",
-    "inverter_charge_energy_in_kwh",
-    "inverter_charge_energy_out_kwh",
-    "inverter_discharge_energy_in_kwh",
-    "inverter_discharge_energy_out_kwh",
-)
-
-
-def soc_readings() -> list[tuple[str, str]]:
-    return [
-        (f"2026-01-01T0{hour}:00:00+00:00", str(value))
-        for hour, value in enumerate((50, 60, 70, 80, 90))
-    ]
 
 
 @pytest.mark.parametrize(
@@ -505,40 +457,19 @@ def test_importer_excludes_the_hours_of_a_counter_decrease_and_keeps_the_rest(
     the decrease (03:00 to 04:00) excludes hours 2 and 3. Only hour 0 is valid.
     The exclusion applies to all six legs and to the state of charge around it.
     """
-    configuration = importer_configuration(state_class)
-    end = START + timedelta(hours=4)
+    handler = serve(
+        {
+            "sensor.soc": soc_history(hourly(RISING_SOC)),
+            "sensor.battery_in": history_payload(
+                "sensor.battery_in", hourly(counter), state_class=state_class
+            ),
+        },
+        partial(home_assistant_history_payload, state_class=state_class),
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.params["filter_entity_id"]
-        if entity_id == "sensor.soc":
-            return httpx.Response(
-                200,
-                json=home_assistant_history_payload(
-                    entity_id, soc_readings(), unit="%", state_class="measurement"
-                ),
-            )
-        if entity_id == "sensor.battery_in":
-            readings = [
-                (f"2026-01-01T0{hour}:00:00+00:00", state)
-                for hour, state in enumerate(counter)
-            ]
-            return httpx.Response(
-                200,
-                json=home_assistant_history_payload(
-                    entity_id, readings, state_class=state_class
-                ),
-            )
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(entity_id, state_class=state_class),
-        )
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, client, START, end, now=end)
-    finally:
-        client.close()
+    data = build_efficiency_history(
+        handler, configuration=importer_configuration(state_class)
+    )
 
     for name in SIX_LEGS:
         assert getattr(data, name) == (1.0, None, None, None), name
@@ -567,9 +498,7 @@ def test_importer_excludes_the_hours_of_a_counter_decrease_and_keeps_the_rest(
         for cause in item.causes
     )
 
-    result = calculate_battery_efficiency(
-        data, calculation_configuration(), capacity_kwh=10, now=end
-    )
+    result = calculate(data, now=START + timedelta(hours=4))
     assert result.complete_cycle_count == 0
     assert result.charge_throughput_kwh == 1.0
     assert result.status == "insufficient_data"
@@ -584,34 +513,19 @@ def test_importer_excludes_a_one_watt_hour_dip_in_every_leg() -> None:
     of each leg dips in hour 0 and the output side in hour 1. Both hours are
     excluded in every leg and the untouched hours 2 and 3 hold exactly 1 kWh.
     """
-    configuration = importer_configuration("total")
-    end = START + timedelta(hours=4)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.params["filter_entity_id"]
-        if entity_id == "sensor.soc":
-            return httpx.Response(
-                200,
-                json=home_assistant_history_payload(
-                    entity_id, soc_readings(), unit="%", state_class="measurement"
-                ),
-            )
+    def jittery_counter(entity_id: str) -> object:
         dip_hour = 0 if entity_id.endswith("_in") else 1
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(
-                entity_id,
-                home_assistant_jittery_total_readings(3200.0, dip_hour),
-                state_class="total",
-            ),
+        return home_assistant_history_payload(
+            entity_id,
+            home_assistant_jittery_total_readings(3200.0, dip_hour),
+            state_class="total",
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, client, START, end, now=end)
-    finally:
-        client.close()
+    data = build_efficiency_history(
+        serve({"sensor.soc": soc_history(hourly(RISING_SOC))}, jittery_counter),
+        configuration=importer_configuration("total"),
+    )
 
     for name in SIX_LEGS:
         assert getattr(data, name) == pytest.approx((None, None, 1.0, 1.0)), name
@@ -648,27 +562,15 @@ def test_importer_excludes_a_one_watt_hour_dip_in_every_leg() -> None:
 
 
 def test_importer_reports_home_assistant_history_failure() -> None:
-    configuration = importer_configuration()
-    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(503)))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-
     with pytest.raises(HomeAssistantError, match="HTTP 503"):
-        import_and_build(importer, client, START, START + timedelta(hours=4))
-    client.close()
+        build_efficiency_history(lambda _: httpx.Response(503))
 
 
-def efficiency_home_assistant(
+def fake_home_assistant(
+    counters: Mapping[str, list[tuple[datetime, str]]],
     soc_states: list[tuple[datetime, str]],
 ) -> FakeHomeAssistant:
-    """Serve six hourly counters per leg and the given state-of-charge changes."""
-    hours = range(7)
-    counters = {
-        f"sensor.{leg}_{side}": [
-            (START + timedelta(hours=hour), str(hour)) for hour in hours
-        ]
-        for leg in ("battery", "charge", "discharge")
-        for side in ("in", "out")
-    }
+    """Serve the counters and the state-of-charge changes, a percentage."""
     return FakeHomeAssistant(
         {**counters, "sensor.soc": soc_states},
         units={"sensor.soc": "%"},
@@ -676,33 +578,29 @@ def efficiency_home_assistant(
     )
 
 
-def build_efficiency_history(
-    home_assistant: FakeHomeAssistant, end_hours: int = 4
-) -> BatteryEfficiencyHistoryData:
-    client = home_assistant.client()
-    try:
-        return import_and_build(
-            HomeAssistantBatteryEfficiencyImporter(importer_configuration()),
-            client,
-            START,
-            START + timedelta(hours=end_hours),
-            now=START + timedelta(hours=end_hours),
-        )
-    finally:
-        client.close()
+def efficiency_home_assistant(
+    soc_states: list[tuple[datetime, str]],
+) -> FakeHomeAssistant:
+    """Serve six hourly counters per leg and the given state-of-charge changes."""
+    counters = {
+        f"sensor.{leg}_{side}": hourly(range(7))
+        for leg in ("battery", "charge", "discharge")
+        for side in ("in", "out")
+    }
+    return fake_home_assistant(counters, soc_states)
+
+
+def never_recovers(state: str, reason: str, case_id: str) -> ParameterSet:
+    """Return a state of charge whose invalid sample is the last one."""
+    return pytest.param(
+        [(0, "50"), (60, state)], (0, 1, 2, 3), reason, state, (None,) * 5, id=case_id
+    )
 
 
 @pytest.mark.parametrize(
     ("changes", "excluded_hours", "reason", "state", "expected_soc"),
     [
-        pytest.param(
-            [(0, "50"), (60, "not-a-number")],
-            (0, 1, 2, 3),
-            "non_numeric",
-            "not-a-number",
-            (None, None, None, None, None),
-            id="non-numeric-never-recovers",
-        ),
+        never_recovers("not-a-number", "non_numeric", "non-numeric-never-recovers"),
         pytest.param(
             [(0, "50"), (90, "unavailable"), (150, "60")],
             (1, 2),
@@ -711,30 +609,9 @@ def build_efficiency_history(
             (50.0, None, None, None, 60.0),
             id="unavailable-until-a-valid-sample-returns",
         ),
-        pytest.param(
-            [(0, "50"), (60, "150")],
-            (0, 1, 2, 3),
-            "soc_out_of_range",
-            "150",
-            (None, None, None, None, None),
-            id="above-100-percent",
-        ),
-        pytest.param(
-            [(0, "50"), (60, "-5")],
-            (0, 1, 2, 3),
-            "soc_out_of_range",
-            "-5",
-            (None, None, None, None, None),
-            id="below-0-percent",
-        ),
-        pytest.param(
-            [(0, "50"), (60, "nan")],
-            (0, 1, 2, 3),
-            "not_finite",
-            "nan",
-            (None, None, None, None, None),
-            id="not-finite",
-        ),
+        never_recovers("150", "soc_out_of_range", "above-100-percent"),
+        never_recovers("-5", "soc_out_of_range", "below-0-percent"),
+        never_recovers("nan", "not_finite", "not-finite"),
     ],
 )
 def test_importer_excludes_the_hours_of_an_invalid_state_of_charge_sample(
@@ -784,28 +661,32 @@ def test_importer_rejects_state_of_charge_history_that_starts_too_late() -> None
         build_efficiency_history(home_assistant)
 
 
-def test_importer_carries_state_of_charge_forward_through_unchanged_hours() -> None:
-    # Home Assistant only reports changes. Value ``i`` is the state in force at
-    # the opening boundary of hour ``i``, so the 03:30 change first shows at 04:00.
-    home_assistant = efficiency_home_assistant(
-        [(START, "50"), (START + timedelta(hours=3, minutes=30), "70")]
-    )
+@pytest.mark.parametrize(
+    ("changes", "expected_soc"),
+    [
+        # Home Assistant only reports changes. Value ``i`` is the state in force at
+        # the opening boundary of hour ``i``, so the 03:30 change first shows at
+        # 04:00.
+        pytest.param(
+            [(START, "50"), (START + timedelta(hours=3, minutes=30), "70")],
+            (50.0, 50.0, 50.0, 50.0, 70.0),
+            id="carried-forward-through-unchanged-hours",
+        ),
+        # An instant on a boundary belongs to the earlier hour, like every
+        # observation, so the state recorded at 02:00 is in force at 02:00.
+        pytest.param(
+            [(START, "50"), (START + timedelta(hours=2), "60")],
+            (50.0, 50.0, 60.0, 60.0, 60.0),
+            id="change-on-a-boundary",
+        ),
+    ],
+)
+def test_importer_aligns_state_of_charge_changes_to_hour_boundaries(
+    changes: list[tuple[datetime, str]], expected_soc: tuple[float, ...]
+) -> None:
+    data = build_efficiency_history(efficiency_home_assistant(changes))
 
-    data = build_efficiency_history(home_assistant)
-
-    assert data.state_of_charge_percent == (50.0, 50.0, 50.0, 50.0, 70.0)
-
-
-def test_importer_includes_a_state_change_on_a_boundary_in_that_boundary() -> None:
-    # An instant on a boundary belongs to the earlier hour, like every
-    # observation, so the state recorded at 02:00 is in force at 02:00.
-    home_assistant = efficiency_home_assistant(
-        [(START, "50"), (START + timedelta(hours=2), "60")]
-    )
-
-    data = build_efficiency_history(home_assistant)
-
-    assert data.state_of_charge_percent == (50.0, 50.0, 60.0, 60.0, 60.0)
+    assert data.state_of_charge_percent == expected_soc
 
 
 def test_importer_requests_no_state_of_charge_beyond_the_requested_end() -> None:
@@ -843,27 +724,20 @@ def two_cycle_home_assistant() -> FakeHomeAssistant:
     The state of charge changes 20 minutes before each boundary, so a series that
     is shifted by one hour differs from the correct one.
     """
-    constant = {
-        "sensor.charge_in": (1.0,) * 12,
-        "sensor.charge_out": (0.9,) * 12,
-        "sensor.discharge_in": (1.0,) * 12,
-        "sensor.discharge_out": (0.9,) * 12,
-    }
     counters = {
         "sensor.battery_in": counter_states(CYCLE_BATTERY_IN),
         "sensor.battery_out": counter_states(CYCLE_BATTERY_OUT),
-        **{entity_id: counter_states(steps) for entity_id, steps in constant.items()},
+        "sensor.charge_in": counter_states((1.0,) * 12),
+        "sensor.charge_out": counter_states((0.9,) * 12),
+        "sensor.discharge_in": counter_states((1.0,) * 12),
+        "sensor.discharge_out": counter_states((0.9,) * 12),
     }
     soc_states = [(START, str(CYCLE_STATE_OF_CHARGE[0]))] + [
         (START + timedelta(hours=hour, minutes=-20), str(value))
         for hour, value in enumerate(CYCLE_STATE_OF_CHARGE)
         if hour > 0
     ]
-    return FakeHomeAssistant(
-        {**counters, "sensor.soc": soc_states},
-        units={"sensor.soc": "%"},
-        state_classes={"sensor.soc": "measurement"},
-    )
+    return fake_home_assistant(counters, soc_states)
 
 
 def test_efficiency_of_two_full_cycles_includes_the_charge_that_ends_at_full() -> None:
@@ -879,9 +753,7 @@ def test_efficiency_of_two_full_cycles_includes_the_charge_that_ends_at_full() -
     assert data.state_of_charge_percent == tuple(
         float(value) for value in CYCLE_STATE_OF_CHARGE
     )
-    result = calculate_battery_efficiency(
-        data, calculation_configuration(), now=START + timedelta(hours=12)
-    )
+    result = calculate(data, capacity_kwh=None, now=START + timedelta(hours=12))
     assert result.complete_cycle_count == 2
     assert result.battery_throughput_kwh == pytest.approx(14.0)
     assert result.battery_efficiency == pytest.approx(0.95)
@@ -890,10 +762,8 @@ def test_efficiency_of_two_full_cycles_includes_the_charge_that_ends_at_full() -
 
 
 def test_incremental_imports_merge_to_the_state_of_charge_of_one_full_import() -> None:
-    home_assistant = two_cycle_home_assistant()
-    client = home_assistant.client()
     importer = HomeAssistantBatteryEfficiencyImporter(importer_configuration())
-    try:
+    with two_cycle_home_assistant().client() as client:
         first = import_and_build(
             importer, client, START, START + timedelta(hours=6), now=START
         )
@@ -907,8 +777,6 @@ def test_incremental_imports_merge_to_the_state_of_charge_of_one_full_import() -
         full = import_and_build(
             importer, client, START, START + timedelta(hours=12), now=START
         )
-    finally:
-        client.close()
 
     merged = merge_battery_efficiency_history(first, second)
 
@@ -943,47 +811,23 @@ def test_importer_requires_a_calculation_configuration() -> None:
 
 
 def test_importer_skips_empty_soc_history_chunks_until_history_is_available() -> None:
-    configuration = importer_configuration()
-    start = START
-    end = START + timedelta(days=8)
+    served = serve(
+        {"sensor.soc": soc_history(hourly(range(50, 76), START + timedelta(days=7)))}
+    )
     soc_requests = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal soc_requests
-        entity_id = request.url.params["filter_entity_id"]
-        if entity_id != "sensor.soc":
-            return httpx.Response(
-                200,
-                json=home_assistant_history_payload(entity_id),
-            )
+        if request.url.params["filter_entity_id"] != "sensor.soc":
+            return served(request)
         soc_requests += 1
         if soc_requests == 1:
             # Home Assistant returns no series for the period before the
             # entity's retained history begins.
             return httpx.Response(200, json=[])
-        readings = [
-            (
-                (START + timedelta(days=7, hours=hour)).isoformat(),
-                str(50 + hour),
-            )
-            for hour in range(26)
-        ]
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(
-                entity_id,
-                readings,
-                unit="%",
-                state_class="measurement",
-            ),
-        )
+        return served(request)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, client, start, end, now=end)
-    finally:
-        client.close()
+    data = build_efficiency_history(handler, end_hours=8 * 24)
 
     assert soc_requests == 2
     assert data.start_time == START + timedelta(days=7)
@@ -996,26 +840,8 @@ def test_importer_skips_empty_soc_history_chunks_until_history_is_available() ->
 def test_importer_rejects_soc_history_with_no_usable_records(
     empty_payload: list[object],
 ) -> None:
-    configuration = importer_configuration()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.params["filter_entity_id"]
-        if entity_id == "sensor.soc":
-            return httpx.Response(200, json=empty_payload)
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(entity_id),
-        )
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        with pytest.raises(
-            HomeAssistantError, match="no usable history for sensor.soc"
-        ):
-            import_and_build(importer, client, START, START + timedelta(hours=1))
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match="no usable history for sensor.soc"):
+        build_efficiency_history(serve({"sensor.soc": empty_payload}), end_hours=1)
 
 
 def test_importer_carries_forward_soc_across_an_unchanged_state_gap() -> None:
@@ -1025,34 +851,15 @@ def test_importer_carries_forward_soc_across_an_unchanged_state_gap() -> None:
     the value has not changed since the previous observation. The importer
     must carry that value forward instead of failing.
     """
-    configuration = importer_configuration()
-    start = START
-    end = START + timedelta(hours=4)
+    # No row is recorded for hours 1 and 2: the SOC value did not change
+    # between the hour-0 and hour-3 observations.
+    readings = [
+        (START, "50"),
+        (START + timedelta(hours=3), "50"),
+        (START + timedelta(hours=4), "60"),
+    ]
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.params["filter_entity_id"]
-        if entity_id != "sensor.soc":
-            return httpx.Response(200, json=home_assistant_history_payload(entity_id))
-        # No row is recorded for hours 1 and 2: the SOC value did not change
-        # between the hour-0 and hour-3 observations.
-        readings = [
-            ("2026-01-01T00:00:00+00:00", "50"),
-            ("2026-01-01T03:00:00+00:00", "50"),
-            ("2026-01-01T04:00:00+00:00", "60"),
-        ]
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(
-                entity_id, readings, unit="%", state_class="measurement"
-            ),
-        )
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, client, start, end, now=end)
-    finally:
-        client.close()
+    data = build_efficiency_history(serve({"sensor.soc": soc_history(readings)}))
 
     assert data.state_of_charge_percent == (50.0, 50.0, 50.0, 50.0, 60.0)
 
@@ -1060,21 +867,8 @@ def test_importer_carries_forward_soc_across_an_unchanged_state_gap() -> None:
 def test_importer_logs_soc_history_requests_at_debug_level(
     caplog: LogCaptureFixture,
 ) -> None:
-    configuration = importer_configuration()
-    start = START
-    end = START + timedelta(hours=1)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.params["filter_entity_id"]
-        return httpx.Response(200, json=home_assistant_history_payload(entity_id))
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
-            import_and_build(importer, client, start, end, now=end)
-    finally:
-        client.close()
+    with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
+        build_efficiency_history(serve({}), end_hours=1)
 
     history_requests = [
         record
@@ -1085,12 +879,27 @@ def test_importer_logs_soc_history_requests_at_debug_level(
     assert all(record.levelno == logging.DEBUG for record in history_requests)
 
 
+def serve_one_hour(counters: Mapping[str, float]) -> Handler:
+    """Serve the state of charge rising from 50 to 55 percent in the first hour.
+
+    Every counter rises from 0 to its value in that hour. An entity that is not
+    listed fails the request.
+    """
+    return serve(
+        {
+            "sensor.soc": soc_history(hourly((50, 55))),
+            **{
+                entity_id: history_payload(entity_id, hourly((0, value)))
+                for entity_id, value in counters.items()
+            },
+        },
+        default=None,
+    )
+
+
 @pytest.mark.parametrize(
     ("pv_yield", "expected_charge_out", "expected_soc"),
-    [
-        (0.5, 0.738 - 0.5, (50.0, 55.0)),
-        (1.54, None, (None, None)),
-    ],
+    [(0.5, 0.738 - 0.5, (50.0, 55.0)), (1.54, None, (None, None))],
 )
 def test_importer_excludes_a_negative_combined_hour_instead_of_clamping_it(
     pv_yield: float,
@@ -1104,87 +913,30 @@ def test_importer_excludes_a_negative_combined_hour_instead_of_clamping_it(
     excluded in all legs with reason ``combined_negative``, the fetch does not
     fail, and a non-negative net value is imported as it is.
     """
-
-    def leg(name: str) -> dict[str, dict[str, Any]]:
-        return {
-            "energy_in": aggregate_settings(add=[entity(f"{name}_in")]),
-            "energy_out": aggregate_settings(add=[entity(f"{name}_out")]),
+    configuration = importer_configuration(
+        inverter_charge={
+            "energy_in": aggregate_settings(add=[entity("charge_in")]),
+            "energy_out": aggregate_settings(
+                add=[entity("charging_battery_energy")], subtract=[entity("pv_yield")]
+            ),
         }
-
-    configuration = home_assistant_configuration_factory(
-        battery={
-            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-            "capacity": {"value": 10, "unit": "kWh"},
-            "minimum_soc": {"value": 1, "unit": "kWh"},
-            "maximum_soc": {"value": 10, "unit": "kWh"},
-            "maximum_charge": {"value": 4, "unit": "kW"},
-            "maximum_discharge": {"value": 4, "unit": "kW"},
-            "efficiency_calculation": {
-                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                "battery": leg("battery"),
-                "inverter_charge": {
-                    "energy_in": aggregate_settings(add=[entity("charge_in")]),
-                    "energy_out": aggregate_settings(
-                        add=[entity("charging_battery_energy")],
-                        subtract=[entity("pv_yield")],
-                    ),
-                },
-                "inverter_discharge": leg("discharge"),
-            },
-        }
-    )()
-    start = START
-    end = START + timedelta(hours=1)
-
-    def reading(value: float) -> list[tuple[str, str]]:
-        return [
-            ("2026-01-01T00:00:00+00:00", "0"),
-            ("2026-01-01T01:00:00+00:00", str(value)),
-        ]
-
-    responses = {
-        "sensor.soc": home_assistant_history_payload(
-            "sensor.soc",
-            [("2026-01-01T00:00:00+00:00", "50"), ("2026-01-01T01:00:00+00:00", "55")],
-            unit="%",
-            state_class="measurement",
-        ),
-        "sensor.battery_in": home_assistant_history_payload(
-            "sensor.battery_in", reading(0.5)
-        ),
-        "sensor.battery_out": home_assistant_history_payload(
-            "sensor.battery_out", reading(0.0)
-        ),
-        "sensor.charge_in": home_assistant_history_payload(
-            "sensor.charge_in", reading(0.2)
-        ),
+    )
+    counters = {
+        "sensor.battery_in": 0.5,
+        "sensor.battery_out": 0.0,
+        "sensor.charge_in": 0.2,
         # Battery charged 0.738 kWh from all sources this hour.
-        "sensor.charging_battery_energy": home_assistant_history_payload(
-            "sensor.charging_battery_energy", reading(0.738)
-        ),
+        "sensor.charging_battery_energy": 0.738,
         # A PV yield above the battery charge means the surplus was exported
         # rather than stored.
-        "sensor.pv_yield": home_assistant_history_payload(
-            "sensor.pv_yield", reading(pv_yield)
-        ),
-        "sensor.discharge_in": home_assistant_history_payload(
-            "sensor.discharge_in", reading(0.0)
-        ),
-        "sensor.discharge_out": home_assistant_history_payload(
-            "sensor.discharge_out", reading(0.0)
-        ),
+        "sensor.pv_yield": pv_yield,
+        "sensor.discharge_in": 0.0,
+        "sensor.discharge_out": 0.0,
     }
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        entity_id = request.url.params["filter_entity_id"]
-        return httpx.Response(200, json=responses[entity_id])
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, client, start, end, now=end)
-    finally:
-        client.close()
+    data = build_efficiency_history(
+        serve_one_hour(counters), end_hours=1, configuration=configuration
+    )
 
     assert data.state_of_charge_percent == expected_soc
     if expected_charge_out is not None:
@@ -1224,10 +976,7 @@ def test_importer_excludes_a_negative_combined_hour_instead_of_clamping_it(
     ],
 )
 def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
-    battery_in: float,
-    battery_out: float,
-    pv_yield: float,
-    expected_discharge_in: float,
+    battery_in: float, battery_out: float, pv_yield: float, expected_discharge_in: float
 ) -> None:
     """The inverter draws battery discharge and PV yield from the DC bus.
 
@@ -1236,43 +985,15 @@ def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
     same hour. Subtracting the PV yield instead would shrink the input whenever
     PV produces, and would make an hour of PV alone negative.
     """
-
-    def leg(name: str) -> dict[str, dict[str, Any]]:
-        return {
-            "energy_in": aggregate_settings(add=[entity(f"{name}_in")]),
-            "energy_out": aggregate_settings(add=[entity(f"{name}_out")]),
+    configuration = importer_configuration(
+        inverter_discharge={
+            "energy_in": aggregate_settings(
+                add=[entity("battery_out"), entity("pv_yield")],
+                subtract=[entity("battery_in")],
+            ),
+            "energy_out": aggregate_settings(add=[entity("discharge_out")]),
         }
-
-    configuration = home_assistant_configuration_factory(
-        battery={
-            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-            "capacity": {"value": 10, "unit": "kWh"},
-            "minimum_soc": {"value": 1, "unit": "kWh"},
-            "maximum_soc": {"value": 10, "unit": "kWh"},
-            "maximum_charge": {"value": 4, "unit": "kW"},
-            "maximum_discharge": {"value": 4, "unit": "kW"},
-            "efficiency_calculation": {
-                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                "battery": leg("battery"),
-                "inverter_charge": leg("charge"),
-                "inverter_discharge": {
-                    "energy_in": aggregate_settings(
-                        add=[entity("battery_out"), entity("pv_yield")],
-                        subtract=[entity("battery_in")],
-                    ),
-                    "energy_out": aggregate_settings(add=[entity("discharge_out")]),
-                },
-            },
-        }
-    )()
-    end = START + timedelta(hours=1)
-
-    def reading(value: float) -> list[tuple[str, str]]:
-        return [
-            ("2026-01-01T00:00:00+00:00", "0"),
-            ("2026-01-01T01:00:00+00:00", str(value)),
-        ]
-
+    )
     counters = {
         "sensor.battery_in": battery_in,
         "sensor.battery_out": battery_out,
@@ -1281,30 +1002,10 @@ def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
         "sensor.pv_yield": pv_yield,
         "sensor.discharge_out": 0.1,
     }
-    responses = {
-        "sensor.soc": home_assistant_history_payload(
-            "sensor.soc",
-            [("2026-01-01T00:00:00+00:00", "50"), ("2026-01-01T01:00:00+00:00", "55")],
-            unit="%",
-            state_class="measurement",
-        ),
-        **{
-            entity_id: home_assistant_history_payload(entity_id, reading(value))
-            for entity_id, value in counters.items()
-        },
-    }
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
-        )
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    try:
-        data = import_and_build(importer, client, START, end, now=end)
-    finally:
-        client.close()
+    data = build_efficiency_history(
+        serve_one_hour(counters), end_hours=1, configuration=configuration
+    )
 
     assert data.exclusions == ()
     assert data.inverter_discharge_energy_in_kwh == pytest.approx(
@@ -1313,56 +1014,33 @@ def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
     assert data.inverter_discharge_energy_out_kwh == pytest.approx((0.1,))
 
 
-def _dc_coupled_configuration(
-    part: Literal["net", "positive"],
-) -> HomeAssistantConfiguration:
+def _dc_coupled_legs(part: Literal["net", "positive"]) -> dict[str, Any]:
     """Configure the DC-coupled legs of the example configuration.
 
     ``part`` applies to the two legs whose net value goes negative: the
     AC-sourced battery charge and the DC-bus input of the inverter discharge.
     """
-
-    def leg(name: str) -> dict[str, dict[str, Any]]:
-        return {
-            "energy_in": aggregate_settings(add=[entity(f"{name}_in")]),
-            "energy_out": aggregate_settings(add=[entity(f"{name}_out")]),
-        }
-
-    return home_assistant_configuration_factory(
-        battery={
-            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-            "capacity": {"value": 10, "unit": "kWh"},
-            "minimum_soc": {"value": 1, "unit": "kWh"},
-            "maximum_soc": {"value": 10, "unit": "kWh"},
-            "maximum_charge": {"value": 4, "unit": "kW"},
-            "maximum_discharge": {"value": 4, "unit": "kW"},
-            "efficiency_calculation": {
-                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
-                "battery": leg("battery"),
-                "inverter_charge": {
-                    "energy_in": aggregate_settings(add=[entity("charge_in")]),
-                    "energy_out": aggregate_settings(
-                        add=[entity("battery_in")],
-                        subtract=[entity("pv_yield")],
-                        part=part,
-                    ),
-                },
-                "inverter_discharge": {
-                    "energy_in": aggregate_settings(
-                        add=[entity("battery_out"), entity("pv_yield")],
-                        subtract=[entity("battery_in")],
-                        part=part,
-                    ),
-                    "energy_out": aggregate_settings(add=[entity("discharge_out")]),
-                },
-            },
-        }
-    )()
+    return {
+        "inverter_charge": {
+            "energy_in": aggregate_settings(add=[entity("charge_in")]),
+            "energy_out": aggregate_settings(
+                add=[entity("battery_in")], subtract=[entity("pv_yield")], part=part
+            ),
+        },
+        "inverter_discharge": {
+            "energy_in": aggregate_settings(
+                add=[entity("battery_out"), entity("pv_yield")],
+                subtract=[entity("battery_in")],
+                part=part,
+            ),
+            "energy_out": aggregate_settings(add=[entity("discharge_out")]),
+        },
+    }
 
 
 def _import_dc_coupled_history(
     part: Literal["net", "positive"],
-) -> tuple[HomeAssistantConfiguration, BatteryEfficiencyHistoryData]:
+) -> BatteryEfficiencyHistoryData:
     """Import four hours of a DC-coupled battery that meet all three cases.
 
     - Hour 0: the battery charges 4 kWh from the grid, so the inverter discharge
@@ -1374,35 +1052,20 @@ def _import_dc_coupled_history(
 
     The battery is full at the start of hour 1 and again at the start of hour 3.
     """
-    configuration = _dc_coupled_configuration(part)
     counters = {
         "sensor.battery_in": (0, 4.0, 4.0, 5.0, 5.0),
         "sensor.battery_out": (0, 0, 0.9, 0.9, 0.9),
         "sensor.pv_yield": (0, 0, 0, 1.5, 1.5),
         "sensor.charge_in": (0, 4.4, 4.4, 4.4, 4.4),
         "sensor.discharge_out": (0, 0, 0.8, 1.2, 1.2),
-        "sensor.soc": (60, 100, 90, 100, 100),
     }
-    states = {
-        entity_id: [
-            (START + timedelta(hours=hour), str(value))
-            for hour, value in enumerate(values)
-        ]
-        for entity_id, values in counters.items()
-    }
-    home_assistant = FakeHomeAssistant(
-        states,
-        units={"sensor.soc": "%"},
-        state_classes={"sensor.soc": "measurement"},
+    home_assistant = fake_home_assistant(
+        {entity_id: hourly(values) for entity_id, values in counters.items()},
+        hourly((60, 100, 90, 100, 100)),
     )
-    client = home_assistant.client()
-    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
-    end = START + timedelta(hours=4)
-    try:
-        data = import_and_build(importer, client, START, end, now=end)
-    finally:
-        client.close()
-    return configuration, data
+    return build_efficiency_history(
+        home_assistant, configuration=importer_configuration(**_dc_coupled_legs(part))
+    )
 
 
 def test_positive_part_imports_the_negative_dc_coupled_hours_as_zero(
@@ -1410,7 +1073,7 @@ def test_positive_part_imports_the_negative_dc_coupled_hours_as_zero(
 ) -> None:
     """A negative net value is a legitimate zero for the positive part."""
     with caplog.at_level(logging.INFO, logger="energy_optimizer.providers"):
-        _, data = _import_dc_coupled_history("positive")
+        data = _import_dc_coupled_history("positive")
 
     assert data.exclusions == ()
     assert data.state_of_charge_percent == (60, 100, 90, 100, 100)
@@ -1443,7 +1106,7 @@ def test_positive_part_imports_the_negative_dc_coupled_hours_as_zero(
 
 
 def test_net_part_excludes_the_negative_dc_coupled_hours_in_every_leg() -> None:
-    _, data = _import_dc_coupled_history("net")
+    data = _import_dc_coupled_history("net")
 
     for name in SIX_LEGS:
         values = getattr(data, name)
@@ -1464,12 +1127,14 @@ def test_positive_part_keeps_the_battery_cycle_that_holds_a_pv_surplus_hour() ->
     Excluding the negative hours removes the full-charge cycle they sit in, so
     the battery efficiency cannot be calculated and falls back to the default.
     """
-    configuration, data = _import_dc_coupled_history("positive")
-    assert configuration.battery is not None
-    calculation = configuration.battery.efficiency_calculation
-    assert calculation is not None
 
-    result = calculate_battery_efficiency(data, calculation, capacity_kwh=10, now=START)
+    def dc_coupled_result(part: Literal["net", "positive"]) -> BatteryEfficiencyData:
+        calculation = HomeAssistantBatteryEfficiencyConfiguration.model_validate(
+            efficiency_settings(**_dc_coupled_legs(part))
+        )
+        return calculate(_import_dc_coupled_history(part), calculation)
+
+    result = dc_coupled_result("positive")
 
     assert result.status == "ok"
     assert result.complete_cycle_count == 1
@@ -1478,13 +1143,7 @@ def test_positive_part_keeps_the_battery_cycle_that_holds_a_pv_surplus_hour() ->
     assert result.inverter_discharge_efficiency == pytest.approx(1.2 / 1.4)
     assert result.defaulted_components == ()
 
-    net_configuration, net_data = _import_dc_coupled_history("net")
-    assert net_configuration.battery is not None
-    net_calculation = net_configuration.battery.efficiency_calculation
-    assert net_calculation is not None
-    net_result = calculate_battery_efficiency(
-        net_data, net_calculation, capacity_kwh=10, now=START
-    )
+    net_result = dc_coupled_result("net")
 
     assert net_result.complete_cycle_count == 0
     assert net_result.status != "ok"
@@ -1496,17 +1155,9 @@ def test_positive_part_keeps_the_battery_cycle_that_holds_a_pv_surplus_hour() ->
 
 def test_merge_extends_persisted_history_with_new_hours() -> None:
     existing = history()
-    incoming = history(
-        battery_in=(5,),
-        battery_out=(4,),
-        soc=(50, 100),
-    )
-    incoming = incoming.__class__(
-        **{
-            **incoming.__dict__,
-            "start_time": existing.start_time
-            + timedelta(hours=len(existing.battery_energy_in_kwh)),
-        }
+    incoming = replace(
+        history(battery_in=(5,), battery_out=(4,), soc=(50, 100)),
+        start_time=START + timedelta(hours=6),
     )
 
     merged = merge_battery_efficiency_history(existing, incoming)
@@ -1520,12 +1171,23 @@ def test_merge_extends_persisted_history_with_new_hours() -> None:
     assert merged.state_of_charge_percent[-1] == 100
 
 
-def test_merge_rejects_a_non_contiguous_incoming_history() -> None:
-    existing = history()
-    incoming = history()  # starts at the same time instead of right after
+@pytest.mark.parametrize(
+    "incoming_start",
+    [
+        pytest.param(START, id="starts-at-the-same-time-instead-of-right-after"),
+        pytest.param(START + timedelta(hours=5), id="starts-before-the-persisted-end"),
+        pytest.param(
+            START + timedelta(hours=8, minutes=30), id="not-aligned-to-the-hour"
+        ),
+    ],
+)
+def test_merge_rejects_a_non_contiguous_incoming_history(
+    incoming_start: datetime,
+) -> None:
+    incoming = replace(history(), start_time=incoming_start)
 
     with pytest.raises(HomeAssistantError, match="not contiguous"):
-        merge_battery_efficiency_history(existing, incoming)
+        merge_battery_efficiency_history(history(), incoming)
 
 
 def gapped_history(gap_hours: int = 4) -> BatteryEfficiencyHistoryData:
@@ -1540,17 +1202,11 @@ def test_merge_excludes_the_hours_between_the_histories_as_unavailable() -> None
 
     assert merged.start_time == START
     hours = 6 + 4 + 6
-    for leg in (
-        merged.battery_energy_in_kwh,
-        merged.battery_energy_out_kwh,
-        merged.inverter_charge_energy_in_kwh,
-        merged.inverter_charge_energy_out_kwh,
-        merged.inverter_discharge_energy_in_kwh,
-        merged.inverter_discharge_energy_out_kwh,
-    ):
-        assert len(leg) == hours
-        assert leg[6:10] == (None,) * 4
-        assert None not in leg[:6] + leg[10:]
+    for name in SIX_LEGS:
+        leg = getattr(merged, name)
+        assert len(leg) == hours, name
+        assert leg[6:10] == (None,) * 4, name
+        assert None not in leg[:6] + leg[10:], name
     assert merged.battery_energy_in_kwh[:6] == history().battery_energy_in_kwh
     assert merged.battery_energy_in_kwh[10:] == history().battery_energy_in_kwh
     assert [item.hour_start for item in merged.exclusions] == [
@@ -1612,11 +1268,7 @@ def test_merge_over_a_gap_keeps_earlier_exclusions_and_incoming_exclusions() -> 
 
 
 def test_calculation_ignores_gap_hours_and_the_cycles_that_span_them() -> None:
-    merged = gapped_history(gap_hours=4)
-
-    result = calculate_battery_efficiency(
-        merged, calculation_configuration(), capacity_kwh=10, now=START
-    )
+    result = calculate(gapped_history(gap_hours=4))
 
     assert result.status == "ok"
     # Each six-hour history alone holds two full-charge cycles of 5 kWh. Across the
@@ -1626,23 +1278,6 @@ def test_calculation_ignores_gap_hours_and_the_cycles_that_span_them() -> None:
     assert result.battery_efficiency == pytest.approx(0.8)
     assert result.battery_throughput_kwh == pytest.approx(3 * 5.0)
     assert result.warnings == ()
-
-
-def test_merge_rejects_an_incoming_history_that_starts_before_the_persisted_end() -> (
-    None
-):
-    existing = history()
-    incoming = replace(history(), start_time=START + timedelta(hours=5))
-
-    with pytest.raises(HomeAssistantError, match="not contiguous"):
-        merge_battery_efficiency_history(existing, incoming)
-
-
-def test_merge_rejects_an_incoming_history_that_is_not_aligned_to_the_hour() -> None:
-    incoming = replace(history(), start_time=START + timedelta(hours=8, minutes=30))
-
-    with pytest.raises(HomeAssistantError, match="not contiguous"):
-        merge_battery_efficiency_history(history(), incoming)
 
 
 def test_merge_returns_the_incoming_history_when_nothing_is_persisted() -> None:
@@ -1659,10 +1294,7 @@ def test_merge_keeps_the_exclusions_and_missing_values_of_both_histories() -> No
     # and 1 are unavailable. Value 0 is the one the existing history ended on.
     incoming = replace(
         history(
-            battery_in=(5, 5),
-            battery_out=(4, 4),
-            soc=(None, None, 50),
-            excluded=(1,),
+            battery_in=(5, 5), battery_out=(4, 4), soc=(None, None, 50), excluded=(1,)
         ),
         start_time=START + timedelta(hours=6),
         exclusions=(exclusion(7, "unavailable", "sensor.soc"),),
