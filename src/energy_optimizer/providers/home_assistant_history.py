@@ -50,6 +50,14 @@ class HomeAssistantError(RuntimeError):
     """Raised when Home Assistant energy data cannot be imported safely."""
 
 
+class HomeAssistantAuthenticationError(HomeAssistantError):
+    """Raised when Home Assistant rejects the configured token.
+
+    Unlike a failure that concerns one entity, a rejected token would reject
+    every further request too, so an import stops sending requests after it.
+    """
+
+
 class HistoryPlanError(RuntimeError):
     """Raised when planned history needs and history reads are inconsistent.
 
@@ -255,8 +263,10 @@ class HomeAssistantHistoryImporter:
         """Fetch and clean each distinct entity once for the merged range.
 
         A failure while importing one entity is recorded and re-raised only to
-        the consumers that read that entity. Importing never makes a request for
-        an empty set of needs.
+        the consumers that read that entity. A rejected token ends the import:
+        the remaining entities are not requested and fail with the same
+        authentication error. Importing never makes a request for an empty set
+        of needs.
         """
         ranges = _merge_needs(needs)
         if not ranges:
@@ -266,9 +276,12 @@ class HomeAssistantHistoryImporter:
         failures: dict[str, Exception] = {}
         statistics = _ImportStatistics()
         invalid_sample_count = 0
+        entities = list(ranges.items())
         with self._shared_client() as client:
             http = JsonHttpClient(client)
-            for entity_id, (kind, start_time, end_time) in ranges.items():
+            for position, (entity_id, (kind, start_time, end_time)) in enumerate(
+                entities
+            ):
                 try:
                     records = self._fetch_records(
                         http, statistics, entity_id, start_time, end_time
@@ -284,6 +297,10 @@ class HomeAssistantHistoryImporter:
                     series[entity_id] = HistorySeries(
                         entity_id, kind, start_time, end_time, samples
                     )
+                except HomeAssistantAuthenticationError as error:
+                    skipped = [skipped_id for skipped_id, _ in entities[position + 1 :]]
+                    failures.update(self._record_rejection(entity_id, skipped, error))
+                    break
                 except Exception as error:
                     failures[entity_id] = self._record_failure(entity_id, error)
         logger.info(
@@ -309,12 +326,12 @@ class HomeAssistantHistoryImporter:
             yield client
 
     @staticmethod
-    def _record_failure(entity_id: str, error: Exception) -> Exception:
+    def _entity_failure(entity_id: str, error: Exception) -> Exception:
         """Turn any import failure into one that names its entity."""
         if isinstance(error, HomeAssistantError):
             failure: Exception = error
             if entity_id not in str(error):
-                failure = HomeAssistantError(f"{error} (entity {entity_id})")
+                failure = error.__class__(f"{error} (entity {entity_id})")
                 failure.__cause__ = error
         else:
             failure = HomeAssistantError(
@@ -322,6 +339,11 @@ class HomeAssistantHistoryImporter:
                 f"unexpectedly: {error.__class__.__name__}: {error}"
             )
             failure.__cause__ = error
+        return failure
+
+    def _record_failure(self, entity_id: str, error: Exception) -> Exception:
+        """Name and log the failure of one entity."""
+        failure = self._entity_failure(entity_id, error)
         logger.warning(
             "event=home_assistant_history_entity_failed component=home_assistant "
             "operation=import entity_id=%s error_type=%s error=%s",
@@ -331,6 +353,27 @@ class HomeAssistantHistoryImporter:
             exc_info=(None if isinstance(error, HomeAssistantError) else error),
         )
         return failure
+
+    def _record_rejection(
+        self,
+        rejected_entity_id: str,
+        skipped_entity_ids: list[str],
+        error: HomeAssistantAuthenticationError,
+    ) -> dict[str, Exception]:
+        """Fail the rejected and every not-yet-requested entity, logging once."""
+        failures = {
+            entity_id: self._entity_failure(entity_id, error)
+            for entity_id in (rejected_entity_id, *skipped_entity_ids)
+        }
+        logger.warning(
+            "event=home_assistant_history_authentication_failed "
+            "component=home_assistant operation=import entity_id=%s "
+            "skipped_entity_count=%s error=%s",
+            rejected_entity_id,
+            len(skipped_entity_ids),
+            failures[rejected_entity_id],
+        )
+        return failures
 
     def _fetch_records(
         self,
@@ -382,6 +425,7 @@ class HomeAssistantHistoryImporter:
             token=self.configuration.token.get_secret_value(),
             timeout_seconds=self.configuration.timeout_seconds,
             error_factory=HomeAssistantError,
+            authentication_error_factory=HomeAssistantAuthenticationError,
             not_found_message=(
                 f"Home Assistant history was not found for {entity_id}; check the "
                 "configured entity ID and endpoint"

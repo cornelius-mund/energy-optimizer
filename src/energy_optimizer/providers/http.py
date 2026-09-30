@@ -126,12 +126,19 @@ class JsonHttpClient:
         log_context: str = "",
         success_log_level: int = logging.INFO,
         error_log_level: int = logging.WARNING,
+        authentication_error_factory: ErrorFactory | None = None,
     ) -> Any:
-        """Fetch Home Assistant JSON with its shared auth and status handling."""
+        """Fetch Home Assistant JSON with its shared auth and status handling.
+
+        A rejected token (HTTP 401 or 403) raises the error built by
+        ``authentication_error_factory`` when given, so a caller can tell it
+        apart from failures that concern only one request. It defaults to
+        ``error_factory``.
+        """
 
         def status_error(status: int) -> Exception | None:
             if status in (401, 403):
-                return error_factory(
+                return (authentication_error_factory or error_factory)(
                     "Home Assistant authentication failed; check the configured token"
                 )
             if status == 404:

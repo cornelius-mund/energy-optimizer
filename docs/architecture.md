@@ -246,9 +246,11 @@ exclusion record, so the count is kept in the `clamped_hour_count` field of
 efficiency leg use the same aggregation type. Individual chunk request outcomes are debug-level
 diagnostics. The import emits one structured summary at info level with its
 entity, failed-entity, request, and invalid-sample counts, and a warning for
-every failed entity. Each aggregate build emits one structured summary at info
-level, with its excluded-hour and clamped-hour counts, or one failure summary at warning level after
-the complete entity set has been processed. Orchestration emits one
+every failed entity, except that a rejected token (HTTP 401 or 403) ends the
+import and is logged once as `home_assistant_history_authentication_failed`.
+Each aggregate build emits one structured summary at info level, with its
+excluded-hour and clamped-hour counts, or one failure summary at warning level
+after the complete entity set has been processed. Orchestration emits one
 `provider_hours_excluded` warning per source and refresh with the number of newly
 excluded hours by reason.
 

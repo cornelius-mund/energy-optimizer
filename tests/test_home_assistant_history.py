@@ -27,6 +27,7 @@ from home_assistant_fixtures import (
 
 FIRST = "sensor.first"
 SECOND = "sensor.second"
+THIRD = "sensor.third"
 BASE = datetime(2026, 1, 1, tzinfo=timezone.utc)
 HALF_HOUR = timedelta(minutes=30)
 AGGREGATION = aggregate_configuration(
@@ -166,6 +167,167 @@ def test_a_failed_entity_reaches_only_the_consumers_that_read_it() -> None:
         1.0,
         2.0,
     ]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_an_authentication_rejection_ends_the_import_after_one_request(
+    status: int,
+) -> None:
+    home_assistant = FakeHomeAssistant(
+        {FIRST: hourly_states(24 * 20), SECOND: hourly_states(24)},
+        failures={FIRST: status, SECOND: status, THIRD: status},
+    )
+
+    history = import_history(
+        home_assistant,
+        counter_need(FIRST, day(0), day(20)),
+        counter_need(SECOND, day(0), day(1)),
+        counter_need(THIRD, day(0), day(1)),
+    )
+
+    # The first entity spans three chunks, yet nothing is sent after the first
+    # rejected request, and no later entity is requested at all.
+    assert home_assistant.requested_entities() == [FIRST]
+    assert len(home_assistant.requests) == 1
+    for entity_id in (FIRST, SECOND, THIRD):
+        with pytest.raises(
+            HomeAssistantError,
+            match=(
+                r"authentication failed; check the configured token "
+                rf"\(entity {entity_id}\)$"
+            ),
+        ):
+            history.window(entity_id, "counter", day(0), day(1))
+
+
+def test_entities_imported_before_an_authentication_rejection_stay_readable() -> None:
+    home_assistant = FakeHomeAssistant(
+        {FIRST: hourly_states(2), SECOND: hourly_states(2), THIRD: hourly_states(2)},
+        failures={SECOND: 401},
+    )
+
+    history = import_history(
+        home_assistant,
+        counter_need(FIRST, hour(0), hour(2)),
+        counter_need(SECOND, hour(0), hour(2)),
+        counter_need(THIRD, hour(0), hour(2)),
+    )
+
+    assert home_assistant.requested_entities() == [FIRST, SECOND]
+    assert [
+        sample.value for sample in history.window(FIRST, "counter", hour(0), hour(2))
+    ] == [0.0, 1.0, 2.0]
+    for entity_id in (SECOND, THIRD):
+        with pytest.raises(
+            HomeAssistantError, match="authentication failed"
+        ) as failure:
+            history.window(entity_id, "counter", hour(0), hour(2))
+        assert entity_id in str(failure.value)
+
+
+def test_an_authentication_rejection_after_the_first_chunk_ends_the_import() -> None:
+    healthy = FakeHomeAssistant(
+        {FIRST: hourly_states(24 * 20), SECOND: hourly_states(24)}
+    )
+    requested: list[tuple[str, datetime]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
+        requested.append((request.url.params["filter_entity_id"], start))
+        if start >= day(7):
+            return httpx.Response(401)
+        return healthy(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
+            [counter_need(FIRST, day(0), day(20)), counter_need(SECOND, day(0), day(1))]
+        )
+    finally:
+        client.close()
+
+    # The second chunk of the first entity is rejected; the third chunk and the
+    # second entity are never requested.
+    assert requested == [(FIRST, day(0)), (FIRST, day(7))]
+    for entity_id in (FIRST, SECOND):
+        with pytest.raises(HomeAssistantError, match="authentication failed"):
+            history.window(entity_id, "counter", day(0), day(1))
+
+
+@pytest.mark.parametrize(
+    "first_entity_response",
+    [
+        pytest.param(lambda _: httpx.Response(404), id="not-found"),
+        pytest.param(lambda _: httpx.Response(503), id="server-error"),
+        pytest.param(
+            lambda _: httpx.Response(200, content=b"not-json"), id="malformed-json"
+        ),
+        pytest.param(httpx.ReadTimeout("timed out"), id="timeout"),
+        pytest.param(httpx.ConnectError("refused"), id="transport-error"),
+    ],
+)
+def test_other_failures_of_one_entity_never_stop_the_import(
+    first_entity_response: Callable[[httpx.Request], httpx.Response] | httpx.HTTPError,
+) -> None:
+    healthy = FakeHomeAssistant({SECOND: hourly_states(2), THIRD: hourly_states(2)})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["filter_entity_id"] == FIRST:
+            if isinstance(first_entity_response, httpx.HTTPError):
+                raise first_entity_response
+            return first_entity_response(request)
+        return healthy(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
+            [
+                counter_need(FIRST, hour(0), hour(2)),
+                counter_need(SECOND, hour(0), hour(2)),
+                counter_need(THIRD, hour(0), hour(2)),
+            ]
+        )
+    finally:
+        client.close()
+
+    assert healthy.requested_entities() == [SECOND, THIRD]
+    with pytest.raises(HomeAssistantError):
+        history.window(FIRST, "counter", hour(0), hour(2))
+    for entity_id in (SECOND, THIRD):
+        assert history.window(entity_id, "counter", hour(0), hour(2))
+
+
+def test_an_authentication_rejection_is_logged_once_without_the_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    home_assistant = FakeHomeAssistant(
+        {FIRST: hourly_states(2)}, failures={FIRST: 401, SECOND: 401, THIRD: 401}
+    )
+
+    import_history(
+        home_assistant,
+        counter_need(FIRST, hour(0), hour(2)),
+        counter_need(SECOND, hour(0), hour(2)),
+        counter_need(THIRD, hour(0), hour(2)),
+    )
+
+    messages = [record.getMessage() for record in caplog.records]
+    (rejection,) = [
+        record
+        for record in caplog.records
+        if "authentication_failed" in record.getMessage()
+    ]
+    assert rejection.levelno == logging.WARNING
+    assert f"entity_id={FIRST}" in rejection.getMessage()
+    assert "skipped_entity_count=2" in rejection.getMessage()
+    assert not any("event=home_assistant_history_entity_failed" in m for m in messages)
+    (summary,) = [
+        m for m in messages if m.startswith("event=home_assistant_history_import ")
+    ]
+    assert "status=partial" in summary
+    assert "entity_count=3 failed_entity_count=3 request_count=1" in summary
+    assert not any("test-token" in m or "Bearer" in m for m in messages)
 
 
 @pytest.mark.parametrize(

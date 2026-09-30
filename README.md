@@ -293,6 +293,16 @@ example after a request failure, fails only the sources that read it, the error
 names the entity, and a failed source keeps its last valid persisted data. Bad
 samples never fail a source: they exclude hours (see below).
 
+A rejected Home Assistant token (HTTP 401 or 403) is not a failure of one entity,
+because it would reject every further request too. The import therefore ends at
+the first rejection: no further request is sent, every entity that was not
+imported fails with the same authentication error naming that entity, and the
+entities imported before the rejection stay available. The import logs one
+`home_assistant_history_authentication_failed` warning with the rejected entity
+and the number of entities that were not requested, instead of one warning per
+entity. The battery source's live state request is a separate request and still
+makes its own attempt.
+
 Grid-flow collection bootstraps and refreshes like household load: the first run
 requests up to the 87,672-hour maximum (or all history Home Assistant retains),
 and every later run requests only the completed hours after the retained history.
