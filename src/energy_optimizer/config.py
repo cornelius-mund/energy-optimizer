@@ -58,7 +58,6 @@ class HomeAssistantEnergyEntityConfiguration(BaseModel):
     entity_id: str = Field(min_length=1, max_length=255)
     state_class: Literal["total", "total_increasing"]
     unit: Literal["Wh", "kWh", "MWh"]
-    operation: Literal["add", "subtract"]
     # The most energy this entity may report in one hour and in one counter step.
     # A larger value excludes the hour instead of importing it.
     maximum_interval_energy_kwh: float = Field(default=100, gt=0)
@@ -96,29 +95,64 @@ type BatteryConfigurationValue = (
 )
 
 
-class BatteryEfficiencyLegConfiguration(BaseModel):
-    """Signed cumulative-energy entities making up one measured efficiency leg."""
+class EnergyTermConfiguration(BaseModel):
+    """Cumulative-energy entities that share one sign in an aggregation."""
 
     model_config = ConfigDict(extra="forbid")
 
-    energy_in: list[HomeAssistantEnergyEntityConfiguration] = Field(min_length=1)
-    energy_out: list[HomeAssistantEnergyEntityConfiguration] = Field(min_length=1)
+    operation: Literal["add", "subtract"]
+    entities: list[HomeAssistantEnergyEntityConfiguration] = Field(min_length=1)
+
+
+class EnergyAggregateConfiguration(BaseModel):
+    """One signed hourly energy aggregation built from cumulative counters.
+
+    The hourly value is the sum of the energy of every ``add`` entity minus the
+    sum of the energy of every ``subtract`` entity. ``part`` decides what a
+    negative sum means: with ``net`` it is invalid data and excludes the hour,
+    with ``positive`` it is a legitimate zero, because only the positive part of
+    the sum is wanted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    part: Literal["net", "positive"] = "net"
+    terms: list[EnergyTermConfiguration] = Field(min_length=1)
+
+    @property
+    def entity_ids(self) -> tuple[str, ...]:
+        """Return the entity IDs of all terms in configuration order."""
+        return tuple(
+            entity.entity_id for term in self.terms for entity in term.entities
+        )
 
     @model_validator(mode="after")
-    def validate_entities(self) -> "BatteryEfficiencyLegConfiguration":
-        """Reject duplicate entities within one expression side."""
-        for side, entities in (
-            ("energy_in", self.energy_in),
-            ("energy_out", self.energy_out),
-        ):
-            entity_ids = [entity.entity_id for entity in entities]
-            if len(entity_ids) != len(set(entity_ids)):
-                raise ValueError(
-                    f"battery efficiency {side} entities must not contain duplicates"
-                )
-        if {entity.entity_id for entity in self.energy_in} & {
-            entity.entity_id for entity in self.energy_out
-        }:
+    def validate_terms(self) -> "EnergyAggregateConfiguration":
+        """Allow one term per operation and each entity once per aggregation."""
+        operations = [term.operation for term in self.terms]
+        if len(operations) != len(set(operations)):
+            raise ValueError(
+                "an energy aggregation must not contain more than one term for "
+                "the same operation"
+            )
+        entity_ids = self.entity_ids
+        if len(entity_ids) != len(set(entity_ids)):
+            raise ValueError("energy aggregation entities must not contain duplicates")
+        return self
+
+
+class BatteryEfficiencyLegConfiguration(BaseModel):
+    """Signed cumulative-energy aggregations making up one efficiency leg."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    energy_in: EnergyAggregateConfiguration
+    energy_out: EnergyAggregateConfiguration
+
+    @model_validator(mode="after")
+    def warn_about_entity_reuse(self) -> "BatteryEfficiencyLegConfiguration":
+        """Warn when one entity contributes to both sides of the leg."""
+        if set(self.energy_in.entity_ids) & set(self.energy_out.entity_ids):
             logger.warning(
                 "event=configuration_efficiency_entity_reuse "
                 "component=configuration reason=entity_used_on_both_sides"
@@ -307,43 +341,23 @@ class HomeAssistantConfiguration(BaseModel):
 
     base_url: AnyHttpUrl
     token: SecretStr
-    household_load_entities: list[HomeAssistantEnergyEntityConfiguration] | None = (
-        Field(default=None, min_length=1)
-    )
-    grid_import_entities: list[HomeAssistantEnergyEntityConfiguration] | None = Field(
-        default=None, min_length=1
-    )
-    grid_export_entities: list[HomeAssistantEnergyEntityConfiguration] | None = Field(
-        default=None, min_length=1
-    )
+    household_load: EnergyAggregateConfiguration | None = None
+    grid_import: EnergyAggregateConfiguration | None = None
+    grid_export: EnergyAggregateConfiguration | None = None
     battery: HomeAssistantBatteryConfiguration | None = None
     timeout_seconds: float = Field(gt=0, le=120)
     max_data_age_seconds: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
-    def validate_energy_entities(self) -> "HomeAssistantConfiguration":
-        """Reject duplicate physical entities within each logical mapping."""
+    def validate_grid_and_battery_mappings(self) -> "HomeAssistantConfiguration":
+        """Require grid import and export together and check battery mappings."""
 
-        grid_entity_sets = (self.grid_import_entities, self.grid_export_entities)
-        if any(entities is not None for entities in grid_entity_sets) and not all(
-            entities is not None for entities in grid_entity_sets
+        grid_aggregates = (self.grid_import, self.grid_export)
+        if any(aggregate is not None for aggregate in grid_aggregates) and not all(
+            aggregate is not None for aggregate in grid_aggregates
         ):
-            raise ValueError(
-                "grid_import_entities and grid_export_entities must be configured "
-                "together"
-            )
+            raise ValueError("grid_import and grid_export must be configured together")
 
-        for category, entities in (
-            ("household_load", self.household_load_entities),
-            ("grid_import", self.grid_import_entities),
-            ("grid_export", self.grid_export_entities),
-        ):
-            entity_ids = [entity.entity_id for entity in entities or []]
-            if len(entity_ids) != len(set(entity_ids)):
-                raise ValueError(
-                    f"Home Assistant {category} energy entities must not contain "
-                    "duplicates"
-                )
         if self.battery is not None:
             battery_values = (
                 self.battery.state_of_charge,
@@ -532,7 +546,7 @@ class Configuration(BaseModel):
         """Return whether a source identifies the configured load provider."""
         return (
             self.home_assistant is not None
-            and self.home_assistant.household_load_entities is not None
+            and self.home_assistant.household_load is not None
             and provider == "home-assistant"
             and entity_id == self.home_assistant.household_load_source_id
         )
@@ -545,8 +559,8 @@ class Configuration(BaseModel):
         """Return whether a source identifies the configured grid-flow provider."""
         return (
             self.home_assistant is not None
-            and self.home_assistant.grid_import_entities is not None
-            and self.home_assistant.grid_export_entities is not None
+            and self.home_assistant.grid_import is not None
+            and self.home_assistant.grid_export is not None
             and provider == "home-assistant"
             and entity_id == self.home_assistant.grid_flow_source_id
         )

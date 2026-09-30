@@ -41,7 +41,11 @@ from energy_optimizer.providers.home_assistant_history import (
 )
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
-from home_assistant_fixtures import home_assistant_history_payload, import_and_build
+from home_assistant_fixtures import (
+    aggregate_settings,
+    home_assistant_history_payload,
+    import_and_build,
+)
 
 MINIMAL_CONFIGURATION = """
 time_resolution_minutes: 60
@@ -318,11 +322,13 @@ def test_configuration_load_is_logged_without_secret_values(
         + "home_assistant:\n"
         + "  base_url: http://homeassistant.local:8123\n"
         + "  token: do-not-log-this-token\n"
-        + "  household_load_entities:\n"
-        + "    - entity_id: sensor.household_energy\n"
-        + "      state_class: total_increasing\n"
-        + "      unit: kWh\n"
-        + "      operation: add\n"
+        + "  household_load:\n"
+        + "    terms:\n"
+        + "      - operation: add\n"
+        + "        entities:\n"
+        + "          - entity_id: sensor.household_energy\n"
+        + "            state_class: total_increasing\n"
+        + "            unit: kWh\n"
         + "  timeout_seconds: 10\n",
         encoding="utf-8",
     )
@@ -549,14 +555,15 @@ def test_configured_household_load_restore_logs_logical_source_without_token(
             "home_assistant": {
                 "base_url": "http://homeassistant.test:8123",
                 "token": "secret-provider-token",
-                "household_load_entities": [
-                    {
-                        "entity_id": "sensor.household_energy",
-                        "state_class": "total_increasing",
-                        "unit": "kWh",
-                        "operation": "add",
-                    }
-                ],
+                "household_load": aggregate_settings(
+                    add=[
+                        {
+                            "entity_id": "sensor.household_energy",
+                            "state_class": "total_increasing",
+                            "unit": "kWh",
+                        }
+                    ]
+                ),
                 "timeout_seconds": 5,
             },
             "persistence": {"directory": str(tmp_path)},
@@ -713,14 +720,15 @@ def household_configuration(token: str) -> HomeAssistantConfiguration:
         {
             "base_url": "http://homeassistant.test:8123",
             "token": token,
-            "household_load_entities": [
-                {
-                    "entity_id": "sensor.household_energy",
-                    "state_class": "total_increasing",
-                    "unit": "kWh",
-                    "operation": "add",
-                }
-            ],
+            "household_load": aggregate_settings(
+                add=[
+                    {
+                        "entity_id": "sensor.household_energy",
+                        "state_class": "total_increasing",
+                        "unit": "kWh",
+                    }
+                ]
+            ),
             "timeout_seconds": 5,
         }
     )

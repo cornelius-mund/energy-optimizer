@@ -131,18 +131,44 @@ battery:
     history_start: 2020-01-01T00:00:00+00:00
     full_soc_threshold_percent: 100
     battery:
-      energy_in: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}]
-      energy_out: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}]
+      energy_in:
+        terms:
+          - operation: add
+            entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]
+      energy_out:
+        terms:
+          - operation: add
+            entities: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}]
     inverter_charge:
-      energy_in: [{entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh, operation: add}]
-      energy_out: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}]
+      energy_in:
+        terms:
+          - operation: add
+            entities: [{entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh}]
+      energy_out:
+        part: positive
+        terms:
+          - operation: add
+            entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]
+          - operation: subtract
+            entities: [{entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}]
     inverter_discharge:
-      energy_in: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}]
-      energy_out: [{entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh, operation: add}]
+      energy_in:
+        part: positive
+        terms:
+          - operation: add
+            entities:
+              - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}
+              - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}
+          - operation: subtract
+            entities: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}]
+      energy_out:
+        terms:
+          - operation: add
+            entities: [{entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh}]
 ```
 
 Calculated efficiency is configured separately under `battery.efficiency_calculation`.
-It contains signed `energy_in` and `energy_out` entity lists for the battery,
+It contains an `energy_in` and an `energy_out` energy aggregation for the battery,
 inverter charge, and inverter discharge components, plus the historical state of
 charge entity. Battery efficiency is one full-cycle round-trip value detected
 from consecutive full-SoC boundaries. Inverter charge and discharge efficiencies
@@ -190,20 +216,35 @@ the earliest complete retained hour and does not fabricate earlier values. The
 calculator itself uses all retained history, or all history since `history_start`,
 and never uses a rolling window.
 
-Each leg's signed `energy_in`/`energy_out` expression is a net directional
-energy flow, not an absolute cumulative total. For a DC-coupled installation,
-`inverter_charge.energy_out` above nets the battery's total charging energy
-against the directly consumed PV yield to isolate the AC-sourced share; in any
-hour where PV production exceeds the battery's charging energy, that
-expression's net value is negative because the surplus was exported rather
-than stored. A negative combined value is never clamped and never fails the
-refresh: like every other invalid data point it excludes the hour
-(`combined_negative`), and the hour is excluded in all six energy legs and the
-state of charge. Hours excluded this way are listed on the dashboard's Excluded
-hours tab and through `GET /api/v1/dashboard/excluded-hours`. A full-charge cycle
-that contains an excluded hour is not used for the ratios, so the result rests
-on fewer cycles instead of a wrong value. Model such a leg so that its net value
-is not routinely negative, or accept that those hours are excluded.
+Each side of a leg is an energy aggregation: the energy of the entities of its
+`add` term minus the energy of the entities of its `subtract` term, per hour. It
+is a net directional energy flow, not an absolute cumulative total. For a
+DC-coupled installation, `inverter_charge.energy_out` above nets the battery's
+total charging energy against the directly consumed PV yield to isolate the
+AC-sourced share; in any hour where PV production exceeds the battery's charging
+energy, that sum is negative because the surplus was exported rather than stored.
+Likewise `inverter_discharge.energy_in` is the energy the inverter draws from the
+DC bus: PV yield reaches the inverter directly, so it is added to the battery's
+discharge energy, and the energy the battery took in during the same hour is
+subtracted because it never reached the inverter. In any hour where the battery
+takes in more than it discharges plus the PV yield, that sum is negative because
+the inverter was not discharging.
+
+`part` decides what such a negative sum means. With the default `net` it is
+invalid data and never fails the refresh: like every other invalid data point it
+excludes the hour (`combined_negative`), and the hour is excluded in all six
+energy legs and the state of charge. Hours excluded this way are listed on the
+dashboard's Excluded hours tab and through
+`GET /api/v1/dashboard/excluded-hours`. A full-charge cycle that contains an
+excluded hour is not used for the ratios, so the result rests on fewer cycles
+instead of a wrong value. On a DC-coupled installation these two sums are
+routinely negative, so set `part: positive` on them, as in the example above:
+only the positive part of the sum is wanted, so the negative hour is imported as
+`0`, is not excluded, and does not remove its full-charge cycle. `part: positive`
+still excludes an hour for a non-finite sum or an invalid entity sample. Each
+clamped hour is counted as `clamped_hour_count`, next to `part` and
+`excluded_hour_count`, in the `home_assistant_history_aggregate` log line of the
+aggregation; it is not listed as an excluded hour.
 
 The state-of-charge validation checks physical plausibility, not round-trip
 loss: during an hour with only charging (or only discharging) energy measured,
@@ -549,7 +590,7 @@ source and reason, and every excluded hour in ascending order:
 | `last_reset_changed` | The `last_reset` marker changed |
 | `step_above_maximum`, `hour_above_maximum` | A step, or the sum of one hour, exceeds `maximum_interval_energy_kwh` |
 | `soc_out_of_range` | A state of charge is outside 0 to 100 percent |
-| `combined_negative`, `combined_not_finite` | The signed operations of an hour give a negative or non-finite value |
+| `combined_negative`, `combined_not_finite` | The signed terms of an hour give a non-finite value, or a negative value unless the aggregation takes `part: positive` |
 | `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` |
 
 The Excluded hours tab loads this endpoint for the chosen UTC window. It shows the

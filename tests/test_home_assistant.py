@@ -13,6 +13,7 @@ from energy_optimizer.providers.home_assistant import (
     HomeAssistantLoadImporter,
 )
 from home_assistant_fixtures import (
+    aggregate_settings,
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_planning_importer_factory,
@@ -26,15 +27,22 @@ END = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 NOW = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
 
 
+def entity_settings(
+    entity_id: str = ENTITY_ID,
+    state_class: str = "total_increasing",
+    unit: str = "kWh",
+    **settings: Any,
+) -> dict[str, Any]:
+    return {
+        "entity_id": entity_id,
+        "state_class": state_class,
+        "unit": unit,
+        **settings,
+    }
+
+
 configuration = home_assistant_configuration_factory(
-    household_load_entities=[
-        {
-            "entity_id": ENTITY_ID,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "add",
-        }
-    ]
+    household_load=aggregate_settings(add=[entity_settings()])
 )
 
 
@@ -57,22 +65,6 @@ def history_payload(
 importer = home_assistant_planning_importer_factory(
     HomeAssistantLoadImporter, configuration
 )
-
-
-def entity_settings(
-    entity_id: str = ENTITY_ID,
-    operation: str = "add",
-    state_class: str = "total_increasing",
-    unit: str = "kWh",
-    **settings: Any,
-) -> dict[str, Any]:
-    return {
-        "entity_id": entity_id,
-        "state_class": state_class,
-        "unit": unit,
-        "operation": operation,
-        **settings,
-    }
 
 
 def at(timestamp: str) -> datetime:
@@ -252,20 +244,6 @@ def test_fetch_uses_one_request_for_a_week_without_lookback() -> None:
 def test_long_history_fetches_every_entity_for_each_chunk() -> None:
     requested_end = START + timedelta(days=8)
     requests: list[tuple[str, datetime, datetime]] = []
-    entities = [
-        {
-            "entity_id": ENTITY_ID,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "add",
-        },
-        {
-            "entity_id": SECOND_ENTITY_ID,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "subtract",
-        },
-    ]
 
     def handler(request: httpx.Request) -> httpx.Response:
         entity_id = request.url.params["filter_entity_id"]
@@ -288,7 +266,10 @@ def test_long_history_fetches_every_entity_for_each_chunk() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=entities,
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(SECOND_ENTITY_ID)],
+        ),
     )
     try:
         data = import_and_build(provider, client, START, requested_end, now=NOW)
@@ -460,20 +441,10 @@ def test_fetch_aligns_entities_to_the_latest_available_start() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(SECOND_ENTITY_ID)],
+        ),
     )
     try:
         data = import_and_build(
@@ -509,14 +480,7 @@ def test_fetch_converts_total_increasing_energy_and_unit() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "Wh",
-                "operation": "add",
-            }
-        ],
+        household_load=aggregate_settings(add=[entity_settings(unit="Wh")]),
     )
     try:
         data = import_and_build(provider, client, START, END, now=NOW)
@@ -548,20 +512,10 @@ def test_fetch_combines_add_and_subtract_entities() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(SECOND_ENTITY_ID)],
+        ),
     )
     try:
         data = import_and_build(provider, client, START, END, now=NOW)
@@ -946,14 +900,7 @@ def test_total_increasing_does_not_interpolate_between_observations() -> None:
                 ),
             )
         ),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        household_load=aggregate_settings(add=[entity_settings()]),
     )
     try:
         data = import_and_build(
@@ -1014,14 +961,7 @@ def test_total_decrease_with_a_changed_last_reset_is_still_excluded() -> None:
                 ),
             )
         ),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        household_load=aggregate_settings(add=[entity_settings(state_class="total")]),
     )
     try:
         data = import_and_build(
@@ -1055,7 +995,7 @@ def test_total_last_reset_change_excludes_the_hours_of_both_observations() -> No
                 ),
             )
         ),
-        household_load_entities=[entity_settings(state_class="total")],
+        household_load=aggregate_settings(add=[entity_settings(state_class="total")]),
     )
     try:
         data = import_and_build(
@@ -1170,10 +1110,10 @@ def test_spike_in_a_subtracted_entity_excludes_the_combined_hour() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            entity_settings(ENTITY_ID, "add"),
-            entity_settings(SECOND_ENTITY_ID, "subtract"),
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(SECOND_ENTITY_ID)],
+        ),
     )
     try:
         data = import_and_build(
@@ -1198,15 +1138,9 @@ def test_step_above_maximum_excludes_the_hour_of_its_later_observation() -> None
         httpx.MockTransport(
             lambda _: httpx.Response(200, json=history_payload(readings=readings))
         ),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-                "maximum_interval_energy_kwh": 10,
-            }
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(maximum_interval_energy_kwh=10)]
+        ),
     )
     try:
         data = import_and_build(
@@ -1243,9 +1177,9 @@ def test_step_above_maximum_leaves_the_hour_of_its_earlier_observation_valid() -
         httpx.MockTransport(
             lambda _: httpx.Response(200, json=history_payload(readings=readings))
         ),
-        household_load_entities=[
-            entity_settings(maximum_interval_energy_kwh=10),
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(maximum_interval_energy_kwh=10)]
+        ),
     )
     try:
         data = import_and_build(
@@ -1268,9 +1202,9 @@ def test_hour_above_maximum_is_excluded_although_no_single_step_exceeds_it() -> 
         httpx.MockTransport(
             lambda _: httpx.Response(200, json=history_payload(readings=readings))
         ),
-        household_load_entities=[
-            entity_settings(maximum_interval_energy_kwh=10),
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(maximum_interval_energy_kwh=10)]
+        ),
     )
     try:
         data = import_and_build(
@@ -1297,15 +1231,9 @@ def test_physical_limit_accepts_exact_boundary() -> None:
         httpx.MockTransport(
             lambda _: httpx.Response(200, json=history_payload(readings=readings))
         ),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-                "maximum_interval_energy_kwh": 10,
-            }
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(maximum_interval_energy_kwh=10)]
+        ),
     )
     try:
         data = import_and_build(
@@ -1338,7 +1266,7 @@ def test_total_decrease_without_last_reset_change_excludes_the_hours_it_touches(
                 ),
             )
         ),
-        household_load_entities=[entity_settings(state_class="total")],
+        household_load=aggregate_settings(add=[entity_settings(state_class="total")]),
     )
     try:
         data = import_and_build(
@@ -1370,7 +1298,7 @@ def test_household_load_excludes_the_hour_of_a_one_watt_hour_counter_dip() -> No
                 200, json=history_payload(readings=readings, state_class="total")
             )
         ),
-        household_load_entities=[entity_settings(state_class="total")],
+        household_load=aggregate_settings(add=[entity_settings(state_class="total")]),
     )
     try:
         data = import_and_build(
@@ -1411,20 +1339,10 @@ def test_fetch_excludes_negative_combined_load_hours() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(SECOND_ENTITY_ID)],
+            subtract=[entity_settings(ENTITY_ID)],
+        ),
     )
     try:
         data = import_and_build(provider, client, START, END, now=NOW)
@@ -1439,9 +1357,10 @@ def test_fetch_excludes_negative_combined_load_hours() -> None:
     }
     cause = data.exclusions[0].causes[0]
     assert cause.entity_id is None
+    # The add term's entities are listed before the subtract term's.
     assert [(point.entity_id, point.step_kwh) for point in cause.data_points] == [
-        (ENTITY_ID, -3.0),
         (SECOND_ENTITY_ID, 2.0),
+        (ENTITY_ID, -3.0),
     ]
 
 
@@ -1478,10 +1397,10 @@ def test_fetch_excludes_the_reset_hour_of_both_counters_and_keeps_other_hours() 
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            entity_settings(ENTITY_ID, "add"),
-            entity_settings(SECOND_ENTITY_ID, "subtract"),
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(SECOND_ENTITY_ID)],
+        ),
     )
     try:
         data = import_and_build(
@@ -1515,20 +1434,9 @@ def test_fetch_does_not_return_partial_data_when_an_entity_fails() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": SECOND_ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID), entity_settings(SECOND_ENTITY_ID)]
+        ),
     )
     try:
         with pytest.raises(HomeAssistantError, match="HTTP 503"):
@@ -1552,10 +1460,9 @@ def test_fetch_does_not_return_partial_data_when_entity_has_no_history() -> None
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            entity_settings(ENTITY_ID, "add"),
-            entity_settings(SECOND_ENTITY_ID, "add"),
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID), entity_settings(SECOND_ENTITY_ID)]
+        ),
     )
     try:
         with pytest.raises(
@@ -1585,10 +1492,9 @@ def test_fetch_excludes_every_hour_when_an_entity_has_only_invalid_samples() -> 
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        household_load_entities=[
-            entity_settings(ENTITY_ID, "add"),
-            entity_settings(SECOND_ENTITY_ID, "add"),
-        ],
+        household_load=aggregate_settings(
+            add=[entity_settings(ENTITY_ID), entity_settings(SECOND_ENTITY_ID)]
+        ),
     )
     try:
         data = import_and_build(provider, client, START, END, now=NOW)

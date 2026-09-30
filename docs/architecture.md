@@ -232,13 +232,22 @@ period without a complete hour.
 
 Signed aggregation excludes a combined hour when any contributing entity is
 excluded for it (the cause of the entity is kept; no partial sum is formed), and
-also when the operations make it negative or not finite (`combined_negative`,
-`combined_not_finite`, listing the signed energy of every entity); a combined
-hour is never clamped to zero. Individual chunk request outcomes are debug-level
+also when the terms make it not finite (`combined_not_finite`) or, by default,
+negative (`combined_negative`), listing the signed energy of every entity. Every
+aggregation is configured by one type, `EnergyAggregateConfiguration`: a list of
+terms, one per operation (`add` or `subtract`), each holding the entities that
+share that sign, and a `part`. With `part: net` a negative sum excludes the hour.
+With `part: positive` the operator declares that only the positive part of the
+sum is wanted, so a negative sum becomes exactly `0` and the hour stays valid.
+That is not a repair: it is the explicit meaning of the configured formula, it
+never applies to a non-finite sum or an excluded entity hour, and it leaves no
+exclusion record, so the count is kept in the `clamped_hour_count` field of
+`HomeAssistantEnergySeries` and logged with `part` in the aggregate summary. Household load, grid import and export, and both sides of every
+efficiency leg use the same aggregation type. Individual chunk request outcomes are debug-level
 diagnostics. The import emits one structured summary at info level with its
 entity, failed-entity, request, and invalid-sample counts, and a warning for
 every failed entity. Each aggregate build emits one structured summary at info
-level, with its excluded-hour count, or one failure summary at warning level after
+level, with its excluded-hour and clamped-hour counts, or one failure summary at warning level after
 the complete entity set has been processed. Orchestration emits one
 `provider_hours_excluded` warning per source and refresh with the number of newly
 excluded hours by reason.
@@ -267,7 +276,11 @@ state-of-charge values that bracket it (`state_of_charge_percent[i]` and
 `[i + 1]` for hour `i`) are dropped, so the ratios never mix valid and invalid
 legs. `calculate_battery_efficiency` skips excluded hours and does not use a
 full-charge cycle that contains one, which reduces the number of usable cycles
-instead of producing a wrong ratio. The exclusions are read through
+instead of producing a wrong ratio. On a DC-coupled system the AC-sourced charge
+(battery in minus PV yield) and the DC-bus input of the discharge (battery out plus
+PV yield minus battery in) are negative in ordinary hours, so those two aggregations
+take `part: positive`. Left at `net`, every PV-surplus hour would exclude itself in
+all six legs and remove the full-charge cycle it belongs to. The exclusions are read through
 `GET /api/v1/dashboard/excluded-hours` (see [`docs/api.md`](api.md)) and shown
 on the dashboard's **Excluded hours** tab.
 `HomeAssistantLoadImporter` composes this functionality into the logical

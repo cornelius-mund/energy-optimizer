@@ -73,42 +73,59 @@ awattar:
   max_data_age_seconds: 7200
 
 # Optional Home Assistant provider settings. The token should be a long-lived
-# access token and must not be committed to source control. Household-load
-# entities must be energy readings; instantaneous W/kW sensors are rejected.
-# An entity ID may be used by several mappings, for example in more than one
-# calculated efficiency leg or in both household load and grid import. Each
-# distinct entity ID is imported once per orchestration cycle and shared by every
-# mapping that uses it. Its settings, such as maximum_interval_energy_kwh, apply
-# to each mapping separately, so they may differ between mappings.
+# access token and must not be committed to source control. Every energy
+# aggregation (household_load, grid_import, grid_export, and each energy_in and
+# energy_out of the calculated efficiency legs) has the same shape: a list of
+# terms, one per operation. The hourly value is the energy of the entities of
+# the "add" term minus the energy of the entities of the "subtract" term. Energy
+# entities must be cumulative energy readings; instantaneous W/kW sensors are
+# rejected.
+#
+# "part" decides what a negative hourly sum means. With the default "net" it is
+# invalid data and excludes the hour. With "positive" only the positive part of
+# the sum is wanted, so a negative sum is a legitimate zero: the hour is
+# imported as 0 and only counted in the log (clamped_hour_count).
+#
+# An entity ID may be used by several aggregations, for example in more than one
+# calculated efficiency leg or in both household load and grid import, but only
+# once within one aggregation. Each distinct entity ID is imported once per
+# orchestration cycle and shared by every aggregation that uses it. Its
+# settings, such as maximum_interval_energy_kwh, apply to each aggregation
+# separately, so they may differ between aggregations.
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token
-  household_load_entities:
-    - entity_id: sensor.household_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-      # The most energy this entity may report in one hour and in one counter
-      # step (default: 100 kWh). A larger value excludes the hour instead of
-      # importing it.
-      maximum_interval_energy_kwh: 15
-    - entity_id: sensor.ev_energy
-      state_class: total
-      unit: kWh
-      operation: subtract
-      maximum_interval_energy_kwh: 11
-  grid_import_entities:
-    - entity_id: sensor.grid_import_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-  grid_export_entities:
-    - entity_id: sensor.grid_export_energy
-      state_class: total_increasing
-      unit: kWh
-      operation: add
-  # Entity IDs may be reused across household-load and grid-flow categories,
-  # but must not be repeated within one category.
+  household_load:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.household_energy
+            state_class: total_increasing
+            unit: kWh
+            # The most energy this entity may report in one hour and in one
+            # counter step (default: 100 kWh). A larger value excludes the hour
+            # instead of importing it.
+            maximum_interval_energy_kwh: 15
+      - operation: subtract
+        entities:
+          - entity_id: sensor.ev_energy
+            state_class: total
+            unit: kWh
+            maximum_interval_energy_kwh: 11
+  grid_import:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.grid_import_energy
+            state_class: total_increasing
+            unit: kWh
+  grid_export:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.grid_export_energy
+            state_class: total_increasing
+            unit: kWh
   # Long history ranges use contiguous requests of no more than seven days. The
   # orchestration lookback is applied only to the first request.
   # Battery imports read the live state of the mapped Home Assistant entity.
@@ -150,21 +167,52 @@ home_assistant:
     #   minimum_inverter_discharge_throughput_kwh: 10
     #   battery:
     #     energy_in:
-    #       - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}
+    #       terms:
+    #         - operation: add
+    #           entities:
+    #             - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}
     #     energy_out:
-    #       - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}
+    #       terms:
+    #         - operation: add
+    #           entities:
+    #             - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}
+    #   # DC-coupled system: PV reaches the battery directly, so the energy the
+    #   # inverter charged from AC is the battery's charging energy minus the PV
+    #   # yield. In a PV-surplus hour that difference is negative and means no AC
+    #   # charging, so only its positive part is wanted.
     #   inverter_charge:
     #     energy_in:
-    #       - {entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh, operation: add}
+    #       terms:
+    #         - operation: add
+    #           entities:
+    #             - {entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh}
     #     energy_out:
-    #       - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}
-    #       - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}
+    #       part: positive
+    #       terms:
+    #         - operation: add
+    #           entities:
+    #             - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}
+    #         - operation: subtract
+    #           entities:
+    #             - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}
+    #   # The inverter draws the battery discharge and the PV yield from the DC
+    #   # bus; energy the battery took in during the same hour never reached it.
     #   inverter_discharge:
     #     energy_in:
-    #       - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}
-    #       - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}
+    #       part: positive
+    #       terms:
+    #         - operation: add
+    #           entities:
+    #             - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh}
+    #             - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh}
+    #         - operation: subtract
+    #           entities:
+    #             - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh}
     #     energy_out:
-    #       - {entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh, operation: add}
+    #       terms:
+    #         - operation: add
+    #           entities:
+    #             - {entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh}
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.
   max_data_age_seconds: 7200

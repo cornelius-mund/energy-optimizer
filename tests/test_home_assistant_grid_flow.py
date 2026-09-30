@@ -16,6 +16,7 @@ from energy_optimizer.providers.home_assistant_history import (
     HomeAssistantHistoryImporter,
 )
 from home_assistant_fixtures import (
+    aggregate_settings,
     home_assistant_configuration_factory,
     home_assistant_history_payload,
     home_assistant_planning_importer_factory,
@@ -29,23 +30,15 @@ END = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 NOW = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
 
 
+def entity_settings(
+    entity_id: str, state_class: str = "total_increasing", unit: str = "kWh"
+) -> dict[str, str]:
+    return {"entity_id": entity_id, "state_class": state_class, "unit": unit}
+
+
 configuration = home_assistant_configuration_factory(
-    grid_import_entities=[
-        {
-            "entity_id": ENTITY_ID,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "add",
-        }
-    ],
-    grid_export_entities=[
-        {
-            "entity_id": EXPORT_ENTITY_ID,
-            "state_class": "total_increasing",
-            "unit": "kWh",
-            "operation": "add",
-        }
-    ],
+    grid_import=aggregate_settings(add=[entity_settings(ENTITY_ID)]),
+    grid_export=aggregate_settings(add=[entity_settings(EXPORT_ENTITY_ID)]),
 )
 
 
@@ -110,30 +103,9 @@ def test_household_load_and_grid_flow_share_one_import_of_a_reused_entity() -> N
     shared_entity = "sensor.main_grid_total_in"
     export_entity = "sensor.main_grid_total_out"
     shared_configuration = home_assistant_configuration_factory(
-        household_load_entities=[
-            {
-                "entity_id": shared_entity,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        grid_import_entities=[
-            {
-                "entity_id": shared_entity,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        grid_export_entities=[
-            {
-                "entity_id": export_entity,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        household_load=aggregate_settings(add=[entity_settings(shared_entity)]),
+        grid_import=aggregate_settings(add=[entity_settings(shared_entity)]),
+        grid_export=aggregate_settings(add=[entity_settings(export_entity)]),
     )()
     responses = {
         shared_entity: standard_payload(shared_entity),
@@ -195,20 +167,10 @@ def test_fetch_supports_multiple_signed_entities_per_channel() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        grid_import_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": second_import,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
-        ],
+        grid_import=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(second_import)],
+        ),
     )
     try:
         data = import_and_build(provider, client, START, END, now=NOW)
@@ -254,20 +216,10 @@ def test_fetch_excludes_negative_combined_hours_in_both_channels() -> None:
 
     provider, client = importer(
         httpx.MockTransport(handler),
-        grid_import_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "add",
-            },
-            {
-                "entity_id": second_import,
-                "state_class": "total_increasing",
-                "unit": "kWh",
-                "operation": "subtract",
-            },
-        ],
+        grid_import=aggregate_settings(
+            add=[entity_settings(ENTITY_ID)],
+            subtract=[entity_settings(second_import)],
+        ),
     )
     try:
         data = import_and_build(provider, client, START, END, now=NOW)
@@ -349,20 +301,10 @@ def test_an_hour_excluded_in_one_channel_is_excluded_in_both(
     provider, client = importer(
         httpx.MockTransport(handler),
         **{
-            f"grid_{flagged_channel}_entities": [
-                {
-                    "entity_id": flagged_id,
-                    "state_class": "total_increasing",
-                    "unit": "kWh",
-                    "operation": "add",
-                },
-                {
-                    "entity_id": submeter_id,
-                    "state_class": "total_increasing",
-                    "unit": "kWh",
-                    "operation": "subtract",
-                },
-            ]
+            f"grid_{flagged_channel}": aggregate_settings(
+                add=[entity_settings(flagged_id)],
+                subtract=[entity_settings(submeter_id)],
+            )
         },
     )
     try:
@@ -623,22 +565,12 @@ def test_grid_flow_excludes_the_hour_of_a_total_counter_dip_without_last_reset()
                 200, json=responses[request.url.params["filter_entity_id"]]
             )
         ),
-        grid_import_entities=[
-            {
-                "entity_id": ENTITY_ID,
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
-        grid_export_entities=[
-            {
-                "entity_id": EXPORT_ENTITY_ID,
-                "state_class": "total",
-                "unit": "kWh",
-                "operation": "add",
-            }
-        ],
+        grid_import=aggregate_settings(
+            add=[entity_settings(ENTITY_ID, state_class="total")]
+        ),
+        grid_export=aggregate_settings(
+            add=[entity_settings(EXPORT_ENTITY_ID, state_class="total")]
+        ),
     )
     try:
         data = import_and_build(

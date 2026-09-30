@@ -3,13 +3,13 @@
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Protocol, TypeVar
+from typing import Any, Literal, Protocol, TypeVar
 
 import httpx
 
 from energy_optimizer.config import (
+    EnergyAggregateConfiguration,
     HomeAssistantConfiguration,
-    HomeAssistantEnergyEntityConfiguration,
 )
 from energy_optimizer.providers.home_assistant_energy import (
     EnergyAggregate,
@@ -24,6 +24,36 @@ ImporterT = TypeVar("ImporterT")
 DataT = TypeVar("DataT")
 DataT_co = TypeVar("DataT_co", covariant=True)
 ConfigurationFactory = Callable[..., HomeAssistantConfiguration]
+
+
+def aggregate_settings(
+    add: Sequence[Any] = (),
+    subtract: Sequence[Any] = (),
+    part: Literal["net", "positive"] = "net",
+) -> dict[str, Any]:
+    """Build the configuration mapping of one signed energy aggregation.
+
+    ``add`` and ``subtract`` hold entity mappings. A term is only emitted for a
+    non-empty group, so ``aggregate_settings(add=[entity])`` is the plain sum of
+    one entity.
+    """
+    terms = [
+        {"operation": operation, "entities": list(entities)}
+        for operation, entities in (("add", add), ("subtract", subtract))
+        if entities
+    ]
+    return {"part": part, "terms": terms}
+
+
+def aggregate_configuration(
+    add: Sequence[Any] = (),
+    subtract: Sequence[Any] = (),
+    part: Literal["net", "positive"] = "net",
+) -> EnergyAggregateConfiguration:
+    """Validate :func:`aggregate_settings` into the configuration model."""
+    return EnergyAggregateConfiguration.model_validate(
+        aggregate_settings(add, subtract, part)
+    )
 
 
 class HistoryPlanningImporter(Protocol[DataT_co]):
@@ -197,7 +227,7 @@ def import_and_build(
 def import_and_aggregate(
     configuration: HomeAssistantConfiguration,
     client: httpx.Client,
-    entities: list[HomeAssistantEnergyEntityConfiguration] | None,
+    aggregation: EnergyAggregateConfiguration | None,
     start_time: datetime,
     end_time: datetime,
     history_lookback_seconds: float = 0,
@@ -206,7 +236,7 @@ def import_and_aggregate(
 ) -> HomeAssistantEnergySeries:
     """Import exactly what one signed energy expression needs and build it."""
     aggregate = EnergyAggregate(
-        entities,
+        aggregation,
         start_time,
         end_time,
         history_lookback_seconds,

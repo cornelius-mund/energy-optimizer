@@ -53,7 +53,6 @@ def entity(**overrides: object) -> HomeAssistantEnergyEntityConfiguration:
             "entity_id": ENTITY_ID,
             "state_class": "total_increasing",
             "unit": "kWh",
-            "operation": "add",
             **overrides,
         }
     )
