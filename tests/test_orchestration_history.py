@@ -97,7 +97,7 @@ def energy(
 
 # The entity mapping of config.example.yaml: household load and grid import share
 # sensor.grid_import_energy, and the efficiency legs repeat the battery and MPPT
-# counters. Together they make 14 history fetches for 10 distinct entities.
+# counters. Together they make 15 history fetches for 10 distinct entities.
 HOUSEHOLD = [
     energy("sensor.household_energy"),
     energy("sensor.ev_energy", "subtract", "total"),
@@ -120,7 +120,8 @@ EFFICIENCY = {
     "inverter_discharge": {
         "energy_in": [
             energy("sensor.battery_energy_out"),
-            energy("sensor.mppt_energy", "subtract"),
+            energy("sensor.battery_energy_in", "subtract"),
+            energy("sensor.mppt_energy"),
         ],
         "energy_out": [energy("sensor.inverter_to_ac")],
     },
@@ -341,9 +342,10 @@ def test_identical_normalizations_within_a_cycle_are_computed_once(
     finally:
         client.close()
 
-    # The efficiency legs use battery in, battery out, and MPPT twice each, with
-    # identical settings and windows: those are normalized once. The entity that
-    # household load and grid import share has two different windows: twice.
+    # The efficiency legs use battery in three times, battery out and MPPT twice
+    # each, with identical settings and windows: those are normalized once. The
+    # entity that household load and grid import share has two different windows:
+    # twice.
     assert computed == Counter(
         {
             "sensor.household_energy": 1,

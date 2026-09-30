@@ -137,7 +137,7 @@ battery:
       energy_in: [{entity_id: sensor.ac_into_inverter, state_class: total_increasing, unit: kWh, operation: add}]
       energy_out: [{entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}]
     inverter_discharge:
-      energy_in: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}]
+      energy_in: [{entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}, {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: subtract}, {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: add}]
       energy_out: [{entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh, operation: add}]
 ```
 
@@ -196,14 +196,20 @@ energy flow, not an absolute cumulative total. For a DC-coupled installation,
 against the directly consumed PV yield to isolate the AC-sourced share; in any
 hour where PV production exceeds the battery's charging energy, that
 expression's net value is negative because the surplus was exported rather
-than stored. A negative combined value is never clamped and never fails the
-refresh: like every other invalid data point it excludes the hour
-(`combined_negative`), and the hour is excluded in all six energy legs and the
-state of charge. Hours excluded this way are listed on the dashboard's Excluded
-hours tab and through `GET /api/v1/dashboard/excluded-hours`. A full-charge cycle
-that contains an excluded hour is not used for the ratios, so the result rests
-on fewer cycles instead of a wrong value. Model such a leg so that its net value
-is not routinely negative, or accept that those hours are excluded.
+than stored. Likewise `inverter_discharge.energy_in` is the energy the inverter
+draws from the DC bus: PV yield reaches the inverter directly, so it is added to
+the battery's discharge energy, and the energy the battery took in during the same
+hour is subtracted because it never reached the inverter. In any hour where the
+battery takes in more than it discharges plus the PV yield, that expression is
+negative because the inverter was not discharging. A negative combined value is
+never clamped and never fails the refresh: like every other invalid data point it
+excludes the hour (`combined_negative`), and the hour is excluded in all six
+energy legs and the state of charge. Hours excluded this way are listed on the
+dashboard's Excluded hours tab and through
+`GET /api/v1/dashboard/excluded-hours`. A full-charge cycle that contains an
+excluded hour is not used for the ratios, so the result rests on fewer cycles
+instead of a wrong value. Model such a leg so that its net value is not routinely
+negative, or accept that those hours are excluded.
 
 The state-of-charge validation checks physical plausibility, not round-trip
 loss: during an hour with only charging (or only discharging) energy measured,

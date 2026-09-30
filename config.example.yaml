@@ -162,7 +162,8 @@ home_assistant:
     #   inverter_discharge:
     #     energy_in:
     #       - {entity_id: sensor.battery_energy_out, state_class: total_increasing, unit: kWh, operation: add}
-    #       - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: subtract}
+    #       - {entity_id: sensor.battery_energy_in, state_class: total_increasing, unit: kWh, operation: subtract}
+    #       - {entity_id: sensor.mppt_energy, state_class: total_increasing, unit: kWh, operation: add}
     #     energy_out:
     #       - {entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh, operation: add}
   timeout_seconds: 10

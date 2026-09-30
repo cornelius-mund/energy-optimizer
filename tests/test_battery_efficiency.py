@@ -1096,6 +1096,108 @@ def test_importer_excludes_a_negative_combined_hour_instead_of_clamping_it(
     )
 
 
+@pytest.mark.parametrize(
+    ("battery_in", "battery_out", "pv_yield", "expected_discharge_in"),
+    [
+        # The battery discharges and PV reaches the inverter on top of it.
+        (0.0, 0.5, 0.3, 0.8),
+        # The battery keeps part of the PV yield, which never reaches the inverter.
+        (0.2, 0.5, 0.3, 0.6),
+        # With an idle battery only the PV yield reaches the inverter.
+        (0.0, 0.0, 0.4, 0.4),
+    ],
+)
+def test_importer_adds_the_pv_yield_to_the_inverter_discharge_input(
+    battery_in: float,
+    battery_out: float,
+    pv_yield: float,
+    expected_discharge_in: float,
+) -> None:
+    """The inverter draws battery discharge and PV yield from the DC bus.
+
+    The ``inverter_discharge`` input of the example configuration is the battery
+    discharge plus the PV yield minus the energy the battery took in during the
+    same hour. Subtracting the PV yield instead would shrink the input whenever
+    PV produces, and would make an hour of PV alone negative.
+    """
+
+    def leg(name: str) -> dict[str, list[dict[str, object]]]:
+        return {
+            "energy_in": [entity(f"{name}_in")],
+            "energy_out": [entity(f"{name}_out")],
+        }
+
+    configuration = home_assistant_configuration_factory(
+        battery={
+            "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+            "capacity": {"value": 10, "unit": "kWh"},
+            "minimum_soc": {"value": 1, "unit": "kWh"},
+            "maximum_soc": {"value": 10, "unit": "kWh"},
+            "maximum_charge": {"value": 4, "unit": "kW"},
+            "maximum_discharge": {"value": 4, "unit": "kW"},
+            "efficiency_calculation": {
+                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                "battery": leg("battery"),
+                "inverter_charge": leg("charge"),
+                "inverter_discharge": {
+                    "energy_in": [
+                        entity("battery_out"),
+                        entity("battery_in", "subtract"),
+                        entity("pv_yield"),
+                    ],
+                    "energy_out": [entity("discharge_out")],
+                },
+            },
+        }
+    )()
+    end = START + timedelta(hours=1)
+
+    def reading(value: float) -> list[tuple[str, str]]:
+        return [
+            ("2026-01-01T00:00:00+00:00", "0"),
+            ("2026-01-01T01:00:00+00:00", str(value)),
+        ]
+
+    counters = {
+        "sensor.battery_in": battery_in,
+        "sensor.battery_out": battery_out,
+        "sensor.charge_in": 0.2,
+        "sensor.charge_out": 0.1,
+        "sensor.pv_yield": pv_yield,
+        "sensor.discharge_out": 0.1,
+    }
+    responses = {
+        "sensor.soc": home_assistant_history_payload(
+            "sensor.soc",
+            [("2026-01-01T00:00:00+00:00", "50"), ("2026-01-01T01:00:00+00:00", "55")],
+            unit="%",
+            state_class="measurement",
+        ),
+        **{
+            entity_id: home_assistant_history_payload(entity_id, reading(value))
+            for entity_id, value in counters.items()
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json=responses[request.url.params["filter_entity_id"]]
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    importer = HomeAssistantBatteryEfficiencyImporter(configuration)
+    try:
+        data = import_and_build(importer, client, START, end, now=end)
+    finally:
+        client.close()
+
+    assert data.exclusions == ()
+    assert data.inverter_discharge_energy_in_kwh == pytest.approx(
+        (expected_discharge_in,)
+    )
+    assert data.inverter_discharge_energy_out_kwh == pytest.approx((0.1,))
+
+
 def test_merge_extends_persisted_history_with_new_hours() -> None:
     existing = history()
     incoming = history(
