@@ -113,10 +113,11 @@ class HomeAssistantLoadImporter:
         entity_count = len(aggregation.entity_ids) if aggregation is not None else 0
         logger.error(
             "event=provider_fetch_failed component=home_assistant "
-            "operation=fetch error_type=%s entity_count=%s",
+            "operation=fetch error_type=%s entity_count=%s error=%s",
             error.__class__.__name__,
             entity_count,
-            exc_info=True,
+            error,
+            exc_info=(None if isinstance(error, HomeAssistantError) else True),
         )
 
     def is_fresh(
