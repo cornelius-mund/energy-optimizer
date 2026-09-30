@@ -41,7 +41,7 @@ from energy_optimizer.providers.home_assistant_history import (
 )
 from energy_optimizer.providers.interfaces import HouseholdLoadData, SourceMetadata
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
-from home_assistant_fixtures import import_and_build
+from home_assistant_fixtures import home_assistant_history_payload, import_and_build
 
 MINIMAL_CONFIGURATION = """
 time_resolution_minutes: 60
@@ -708,13 +708,11 @@ def test_unavailable_forecast_emits_actionable_warning(
     assert "diagnostics=PV_forecast_data_is_unavailable" in message
 
 
-def test_provider_failure_log_excludes_token_and_raw_state(
-    caplog: LogCaptureFixture,
-) -> None:
-    configuration = HomeAssistantConfiguration.model_validate(
+def household_configuration(token: str) -> HomeAssistantConfiguration:
+    return HomeAssistantConfiguration.model_validate(
         {
             "base_url": "http://homeassistant.test:8123",
-            "token": "secret-provider-token",
+            "token": token,
             "household_load_entities": [
                 {
                     "entity_id": "sensor.household_energy",
@@ -726,27 +724,84 @@ def test_provider_failure_log_excludes_token_and_raw_state(
             "timeout_seconds": 5,
         }
     )
+
+
+def test_invalid_sample_excludes_its_hour_without_logging_token_or_raw_state(
+    caplog: LogCaptureFixture,
+) -> None:
+    raw_state = "raw-state-marker"
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda _: httpx.Response(
                 200,
-                json=[
+                json=home_assistant_history_payload(
+                    "sensor.household_energy",
                     [
-                        {
-                            "state": "unavailable",
-                            "last_changed": "2026-01-01T00:00:00+00:00",
-                        }
-                    ]
-                ],
+                        ("2026-01-01T00:00:00+00:00", "0"),
+                        ("2026-01-01T00:30:00+00:00", raw_state),
+                        ("2026-01-01T01:00:00+00:00", "2"),
+                    ],
+                ),
             )
         )
     )
-    provider = HomeAssistantLoadImporter(configuration)
+    provider = HomeAssistantLoadImporter(household_configuration("secret-token"))
     configure_logging("DEBUG")
 
     try:
         with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
-            with pytest.raises(RuntimeError, match="unavailable"):
+            data = import_and_build(
+                provider,
+                client,
+                datetime(2026, 1, 1, tzinfo=timezone.utc),
+                datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
+                now=datetime(2026, 1, 1, 2, tzinfo=timezone.utc),
+            )
+    finally:
+        client.close()
+
+    # The bad sample no longer fails the fetch: its hour has no value and keeps
+    # the raw state in the persisted cause, not in the log.
+    assert data.load_kw == (None,)
+    (excluded,) = data.exclusions
+    (cause,) = excluded.causes
+    assert cause.reason == "non_numeric"
+    assert [point.state for point in cause.data_points] == [raw_state]
+    assert not [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    counts = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith(
+            ("event=home_assistant_history_import", "event=provider_fetch_succeeded")
+        )
+    ]
+    assert len(counts) == 2
+    assert "invalid_sample_count=1" in counts[0]
+    assert "excluded_hour_count=1" in counts[1]
+    assert "secret-token" not in caplog.text
+    assert raw_state not in caplog.text
+
+
+def test_provider_failure_log_excludes_token_and_response_body(
+    caplog: LogCaptureFixture,
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(
+                503, text="secret-provider-token raw-response-marker"
+            )
+        )
+    )
+    provider = HomeAssistantLoadImporter(
+        household_configuration("secret-provider-token")
+    )
+    configure_logging("DEBUG")
+
+    try:
+        with caplog.at_level(logging.DEBUG, logger="energy_optimizer.providers"):
+            with pytest.raises(RuntimeError, match="HTTP 503"):
                 import_and_build(
                     provider,
                     client,
@@ -757,7 +812,6 @@ def test_provider_failure_log_excludes_token_and_raw_state(
     finally:
         client.close()
 
-    messages = "\n".join(record.getMessage() for record in caplog.records)
     provider_failures = [
         record
         for record in caplog.records
@@ -766,11 +820,11 @@ def test_provider_failure_log_excludes_token_and_raw_state(
     assert len(provider_failures) == 1
     assert provider_failures[0].levelno == logging.ERROR
     assert any(
-        record.levelno == logging.WARNING and "unavailable" in record.getMessage()
+        record.levelno == logging.WARNING and "HTTP 503" in record.getMessage()
         for record in caplog.records
     )
-    assert "secret-provider-token" not in messages
-    assert "unavailable" in messages
+    assert "secret-provider-token" not in caplog.text
+    assert "raw-response-marker" not in caplog.text
 
 
 def test_persistence_log_reports_counts_without_logging_series(

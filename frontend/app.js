@@ -24,6 +24,12 @@
   const efficiencySummary = document.querySelector("#efficiency-summary");
   const efficiencyMetrics = document.querySelector("#efficiency-metrics");
   const chartNote = document.querySelector("#chart-note");
+  const excludedContent = document.querySelector("#excluded-content");
+  const excludedSources = document.querySelector("#excluded-sources");
+  const excludedSummary = document.querySelector("#excluded-summary");
+  const excludedEmpty = document.querySelector("#excluded-empty");
+  const excludedTable = document.querySelector("#excluded-table");
+  const excludedRows = document.querySelector("#excluded-rows");
   let scenario = "actual";
 
   const pad = (value) => String(value).padStart(2, "0");
@@ -394,7 +400,94 @@
     });
   };
 
+  const excludedSourceLabel = (source) => ({
+    household_load: "Household load",
+    grid_flow: "Grid import and export",
+    battery_efficiency: "Battery efficiency",
+  }[source] || source);
+  const excludedNumber = (value) => String(Number(Number(value).toFixed(6)));
+  const excludedPointDetail = (point) => {
+    const parts = [];
+    if (point.previous_timestamp !== null && point.previous_value !== null) {
+      parts.push(`previous ${excludedNumber(point.previous_value)}${point.unit ? ` ${point.unit}` : ""} at ${formatAxisTimestamp(point.previous_timestamp)}`);
+    }
+    if (point.step_kwh !== null) parts.push(`${point.previous_timestamp === null ? "energy" : "step"} ${excludedNumber(point.step_kwh)} kWh`);
+    if (point.maximum_kwh !== null) parts.push(`maximum ${excludedNumber(point.maximum_kwh)} kWh`);
+    return parts.join(", ");
+  };
+  const appendCell = (row, text, className = "") => {
+    const cell = document.createElement("td");
+    if (className) cell.className = className;
+    cell.textContent = text;
+    row.append(cell);
+    return cell;
+  };
+  const renderExcluded = (data) => {
+    excludedSources.replaceChildren();
+    excludedSummary.replaceChildren();
+    excludedRows.replaceChildren();
+    data.sources.forEach((source) => {
+      const item = document.createElement("li");
+      const label = availabilityLabel(source.status);
+      item.textContent = `${excludedSourceLabel(source.source)}: ${label}${source.reason ? ` (${source.reason})` : ""}`;
+      item.dataset.source = source.source;
+      item.dataset.status = source.status;
+      excludedSources.append(item);
+    });
+    data.summary.forEach((entry) => {
+      const item = document.createElement("li");
+      item.textContent = `${excludedSourceLabel(entry.source)} · ${entry.reason}: ${entry.excluded_hour_count} hour${entry.excluded_hour_count === 1 ? "" : "s"}`;
+      item.dataset.source = entry.source;
+      item.dataset.reason = entry.reason;
+      excludedSummary.append(item);
+    });
+    data.hours.forEach((hour) => {
+      hour.causes.forEach((cause) => {
+        const points = cause.data_points.length ? cause.data_points : [null];
+        points.forEach((point, pointIndex) => {
+          const row = document.createElement("tr");
+          row.dataset.source = hour.source;
+          row.dataset.reason = cause.reason;
+          const repeated = pointIndex > 0 ? "repeated" : "";
+          appendCell(row, formatAxisTimestamp(hour.hour_start), repeated);
+          appendCell(row, excludedSourceLabel(hour.source), repeated);
+          appendCell(row, (point && point.entity_id) || cause.entity_id || "-", repeated);
+          const reason = document.createElement("td");
+          if (repeated) reason.className = repeated;
+          const code = document.createElement("code");
+          code.className = "excluded-reason";
+          code.textContent = cause.reason;
+          reason.append(code);
+          if (!repeated) {
+            const message = document.createElement("span");
+            message.className = "excluded-message";
+            message.textContent = cause.data_point_count > cause.data_points.length
+              ? `${cause.message} Showing ${cause.data_points.length} of ${cause.data_point_count} data points.`
+              : cause.message;
+            reason.append(message);
+          }
+          row.append(reason);
+          appendCell(row, point ? formatAxisTimestamp(point.timestamp) : "-");
+          appendCell(row, point && point.state !== null ? point.state : "-");
+          appendCell(row, point ? excludedPointDetail(point) : "");
+          excludedRows.append(row);
+        });
+      });
+    });
+    const available = data.sources.some((source) => source.status === "available");
+    excludedTable.hidden = data.hours.length === 0;
+    excludedEmpty.hidden = data.hours.length !== 0 || !available;
+  };
+
   const renderHeader = (data = {}) => {
+    if (scenario === "excluded") {
+      badge.innerHTML = "<span></span> Excluded hours";
+      rangeEyebrow.textContent = "Time window";
+      rangeHeading.textContent = "Choose a UTC time window";
+      rangeHelp.textContent = "Lists every hour in the window that was left out of the imported history. The end time is exclusive and must be later than the start.";
+      form.hidden = false;
+      return;
+    }
     const forecast = scenario === "forecast";
     const efficiency = scenario === "efficiency";
     const series = selectedSeries(data);
@@ -455,8 +548,40 @@
     });
   };
 
+  const loadExcluded = async (start, end) => {
+    setStatus("Loading excluded hours...");
+    diagnostic("debug", "data_load_started", { scenario, start, end });
+    let requestId = "none";
+    let responseStatus = "none";
+    const params = new URLSearchParams({ start_time: utcTimestamp(start), end_time: utcTimestamp(end) });
+    try {
+      const response = await fetch(`/api/v1/dashboard/excluded-hours?${params}`);
+      requestId = response.headers.get("X-Request-ID") || "none";
+      responseStatus = response.status;
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "The excluded hours could not be loaded.");
+      // A slower response must not show its panel after the user left this tab.
+      if (scenario !== "excluded") return;
+      renderExcluded(data);
+      excludedContent.hidden = false;
+      diagnostic("debug", "data_load_completed", { scenario, hours: data.excluded_hour_count, requestId });
+      const withheld = data.sources.filter((source) => source.status === "invalid").map((source) => excludedSourceLabel(source.source));
+      const count = `${data.excluded_hour_count} excluded hour${data.excluded_hour_count === 1 ? "" : "s"} listed.`;
+      if (withheld.length) setStatus(`${count} Invalid data withheld: ${withheld.join(", ")}.`, "warning");
+      else setStatus(count);
+    } catch (error) {
+      diagnostic("error", "data_load_failed", { scenario, status: responseStatus, message: error instanceof Error ? error.message : String(error), requestId });
+      if (scenario === "excluded") setStatus(error instanceof Error ? error.message : "The excluded hours could not be loaded.", "error");
+    }
+  };
+
   const load = async (start, end, correctionAttempted = false) => {
     content.hidden = true;
+    excludedContent.hidden = true;
+    if (scenario === "excluded") {
+      await loadExcluded(start, end);
+      return;
+    }
     const label = scenario === "forecast"
       ? "forecasts"
       : scenario === "efficiency"
@@ -466,6 +591,7 @@
     diagnostic("debug", "data_load_started", { scenario, start, end });
     let requestId = "none";
     let responseStatus = "none";
+    const requestedScenario = scenario;
     const params = new URLSearchParams({
       start_time: utcTimestamp(start), end_time: utcTimestamp(end), scenario_kind: scenario,
     });
@@ -477,6 +603,8 @@
       if (!response.ok) {
         throw new Error(data.detail || "The dashboard data could not be loaded.");
       }
+      // A slower response must not draw its view after the user left this tab.
+      if (requestedScenario !== scenario) return;
       const alignedRange = alignRangeToCoverage(data, start, end);
       if (alignedRange && !correctionAttempted) {
         startInput.value = alignedRange.start;
@@ -508,13 +636,15 @@
   };
 
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
-      scenario = tab.id === "forecast-tab" ? "forecast" : tab.id === "efficiency-tab" ? "efficiency" : "actual";
+    scenario = { "forecast-tab": "forecast", "efficiency-tab": "efficiency", "excluded-tab": "excluded" }[tab.id] || "actual";
     diagnostic("info", "tab_clicked", { tab: tab.id, scenario });
     document.querySelectorAll(".tab").forEach((item) => {
       const active = item === tab;
       item.classList.toggle("is-active", active); item.setAttribute("aria-selected", String(active));
     });
     renderHeader();
+    content.hidden = true;
+    excludedContent.hidden = true;
     if (!isValidRange(startInput.value, endInput.value)) {
       setStatus("End time must be later than the start time.", "error");
       return;

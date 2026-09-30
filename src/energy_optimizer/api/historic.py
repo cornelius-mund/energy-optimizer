@@ -27,10 +27,7 @@ from energy_optimizer.api.schemas import DashboardSeries, SourceMetadata
 from energy_optimizer.api.series import align_hourly_values
 from energy_optimizer.config import Configuration
 from energy_optimizer.history_merge import grid_flow_points, price_points
-from energy_optimizer.providers.interfaces import (
-    BatteryEfficiencyHistoryData,
-    IntervalQuality,
-)
+from energy_optimizer.providers.interfaces import BatteryEfficiencyHistoryData
 from energy_optimizer.providers.interfaces import (
     SourceMetadata as ProviderSourceMetadata,
 )
@@ -156,14 +153,17 @@ def _series(
     data_type: str,
     unit: str,
     source: ProviderSourceMetadata | SourceMetadata,
-    values: dict[datetime, float],
+    values: dict[datetime, float | None],
     available_start: datetime | None,
     available_end: datetime | None,
     retrieved_at: datetime,
     freshness: Freshness,
-    suspect: bool,
 ) -> DashboardSeries:
-    """Align one asset series to the requested hours, keeping gaps as nulls."""
+    """Align one asset series to the requested hours, keeping gaps as nulls.
+
+    Hours without a value, including excluded hours, become null gaps and are
+    listed in ``missing_intervals``; they are never filled with a number.
+    """
     selected = align_hourly_values(values, context.start, context.end)
     return DashboardSeries(
         id=series_id,
@@ -179,7 +179,7 @@ def _series(
         available_end_time=available_end,
         retrieved_at=retrieved_at,
         freshness=freshness,
-        validation_status="suspect" if suspect else "valid",
+        validation_status="valid",
         missing_intervals=[timestamp for timestamp, value in selected if value is None],
     )
 
@@ -204,17 +204,6 @@ def _result(
             "polling threshold",
         )
     return HistoricAssetResult(asset, "available", tuple(series))
-
-
-def _has_suspect(
-    context: HistoricReadContext,
-    quality: dict[datetime, IntervalQuality],
-) -> bool:
-    return any(
-        item.status == "suspect"
-        for timestamp, item in quality.items()
-        if context.start <= timestamp < context.end
-    )
 
 
 def load_household_load(context: HistoricReadContext) -> HistoricAssetResult:
@@ -248,7 +237,6 @@ def load_household_load(context: HistoricReadContext) -> HistoricAssetResult:
         available_end=actuals.available_end_time,
         retrieved_at=actuals.retrieved_at,
         freshness=actuals.freshness,
-        suspect=actuals.validation_status == "suspect",
     )
     return _result("household_load", "household-load", [series])
 
@@ -289,9 +277,6 @@ def load_grid_flow(context: HistoricReadContext) -> HistoricAssetResult:
     freshness = _polling_freshness(
         data.latest_observation_at, home_assistant.max_data_age_seconds, context.now
     )
-    suspect = _has_suspect(
-        context, {timestamp: point[2] for timestamp, point in points.items()}
-    )
     directions = (
         ("import", {timestamp: point[0] for timestamp, point in points.items()}),
         ("export", {timestamp: point[1] for timestamp, point in points.items()}),
@@ -308,7 +293,6 @@ def load_grid_flow(context: HistoricReadContext) -> HistoricAssetResult:
             available_end=available_end,
             retrieved_at=data.retrieved_at,
             freshness=freshness,
-            suspect=suspect,
         )
         for direction, values in directions
     ]
@@ -366,7 +350,6 @@ def load_electricity_prices(context: HistoricReadContext) -> HistoricAssetResult
             available_end=max(points) + _HOUR if points else None,
             retrieved_at=data.retrieved_at,
             freshness=freshness,
-            suspect=False,
         )
         for index, direction in enumerate(("import", "export"))
     ]
@@ -375,8 +358,12 @@ def load_electricity_prices(context: HistoricReadContext) -> HistoricAssetResult
 
 def _battery_state_points(
     data: BatteryEfficiencyHistoryData,
-) -> tuple[dict[datetime, float], dict[datetime, IntervalQuality]]:
-    """Validate retained state of charge, one boundary sample per hour."""
+) -> dict[datetime, float | None]:
+    """Validate retained state of charge, one boundary sample per hour.
+
+    A boundary without a valid value, such as one next to an excluded hour, is
+    ``None`` and shows as a gap.
+    """
     start = data.start_time
     count = len(data.battery_energy_in_kwh)
     if (
@@ -387,17 +374,17 @@ def _battery_state_points(
         or data.interval_minutes != 60
         or count == 0
         or len(data.state_of_charge_percent) != count + 1
-        or (data.quality and len(data.quality) != count)
     ):
         raise ProviderDataStoreError("battery state history is misaligned")
-    if any(not math.isfinite(value) for value in data.state_of_charge_percent):
+    if any(
+        value is not None and not math.isfinite(value)
+        for value in data.state_of_charge_percent
+    ):
         raise ProviderDataStoreError("battery state history has non-finite values")
-    values = {
-        start + index * _HOUR: float(value)
+    return {
+        start + index * _HOUR: None if value is None else float(value)
         for index, value in enumerate(data.state_of_charge_percent)
     }
-    quality = {start + index * _HOUR: item for index, item in enumerate(data.quality)}
-    return values, quality
 
 
 def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
@@ -427,7 +414,7 @@ def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
     if isinstance(data, HistoricAssetResult):
         return data
     try:
-        values, quality = _battery_state_points(data)
+        values = _battery_state_points(data)
     except ProviderDataStoreError as error:
         return _invalid(
             context,
@@ -457,7 +444,6 @@ def load_battery_state(context: HistoricReadContext) -> HistoricAssetResult:
         available_end=max(values) + _HOUR,
         retrieved_at=data.retrieved_at,
         freshness=freshness,
-        suspect=_has_suspect(context, quality),
     )
     return _result("battery", "battery state", [series])
 

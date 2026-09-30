@@ -5,12 +5,12 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
+from energy_optimizer.exclusions import HourExclusion
 from energy_optimizer.household_load_records import as_utc
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     ElectricityPriceData,
     GridFlowData,
-    IntervalQuality,
 )
 from energy_optimizer.storage_errors import ProviderDataStoreError
 
@@ -29,8 +29,12 @@ def _require_hourly_start(value: datetime, label: str) -> datetime:
 
 def grid_flow_points(
     data: GridFlowData,
-) -> dict[datetime, tuple[float, float, IntervalQuality]]:
-    """Validate and index one normalized hourly grid-flow series."""
+) -> dict[datetime, tuple[float | None, float | None, HourExclusion | None]]:
+    """Validate and index one normalized hourly grid-flow series.
+
+    Import and export are excluded together: an hour has both values or neither,
+    and an hour without values has exactly one exclusion.
+    """
     start = _require_hourly_start(data.start_time, "grid-flow")
     if data.interval_minutes != 60 or data.unit != "kW":
         raise ProviderDataStoreError("grid-flow data must use hourly kW values")
@@ -41,10 +45,24 @@ def grid_flow_points(
             "grid-flow import and export must contain the same non-zero number "
             "of values"
         )
-    if data.quality and len(data.quality) != len(data.import_kw):
-        raise ProviderDataStoreError("grid-flow quality is misaligned")
-    points: dict[datetime, tuple[float, float, IntervalQuality]] = {}
+    exclusions: dict[datetime, HourExclusion] = {}
+    for item in data.exclusions:
+        timestamp = as_utc(item.hour_start)
+        if timestamp in exclusions:
+            raise ProviderDataStoreError(
+                "grid-flow history has two exclusions for one hour"
+            )
+        exclusions[timestamp] = item
+    points: dict[datetime, tuple[float | None, float | None, HourExclusion | None]] = {}
     for index, (imported, exported) in enumerate(zip(data.import_kw, data.export_kw)):
+        timestamp = start + index * _HOUR
+        if imported is None or exported is None:
+            if imported is not None or exported is not None:
+                raise ProviderDataStoreError(
+                    "grid-flow import and export must be excluded together"
+                )
+            points[timestamp] = (None, None, exclusions.get(timestamp))
+            continue
         if not (
             math.isfinite(imported)
             and math.isfinite(exported)
@@ -54,11 +72,11 @@ def grid_flow_points(
             raise ProviderDataStoreError(
                 "grid-flow values must be finite and non-negative"
             )
-        timestamp = start + index * _HOUR
-        points[timestamp] = (
-            float(imported),
-            float(exported),
-            data.quality[index] if data.quality else IntervalQuality(),
+        points[timestamp] = (float(imported), float(exported), None)
+    excluded = {timestamp for timestamp, point in points.items() if point[0] is None}
+    if excluded != set(exclusions):
+        raise ProviderDataStoreError(
+            "grid-flow hours without values must match their exclusions"
         )
     return points
 
@@ -71,6 +89,7 @@ def merge_grid_flow_history(
 
     The retained history must stay contiguous so that consumers can rely on one
     start time and equally spaced values; a gap is rejected instead of hidden.
+    An excluded hour occupies its place without values.
     """
     points = {}
     if existing is not None:
@@ -88,7 +107,6 @@ def merge_grid_flow_history(
         raise ProviderDataStoreError(
             "grid-flow history must contain contiguous hourly timestamps"
         )
-    quality = tuple(point[2] for _, point in ordered)
     previous = [existing] if existing is not None else []
     return GridFlowData(
         schema_version=incoming.schema_version,
@@ -102,7 +120,7 @@ def merge_grid_flow_history(
         latest_observation_at=max(
             as_utc(item.latest_observation_at) for item in [*previous, incoming]
         ),
-        quality=quality if any(item.status == "suspect" for item in quality) else (),
+        exclusions=tuple(point[2] for _, point in ordered if point[2] is not None),
     )
 
 

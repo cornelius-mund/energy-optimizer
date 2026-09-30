@@ -12,10 +12,17 @@ import pytest
 from playwright.sync_api import Page, Request, Route, expect
 from pydantic import TypeAdapter
 
+from energy_optimizer.exclusions import (
+    ExcludedDataPoint,
+    ExclusionCause,
+    HourExclusion,
+)
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
     ElectricityPriceData,
+    GridFlowData,
+    HouseholdLoadData,
     PvGenerationData,
     SourceMetadata,
 )
@@ -740,3 +747,256 @@ def test_stale_actuals_are_shown_with_a_warning(
     )
     expect(page.locator("#status")).to_have_class("status warning")
     expect(page.locator("#power-chart")).to_be_visible()
+
+
+def _excluded_stamp(timestamp: datetime) -> str:
+    """Format a UTC timestamp the way the dashboard tables show it."""
+    return timestamp.strftime("%Y-%m-%d %H:%MZ")
+
+
+def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
+    """Persist history with excluded hours in every source, as an import would."""
+    observation = datetime.now(UTC)
+    store = ProviderDataStore(server.data_directory)
+    unavailable = HourExclusion(
+        start + timedelta(hours=1),
+        (
+            ExclusionCause.of(
+                "unavailable",
+                "sensor.household_energy reported an unknown or unavailable state.",
+                "sensor.household_energy",
+                [
+                    ExcludedDataPoint(
+                        start + timedelta(hours=1, minutes=30), "unavailable", "kWh"
+                    )
+                ],
+            ),
+        ),
+    )
+    decrease = HourExclusion(
+        start + timedelta(hours=3),
+        (
+            ExclusionCause.of(
+                "counter_decrease",
+                "sensor.household_energy decreased.",
+                "sensor.household_energy",
+                [
+                    ExcludedDataPoint(
+                        start + timedelta(hours=3, minutes=10),
+                        "699.5",
+                        "kWh",
+                        previous_timestamp=start + timedelta(hours=2, minutes=50),
+                        previous_value=700.0,
+                        value=699.5,
+                        step_kwh=-0.5,
+                        maximum_kwh=100.0,
+                    )
+                ],
+            ),
+        ),
+    )
+    store.save(
+        ProviderDataKey("household-load", "home-assistant", "household_load"),
+        TypeAdapter(HouseholdLoadData),
+        HouseholdLoadData(
+            schema_version="1",
+            start_time=start,
+            interval_minutes=60,
+            load_kw=(1.2, None, 1.0, None),
+            unit="kW",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="household_load"
+            ),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+            exclusions=(unavailable, decrease),
+        ),
+    )
+    store.save(
+        ProviderDataKey("grid-flow", "home-assistant", "grid_flow"),
+        TypeAdapter(GridFlowData),
+        GridFlowData(
+            schema_version="1",
+            start_time=start,
+            interval_minutes=60,
+            import_kw=(0.8, None, 0.6, 0.5),
+            export_kw=(0.0, None, 0.1, 0.2),
+            unit="kW",
+            source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+            exclusions=(
+                HourExclusion(
+                    start + timedelta(hours=1),
+                    (
+                        ExclusionCause.of(
+                            "not_finite",
+                            "sensor.grid_import reported a NaN or infinite state.",
+                            "sensor.grid_import",
+                            [
+                                ExcludedDataPoint(
+                                    start + timedelta(hours=1, minutes=5), "nan", "kWh"
+                                )
+                            ],
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    intervals: tuple[float | None, ...] = (0.5, None)
+    store.save(
+        ProviderDataKey(
+            "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
+        ),
+        TypeAdapter(BatteryEfficiencyHistoryData),
+        BatteryEfficiencyHistoryData(
+            schema_version="1",
+            start_time=start,
+            interval_minutes=60,
+            battery_energy_in_kwh=intervals,
+            battery_energy_out_kwh=intervals,
+            inverter_charge_energy_in_kwh=intervals,
+            inverter_charge_energy_out_kwh=intervals,
+            inverter_discharge_energy_in_kwh=intervals,
+            inverter_discharge_energy_out_kwh=intervals,
+            state_of_charge_percent=(35.0, None, None),
+            unit="kWh",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="battery_efficiency_history"
+            ),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+            exclusions=(
+                HourExclusion(
+                    start + timedelta(hours=1),
+                    (
+                        ExclusionCause.of(
+                            "soc_out_of_range",
+                            "sensor.battery_soc reported a state of charge outside "
+                            "0 to 100 percent.",
+                            "sensor.battery_soc",
+                            [
+                                ExcludedDataPoint(
+                                    start + timedelta(hours=1, minutes=45), "150", "%"
+                                )
+                            ],
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify excluded hours are listed with their exact data points and reasons."""
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(
+        hours=8
+    )
+    end = start + timedelta(hours=4)
+    _seed_excluded_history(e2e_server, start)
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    page.locator("#excluded-tab").click()
+    _load_range(page, start, end)
+
+    expect(page.locator("#excluded-tab")).to_have_attribute("aria-selected", "true")
+    expect(page.locator("#scenario-badge")).to_contain_text("Excluded hours")
+    expect(page.locator("#excluded-content")).to_be_visible()
+    expect(page.locator("#content")).to_be_hidden()
+    expect(page.locator("#status")).to_have_text("4 excluded hours listed.")
+    expect(page.locator("#excluded-empty")).to_be_hidden()
+
+    expect(page.locator("#excluded-sources li")).to_have_text(
+        [
+            "Household load: Available",
+            "Grid import and export: Available",
+            "Battery efficiency: Available",
+        ]
+    )
+    expect(page.locator("#excluded-summary li")).to_have_text(
+        [
+            "Household load · counter_decrease: 1 hour",
+            "Household load · unavailable: 1 hour",
+            "Grid import and export · not_finite: 1 hour",
+            "Battery efficiency · soc_out_of_range: 1 hour",
+        ]
+    )
+
+    rows = page.locator("#excluded-rows tr")
+    expect(rows).to_have_count(4)
+    hour_1 = _excluded_stamp(start + timedelta(hours=1))
+    unavailable = rows.filter(has=page.locator('code:text-is("unavailable")'))
+    expect(unavailable).to_have_count(1)
+    expect(unavailable.locator("td").nth(0)).to_have_text(hour_1)
+    expect(unavailable.locator("td").nth(1)).to_have_text("Household load")
+    expect(unavailable.locator("td").nth(2)).to_have_text("sensor.household_energy")
+    expect(unavailable.locator("td").nth(3)).to_contain_text(
+        "reported an unknown or unavailable state"
+    )
+    expect(unavailable.locator("td").nth(4)).to_have_text(
+        _excluded_stamp(start + timedelta(hours=1, minutes=30))
+    )
+    expect(unavailable.locator("td").nth(5)).to_have_text("unavailable")
+
+    decrease = rows.filter(has=page.locator('code:text-is("counter_decrease")'))
+    expect(decrease.locator("td").nth(5)).to_have_text("699.5")
+    expect(decrease.locator("td").nth(6)).to_contain_text("previous 700 kWh")
+    expect(decrease.locator("td").nth(6)).to_contain_text("step -0.5 kWh")
+    expect(decrease.locator("td").nth(6)).to_contain_text("maximum 100 kWh")
+
+    grid = rows.filter(has=page.locator('code:text-is("not_finite")'))
+    expect(grid.locator("td").nth(1)).to_have_text("Grid import and export")
+    expect(grid.locator("td").nth(2)).to_have_text("sensor.grid_import")
+    expect(grid.locator("td").nth(5)).to_have_text("nan")
+    battery = rows.filter(has=page.locator('code:text-is("soc_out_of_range")'))
+    expect(battery.locator("td").nth(2)).to_have_text("sensor.battery_soc")
+    expect(battery.locator("td").nth(5)).to_have_text("150")
+
+    # A window without exclusions says so instead of showing an empty table.
+    _load_range(page, start - timedelta(hours=4), start)
+    expect(page.locator("#status")).to_have_text("0 excluded hours listed.")
+    expect(page.locator("#excluded-empty")).to_have_text(
+        "No hours were excluded in this window."
+    )
+    expect(page.locator("#excluded-table")).to_be_hidden()
+
+    # The charts show the same hours as gaps, never as zeros.
+    page.locator("#actuals-tab").click()
+    _load_range(page, start, end)
+    expect(page.locator("#excluded-content")).to_be_hidden()
+    expect(page.locator("#status")).to_have_text(
+        "Partial coverage is available. Missing intervals are shown as gaps."
+    )
+    # Household load has two valid hours; grid import and export three each.
+    expect(page.locator("#power-points circle")).to_have_count(8)
+    for path in page.locator("#power-series-paths path").all():
+        assert (path.get_attribute("d") or "").count("M") == 2
+
+
+def test_excluded_hours_tab_reports_sources_without_history(
+    e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify a source that has no persisted history is named, not hidden."""
+    start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(
+        hours=8
+    )
+
+    page.goto(f"{e2e_server.base_url}/dashboard/")
+    expect(page.locator("#status")).not_to_contain_text("Loading")
+    page.locator("#excluded-tab").click()
+    _load_range(page, start, start + timedelta(hours=4))
+
+    expect(page.locator("#excluded-content")).to_be_visible()
+    expect(page.locator("#excluded-sources li")).to_have_count(3)
+    expect(page.locator("#excluded-sources")).to_contain_text(
+        "Household load: Unavailable "
+        "(no persisted household-load data is available yet)"
+    )
+    expect(page.locator("#excluded-table")).to_be_hidden()
+    # Nothing was checked, so it must not claim that nothing was excluded.
+    expect(page.locator("#excluded-empty")).to_be_hidden()

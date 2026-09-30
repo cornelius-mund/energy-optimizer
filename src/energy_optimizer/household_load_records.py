@@ -10,8 +10,17 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+from energy_optimizer.exclusions import HourExclusion
+from energy_optimizer.legacy_quality import legacy_exclusion
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     HouseholdLoadData,
@@ -21,6 +30,7 @@ from energy_optimizer.providers.interfaces import (
 from energy_optimizer.storage_errors import ProviderDataStoreError
 
 _HOUR = timedelta(hours=1)
+_EXCLUSION_ADAPTER = TypeAdapter(HourExclusion)
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +44,11 @@ class _HouseholdLoadRecordSource(BaseModel):
 
 
 class _HouseholdLoadRecordQuality(BaseModel):
-    """Quality metadata embedded in one persisted household-load record."""
+    """Quality metadata that records of earlier versions embed.
+
+    It is only read: ``HouseholdLoadRecord.decode`` turns a suspect record into an
+    excluded hour, and new records never contain it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -59,12 +73,16 @@ def _normalize_record_timestamp(value: object) -> datetime:
 
 
 class HouseholdLoadRecord(BaseModel):
-    """Validated and serializable representation of one NDJSON record."""
+    """Validated and serializable representation of one NDJSON record.
+
+    An excluded hour has ``load_kw`` null and carries its ``exclusion``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     timestamp: datetime
-    load_kw: float
+    load_kw: float | None
+    exclusion: HourExclusion | None = None
     quality: _HouseholdLoadRecordQuality | None = None
     schema_version: Literal["1"]
     unit: Literal["kW"]
@@ -89,7 +107,9 @@ class HouseholdLoadRecord(BaseModel):
 
     @field_validator("load_kw", mode="before")
     @classmethod
-    def validate_load(cls, value: object) -> float:
+    def validate_load(cls, value: object) -> float | None:
+        if value is None:
+            return None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError("record load is invalid")
         load_value = float(value)
@@ -97,29 +117,51 @@ class HouseholdLoadRecord(BaseModel):
             raise ValueError("record load is invalid")
         return load_value
 
+    @model_validator(mode="after")
+    def validate_exclusion(self) -> HouseholdLoadRecord:
+        """An hour has a value or an explanation for its absence, never both."""
+        legacy_suspect = self.quality is not None and self.quality.status == "suspect"
+        if (self.load_kw is None) != (self.exclusion is not None) and not (
+            legacy_suspect
+        ):
+            raise ValueError("record load and exclusion do not match")
+        if self.exclusion is not None and (
+            _normalize_record_timestamp(self.exclusion.hour_start) != self.timestamp
+        ):
+            raise ValueError("record exclusion belongs to another hour")
+        return self
+
     @classmethod
     def decode(cls, value: object) -> HouseholdLoadRecord:
-        """Validate one decoded JSON value, accepting legacy quality omission."""
+        """Validate one decoded JSON value and convert suspect records of earlier
+        versions into excluded hours."""
         try:
-            return cls.model_validate(value)
+            record = cls.model_validate(value)
         except (TypeError, ValidationError) as error:
             raise ValueError("record does not match the NDJSON contract") from error
+        quality = record.quality
+        if quality is not None and quality.status == "suspect":
+            return record.model_copy(
+                update={
+                    "load_kw": None,
+                    "exclusion": legacy_exclusion(
+                        record.timestamp,
+                        IntervalQuality(
+                            status="suspect",
+                            reason=quality.reason,
+                            entity_id=quality.entity_id,
+                        ),
+                    ),
+                    "quality": None,
+                }
+            )
+        return record.model_copy(update={"quality": None})
 
     def encode(self) -> bytes:
         """Encode this record using the established compact NDJSON format."""
-        quality = self.quality or _HouseholdLoadRecordQuality(
-            status="valid",
-            reason=None,
-            entity_id=None,
-        )
-        payload = {
+        payload: dict[str, object] = {
             "timestamp": self.timestamp.isoformat(),
             "load_kw": self.load_kw,
-            "quality": {
-                "status": quality.status,
-                "reason": quality.reason,
-                "entity_id": quality.entity_id,
-            },
             "schema_version": self.schema_version,
             "unit": self.unit,
             "source": {
@@ -129,22 +171,15 @@ class HouseholdLoadRecord(BaseModel):
             "retrieved_at": self.retrieved_at.isoformat(),
             "latest_observation_at": self.latest_observation_at.isoformat(),
         }
+        if self.exclusion is not None:
+            payload["exclusion"] = _EXCLUSION_ADAPTER.dump_python(
+                self.exclusion, mode="json"
+            )
         return (
             json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode(
                 "utf-8"
             )
             + b"\n"
-        )
-
-    def interval_quality(self) -> IntervalQuality:
-        """Return domain quality metadata, including the valid legacy default."""
-        quality = self.quality
-        if quality is None:
-            return IntervalQuality()
-        return IntervalQuality(
-            status=quality.status,
-            reason=quality.reason,
-            entity_id=quality.entity_id,
         )
 
     def source_metadata(self) -> SourceMetadata:
@@ -168,13 +203,20 @@ def merge_household_load_history(
     existing: HouseholdLoadData,
     incoming: HouseholdLoadData,
 ) -> HouseholdLoadData:
-    """Merge hourly household-load data, preferring the incoming values."""
+    """Merge hourly household-load data, preferring the incoming hours.
+
+    An incoming hour replaces the stored one completely: its value and its
+    exclusion. Excluded hours stay in the series without a value, so the hours
+    remain contiguous.
+    """
     existing_points = household_load_points(existing)
     incoming_points = household_load_points(incoming)
-    existing_quality = household_load_quality_points(existing)
-    incoming_quality = household_load_quality_points(incoming)
     points = existing_points | incoming_points
-    quality_points = existing_quality | incoming_quality
+    exclusions = {
+        timestamp: item
+        for timestamp, item in household_load_exclusion_points(existing).items()
+        if timestamp not in incoming_points
+    } | household_load_exclusion_points(incoming)
     logger.debug(
         "event=persistence_merge component=storage operation=merge "
         "existing_count=%s incoming_count=%s merged_count=%s",
@@ -194,7 +236,6 @@ def merge_household_load_history(
             "household-load history must contain contiguous hourly timestamps"
         )
 
-    ordered_quality = tuple(quality_points[timestamp] for timestamp in timestamps)
     return HouseholdLoadData(
         schema_version=incoming.schema_version,
         start_time=timestamps[0],
@@ -204,10 +245,8 @@ def merge_household_load_history(
         source=incoming.source,
         retrieved_at=as_utc(incoming.retrieved_at),
         latest_observation_at=as_utc(incoming.latest_observation_at),
-        quality=(
-            ordered_quality
-            if any(item.status == "suspect" for item in ordered_quality)
-            else ()
+        exclusions=tuple(
+            exclusions[timestamp] for timestamp in timestamps if timestamp in exclusions
         ),
     )
 
@@ -219,6 +258,7 @@ def slice_household_load(
 ) -> HouseholdLoadData | None:
     """Return hourly observations overlapping a half-open range."""
     points = household_load_points(data)
+    exclusions = household_load_exclusion_points(data)
     selected = [
         (timestamp, value)
         for timestamp, value in sorted(points.items())
@@ -235,8 +275,10 @@ def slice_household_load(
         source=data.source,
         retrieved_at=as_utc(data.retrieved_at),
         latest_observation_at=as_utc(data.latest_observation_at),
-        quality=quality_slice(
-            data.quality, selected[0][0], data.start_time, len(selected)
+        exclusions=tuple(
+            exclusions[timestamp]
+            for timestamp, _ in selected
+            if timestamp in exclusions
         ),
     )
 
@@ -246,6 +288,7 @@ def household_load_records(
 ) -> tuple[HouseholdLoadRecord, ...]:
     """Convert a validated model into self-contained NDJSON records."""
     points = household_load_points(data)
+    exclusions = household_load_exclusion_points(data)
     source = {
         "provider": data.source.provider,
         "entity_id": data.source.entity_id,
@@ -254,19 +297,14 @@ def household_load_records(
         HouseholdLoadRecord(
             timestamp=timestamp,
             load_kw=value,
+            exclusion=exclusions.get(timestamp),
             schema_version=data.schema_version,
             unit=data.unit,
             source=_HouseholdLoadRecordSource.model_validate(source),
             retrieved_at=as_utc(data.retrieved_at),
             latest_observation_at=as_utc(data.latest_observation_at),
-            quality=_HouseholdLoadRecordQuality(
-                status=quality.status,
-                reason=quality.reason,
-                entity_id=quality.entity_id,
-            ),
         )
         for timestamp, value in sorted(points.items())
-        for quality in (quality_at(data.quality, timestamp, data.start_time),)
     )
 
 
@@ -290,6 +328,7 @@ def bounded_household_load(data: HouseholdLoadData) -> HouseholdLoadData:
     timestamps = [timestamp for timestamp, _ in points]
     if len(points) == len(data.load_kw):
         return data
+    exclusions = household_load_exclusion_points(data)
     return HouseholdLoadData(
         schema_version=data.schema_version,
         start_time=timestamps[0],
@@ -299,16 +338,8 @@ def bounded_household_load(data: HouseholdLoadData) -> HouseholdLoadData:
         source=data.source,
         retrieved_at=as_utc(data.retrieved_at),
         latest_observation_at=as_utc(data.latest_observation_at),
-        quality=(
-            tuple(
-                quality_at(data.quality, timestamp, data.start_time)
-                for timestamp, _ in points
-            )
-            if any(
-                quality_at(data.quality, timestamp, data.start_time).status == "suspect"
-                for timestamp, _ in points
-            )
-            else ()
+        exclusions=tuple(
+            exclusions[timestamp] for timestamp in timestamps if timestamp in exclusions
         ),
     )
 
@@ -393,14 +424,15 @@ def parse_household_history(
             "household-load history contains inconsistent source identity"
         )
 
-    points: dict[datetime, float] = {}
+    points: dict[datetime, float | None] = {}
+    exclusions: dict[datetime, HourExclusion] = {}
     for record in records:
         points[record.timestamp] = record.load_kw
+        if record.exclusion is not None:
+            exclusions[record.timestamp] = record.exclusion
+        else:
+            exclusions.pop(record.timestamp, None)
     ordered_points = sorted(points.items())[-HOUSEHOLD_LOAD_MAX_VALUES:]
-    records_by_timestamp = {record.timestamp: record for record in records}
-    ordered_records = [
-        records_by_timestamp[timestamp] for timestamp, _ in ordered_points
-    ]
     timestamps = [timestamp for timestamp, _ in ordered_points]
     if any(
         later - earlier != _HOUR for earlier, later in zip(timestamps, timestamps[1:])
@@ -418,13 +450,8 @@ def parse_household_history(
         source=latest.source_metadata(),
         retrieved_at=latest.retrieved_at,
         latest_observation_at=latest.latest_observation_at,
-        quality=(
-            tuple(record.interval_quality() for record in ordered_records)
-            if any(
-                record.interval_quality().status == "suspect"
-                for record in ordered_records
-            )
-            else ()
+        exclusions=tuple(
+            exclusions[timestamp] for timestamp in timestamps if timestamp in exclusions
         ),
     )
     return HouseholdLoadHistory(
@@ -434,8 +461,12 @@ def parse_household_history(
     )
 
 
-def household_load_points(data: HouseholdLoadData) -> dict[datetime, float]:
-    """Validate and index one normalized hourly household-load series."""
+def household_load_points(data: HouseholdLoadData) -> dict[datetime, float | None]:
+    """Validate and index one normalized hourly household-load series.
+
+    An hour without a value must be explained by exactly one exclusion, and an
+    exclusion must belong to an hour without a value.
+    """
     start_time = as_utc(data.start_time)
     if start_time.minute or start_time.second or start_time.microsecond:
         raise ProviderDataStoreError(
@@ -447,55 +478,34 @@ def household_load_points(data: HouseholdLoadData) -> dict[datetime, float]:
     as_utc(data.latest_observation_at)
     if not data.load_kw:
         raise ProviderDataStoreError("household-load history must not be empty")
-    points: dict[datetime, float] = {}
+    points: dict[datetime, float | None] = {}
     for index, value in enumerate(data.load_kw):
-        if not math.isfinite(value) or value < 0:
+        if value is not None and (not math.isfinite(value) or value < 0):
             raise ProviderDataStoreError(
                 "household-load values must be finite and non-negative"
             )
-        points[start_time + (index * _HOUR)] = float(value)
+        points[start_time + (index * _HOUR)] = None if value is None else float(value)
+    excluded = {timestamp for timestamp, value in points.items() if value is None}
+    if excluded != set(household_load_exclusion_points(data)):
+        raise ProviderDataStoreError(
+            "household-load hours without a value must match their exclusions"
+        )
     return points
 
 
-def household_load_quality_points(
+def household_load_exclusion_points(
     data: HouseholdLoadData,
-) -> dict[datetime, IntervalQuality]:
-    """Index interval quality, treating omitted metadata as valid."""
-    points = household_load_points(data)
-    return {
-        timestamp: quality_at(data.quality, timestamp, data.start_time)
-        for timestamp in points
-    }
-
-
-def quality_at(
-    quality: tuple[IntervalQuality, ...],
-    timestamp: datetime,
-    start_time: datetime,
-) -> IntervalQuality:
-    """Return the quality for one hourly point."""
-    if not quality:
-        return IntervalQuality()
-    index = int((timestamp - as_utc(start_time)).total_seconds() // 3600)
-    if index < 0 or index >= len(quality):
-        raise ProviderDataStoreError("household-load quality is misaligned")
-    return quality[index]
-
-
-def quality_slice(
-    quality: tuple[IntervalQuality, ...],
-    start_time: datetime,
-    data_start: datetime,
-    count: int,
-) -> tuple[IntervalQuality, ...]:
-    """Slice aligned quality metadata while preserving the valid default."""
-    if not quality:
-        return ()
-    offset = int((as_utc(start_time) - as_utc(data_start)).total_seconds() // 3600)
-    selected = quality[offset : offset + count]
-    if len(selected) != count:
-        raise ProviderDataStoreError("household-load quality is misaligned")
-    return tuple(selected)
+) -> dict[datetime, HourExclusion]:
+    """Index the exclusions of one series by their UTC hour."""
+    exclusions: dict[datetime, HourExclusion] = {}
+    for item in data.exclusions:
+        timestamp = as_utc(item.hour_start)
+        if timestamp in exclusions:
+            raise ProviderDataStoreError(
+                "household-load history has two exclusions for one hour"
+            )
+        exclusions[timestamp] = item
+    return exclusions
 
 
 def as_utc(value: datetime) -> datetime:

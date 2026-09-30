@@ -4,7 +4,9 @@ Every due source first plans the Home Assistant history it needs, all plans are
 imported once, and only then does each source build and persist its record.
 """
 
+import logging
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 from pydantic import TypeAdapter
+from pytest import LogCaptureFixture
 
 from energy_optimizer.config import (
     AwattarConfiguration,
@@ -140,11 +143,24 @@ def hourly_states(rate: float, hours: int = 12) -> list[tuple[datetime, str]]:
     ]
 
 
-def example_home_assistant(**overrides: Any) -> FakeHomeAssistant:
+def with_samples(
+    states: Sequence[tuple[datetime, str]], *samples: tuple[datetime, str]
+) -> list[tuple[datetime, str]]:
+    """Replace the state at a sample's time or add it, keeping time order."""
+    return sorted((dict(states) | dict(samples)).items())
+
+
+def example_home_assistant(
+    replaced: Mapping[str, Sequence[tuple[datetime, str]]] | None = None,
+    **overrides: Any,
+) -> FakeHomeAssistant:
+    """Serve every counter of the example; ``replaced`` overrides single samples."""
     states = {entity: hourly_states(rate) for entity, rate in RATES.items()}
     states[SOC] = [
         (BASE + timedelta(hours=hour), str(40 + 10 * (hour % 5))) for hour in range(13)
     ]
+    for entity, samples in (replaced or {}).items():
+        states[entity] = with_samples(states[entity], *samples)
     return FakeHomeAssistant(
         states,
         units={SOC: "%"},
@@ -295,7 +311,9 @@ def test_a_bootstrap_and_an_incremental_cycle_request_each_entity_once(
     assert history.inverter_charge_energy_in_kwh == pytest.approx((3.0,) * 9)
     assert history.inverter_charge_energy_out_kwh == pytest.approx((1.0,) * 9)
     assert history.inverter_discharge_energy_in_kwh == pytest.approx((1.0,) * 9)
-    assert not any(item.status == "suspect" for item in load.quality)
+    assert load.exclusions == ()
+    assert grid.exclusions == ()
+    assert history.exclusions == ()
 
 
 def test_identical_normalizations_within_a_cycle_are_computed_once(
@@ -378,17 +396,247 @@ def test_a_shared_entity_is_fetched_once_and_normalized_with_each_aggregates_lim
     # One request sequence serves both aggregates.
     end = BASE + 4 * ONE_HOUR
     assert home_assistant.requested_ranges(shared) == chunks(end - RETENTION, end)
-    # The household limit of 10 kWh rejects the jump; the grid limit of 500 kWh
-    # accepts it.
-    assert statuses(cycle) == {"household_load": "suspect", "grid_flow": "success"}
+    # The household limit of 10 kWh excludes the hour of the jump; the grid limit
+    # of 500 kWh accepts it.
+    assert statuses(cycle) == {"household_load": "success", "grid_flow": "success"}
     load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
     grid = store.load(GRID_KEY, GRID_ADAPTER)
     assert load is not None
     assert grid is not None
-    assert load.load_kw == pytest.approx((1.0, 1.0, 0.0, 1.0))
-    assert load.quality[2].reason == "physical_limit_exceeded"
-    assert grid.import_kw == pytest.approx((1.0, 1.0, 150.0, 1.0))
-    assert all(item.status == "valid" for item in grid.quality)
+    assert load.load_kw == (1.0, 1.0, None, 1.0)
+    (excluded,) = load.exclusions
+    assert excluded.hour_start == BASE + 2 * ONE_HOUR
+    (cause,) = excluded.causes
+    assert cause.reason == "step_above_maximum"
+    assert cause.entity_id == shared
+    (point,) = cause.data_points
+    assert point.previous_timestamp == BASE + 2 * ONE_HOUR
+    assert point.timestamp == BASE + 3 * ONE_HOUR
+    assert (point.previous_value, point.value) == (2.0, 152.0)
+    assert (point.step_kwh, point.maximum_kwh) == (150.0, 10.0)
+    assert grid.import_kw == (1.0, 1.0, 150.0, 1.0)
+    assert grid.exclusions == ()
+
+
+HOUSEHOLD_ONLY = {
+    "household_load": DataSourceScheduleConfiguration(interval_seconds=3600)
+}
+
+
+def household_configuration(tmp_path: Path, entity_id: str) -> Configuration:
+    return runtime_configuration(
+        tmp_path,
+        household=[energy(entity_id)],
+        efficiency=None,
+        schedules=HOUSEHOLD_ONLY,
+    )
+
+
+@pytest.mark.parametrize(
+    ("state", "reason"),
+    [
+        ("unavailable", "unavailable"),
+        ("unknown", "unavailable"),
+        ("nan", "not_finite"),
+        ("inf", "not_finite"),
+        ("not-a-number", "non_numeric"),
+        ("-5", "negative_value"),
+    ],
+)
+def test_a_permanently_bad_sample_never_blocks_a_later_refresh(
+    tmp_path: Path, state: str, reason: str
+) -> None:
+    """A bad sample excludes its own hour and never stops the history advancing.
+
+    Before excluded hours, a bad sample made the whole fetch raise. Nothing was
+    persisted, so the persisted end never moved past the sample and every later
+    refresh requested the same range and failed the same way, for as long as
+    Home Assistant kept the sample.
+    """
+    entity = "sensor.household_energy"
+    bad_at = BASE + 3 * ONE_HOUR + timedelta(minutes=30)
+    home_assistant = FakeHomeAssistant(
+        {entity: with_samples(hourly_states(3), (bad_at, state))}
+    )
+    store = ProviderDataStore(tmp_path)
+    client = home_assistant.client()
+    orchestrator = build_configured_orchestrator(
+        household_configuration(tmp_path, entity), store, home_assistant_client=client
+    )
+    assert orchestrator is not None
+
+    try:
+        first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
+        after_first = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+        home_assistant.requests.clear()
+        second = orchestrator.run_due(BASE + 9 * ONE_HOUR + timedelta(minutes=30))
+        after_second = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    finally:
+        client.close()
+
+    # Hour 3 covers (03:00, 04:00], which holds the bad sample. Every other hour
+    # of the first import is valid, and 3 kWh per hour is 3 kW.
+    assert statuses(first) == {"household_load": "success"}
+    assert after_first is not None
+    assert after_first.start_time == BASE
+    assert after_first.load_kw == (3.0, 3.0, 3.0, None, 3.0, 3.0)
+    (excluded,) = after_first.exclusions
+    assert excluded.hour_start == BASE + 3 * ONE_HOUR
+    (cause,) = excluded.causes
+    assert cause.reason == reason
+    assert cause.entity_id == entity
+    (point,) = cause.data_points
+    assert (point.timestamp, point.state) == (bad_at, state)
+
+    # The second refresh runs from the persisted end and never asks for the
+    # bad sample again.
+    assert statuses(second) == {"household_load": "success"}
+    assert home_assistant.requested_ranges(entity) == [
+        (BASE + 6 * ONE_HOUR, BASE + 9 * ONE_HOUR)
+    ]
+    assert after_second is not None
+    assert len(after_second.load_kw) == 9 > len(after_first.load_kw)
+    assert after_second.load_kw == (3.0, 3.0, 3.0, None) + (3.0,) * 5
+    assert after_second.exclusions == after_first.exclusions
+
+
+def test_an_entity_that_stays_unavailable_excludes_hours_across_refreshes(
+    tmp_path: Path,
+) -> None:
+    """An outage that outlasts a refresh excludes hours on both sides of it."""
+    entity = "sensor.household_energy"
+    # Home Assistant records only changes: the entity goes unavailable at 05:30
+    # and reports nothing until it returns at 08:00.
+    home_assistant = FakeHomeAssistant(
+        {
+            entity: with_samples(
+                [
+                    (timestamp, state)
+                    for timestamp, state in hourly_states(3)
+                    if not BASE + 5 * ONE_HOUR < timestamp < BASE + 8 * ONE_HOUR
+                ],
+                (BASE + 5 * ONE_HOUR + timedelta(minutes=30), "unavailable"),
+            )
+        }
+    )
+    store = ProviderDataStore(tmp_path)
+    client = home_assistant.client()
+    orchestrator = build_configured_orchestrator(
+        household_configuration(tmp_path, entity), store, home_assistant_client=client
+    )
+    assert orchestrator is not None
+
+    try:
+        first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
+        after_first = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+        second = orchestrator.run_due(BASE + 9 * ONE_HOUR + timedelta(minutes=30))
+        after_second = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    finally:
+        client.close()
+
+    assert statuses(first) == statuses(second) == {"household_load": "success"}
+    # The outage covers hours 5 and 6 and ends with the return in hour 7, whose
+    # step is unknown, so all three have no value. Hour 8 is the first valid one.
+    assert after_first is not None
+    assert after_first.load_kw == (3.0, 3.0, 3.0, 3.0, 3.0, None)
+    assert after_second is not None
+    assert after_second.load_kw == (3.0,) * 5 + (None,) * 3 + (3.0,)
+    assert [item.hour_start for item in after_second.exclusions] == [
+        BASE + hour * ONE_HOUR for hour in (5, 6, 7)
+    ]
+    # The second refresh sees the outage only as the state that Home Assistant
+    # reports as in force at the start of the requested period.
+    outage = after_second.exclusions[1].causes[0]
+    assert outage.reason == "unavailable"
+    assert [(point.timestamp, point.state) for point in outage.data_points] == [
+        (BASE + 6 * ONE_HOUR, "unavailable")
+    ]
+
+
+def test_each_source_logs_its_excluded_hours_once_per_refresh(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    home_assistant = example_home_assistant(
+        replaced={
+            # Household load and grid flow both read the grid import counter.
+            "sensor.grid_import_energy": [
+                (BASE + 2 * ONE_HOUR + timedelta(minutes=30), "unavailable"),
+                (BASE + 3 * ONE_HOUR, "unavailable"),
+            ],
+            # Only the efficiency source reads the battery counters.
+            "sensor.battery_energy_in": [
+                (BASE + 4 * ONE_HOUR + timedelta(minutes=30), "nan")
+            ],
+        }
+    )
+    store = ProviderDataStore(tmp_path)
+    client = home_assistant.client()
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration(tmp_path), store, home_assistant_client=client
+    )
+    assert orchestrator is not None
+
+    def summaries() -> list[str]:
+        return [
+            record.getMessage()
+            for record in caplog.records
+            if "provider_hours_excluded" in record.getMessage()
+        ]
+
+    try:
+        with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
+            first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
+            first_summaries = summaries()
+            caplog.clear()
+            second = orchestrator.run_due(
+                BASE + 9 * ONE_HOUR + timedelta(minutes=30), force=True
+            )
+            second_summaries = summaries()
+    finally:
+        client.close()
+
+    success = {
+        "household_load": "success",
+        "grid_flow": "success",
+        "battery_efficiency": "success",
+    }
+    assert statuses(first) == statuses(second) == success
+    # One warning per source, with the counts of the hours it just imported.
+    prefix = "event=provider_hours_excluded component=orchestration operation=refresh"
+    assert first_summaries == [
+        f"{prefix} source=household_load excluded_hour_count=2 reasons=unavailable:2 "
+        "first_hour=2026-01-01T02:00:00+00:00 last_hour=2026-01-01T03:00:00+00:00",
+        f"{prefix} source=grid_flow excluded_hour_count=2 reasons=unavailable:2 "
+        "first_hour=2026-01-01T02:00:00+00:00 last_hour=2026-01-01T03:00:00+00:00",
+        f"{prefix} source=battery_efficiency excluded_hour_count=1 "
+        "reasons=not_finite:1 first_hour=2026-01-01T04:00:00+00:00 "
+        "last_hour=2026-01-01T04:00:00+00:00",
+    ]
+    # The persisted excluded hours are not reported again by a clean refresh.
+    assert second_summaries == []
+
+    load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    grid = store.load(GRID_KEY, GRID_ADAPTER)
+    history = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
+    assert load is not None
+    assert grid is not None
+    assert history is not None
+    assert load.load_kw == (4.0, 4.0, None, None) + (4.0,) * 5
+    # Grid flow excludes an hour for both channels, though only the import
+    # counter was bad.
+    assert grid.import_kw == (2.0, 2.0, None, None) + (2.0,) * 5
+    assert grid.export_kw == (1.0, 1.0, None, None) + (1.0,) * 5
+    # Every leg of the efficiency history loses the hour that one counter lost.
+    for values in (
+        history.battery_energy_in_kwh,
+        history.battery_energy_out_kwh,
+        history.inverter_charge_energy_in_kwh,
+        history.inverter_charge_energy_out_kwh,
+        history.inverter_discharge_energy_in_kwh,
+        history.inverter_discharge_energy_out_kwh,
+    ):
+        assert len(values) == 9
+        assert [index for index, value in enumerate(values) if value is None] == [4]
 
 
 class RecordingHistoryImporter(HomeAssistantHistoryImporter):

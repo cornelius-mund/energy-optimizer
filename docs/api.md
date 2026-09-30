@@ -196,16 +196,14 @@ energy flow, not an absolute cumulative total. For a DC-coupled installation,
 against the directly consumed PV yield to isolate the AC-sourced share; in any
 hour where PV production exceeds the battery's charging energy, that
 expression's net value is negative because the surplus was exported rather
-than stored. This is an ordinary condition, not invalid data: a negative net
-value for one of these three legs (`battery`, `inverter_charge`,
-`inverter_discharge`) is clamped to zero for that hour instead of failing the
-provider refresh. Household load and grid flow are unaffected by this and
-continue to reject a negative combined value, since those totals are not
-directional net expressions. The only exception is an hour that a contributing
-entity has already flagged `suspect` (for example after a counter reset): that
-hour is clamped to zero, keeps its `suspect` quality in the persisted record and
-the historic API responses, and no longer fails the refresh. The failure
-message names a rejected hour by its UTC timestamp.
+than stored. A negative combined value is never clamped and never fails the
+refresh: like every other invalid data point it excludes the hour
+(`combined_negative`), and the hour is excluded in all six energy legs and the
+state of charge. Hours excluded this way are listed on the dashboard's Excluded
+hours tab and through `GET /api/v1/dashboard/excluded-hours`. A full-charge cycle
+that contains an excluded hour is not used for the ratios, so the result rests
+on fewer cycles instead of a wrong value. Model such a leg so that its net value
+is not routinely negative, or accept that those hours are excluded.
 
 The state-of-charge validation checks physical plausibility, not round-trip
 loss: during an hour with only charging (or only discharging) energy measured,
@@ -255,7 +253,9 @@ Example:
 }
 ```
 
-The response echoes the normalized data with `status: "validated"`. Missing
+The response echoes the normalized data with `status: "validated"`. In a
+response, `load_kw` holds `null` for an hour that the Home Assistant import
+excluded; a submission never contains `null`. Missing
 fields, unknown fields, unsupported versions or units, naive timestamps,
 invalid values, and series longer than ten years (87,672 hourly values) return
 HTTP 422 with field-level validation details. Historical data is not rejected
@@ -309,9 +309,9 @@ Every series identifies its `source`, requested and `available_*` coverage,
   `battery_efficiency` source interval for battery state) and `unknown`
   otherwise. Stale data is still valid historical data: only the newest
   observation is older than the polling threshold.
-- `validation_status` is `suspect` when an hour inside the requested range was
-  flagged by a contributing entity, for example after a counter reset, and
-  `valid` otherwise.
+- `validation_status` is `valid` for every historic series. An hour that was
+  excluded from the import (see "Excluded hours" below) has no value: it is
+  `null` and listed in `missing_intervals`, so the top-level status is `partial`.
 - Prices are those that applied during completed hours. Hours that have not yet
   elapsed are forecasts and are only available through `scenario_kind=forecast`.
   The price history is a separate record from the replace-latest forecast run, so
@@ -457,6 +457,107 @@ failures at `error`. The service logs dashboard requests at `INFO` with the
 validated `scenario_kind` and request ID. Forecast responses with unavailable
 data also emit a `WARNING` diagnostic; the request ID links that diagnostic to
 the request log without recording query payloads or provider credentials.
+
+## Excluded hours
+
+An hour of Home Assistant history is imported only if every data point that
+contributes to it is valid. Every other hour has no value (`null`) and is
+recorded with each cause. The dashboard's **Excluded hours** tab and this endpoint
+list them:
+
+```text
+GET /api/v1/dashboard/excluded-hours?start_time=<inclusive>&end_time=<exclusive>
+```
+
+The range follows the rules of the dashboard data endpoint: timezone-aware, aligned
+to the hour, `end_time` later than `start_time`, at most 87,672 hours; violations
+return HTTP 422. The response lists the sources that were checked, a summary by
+source and reason, and every excluded hour in ascending order:
+
+```json
+{
+  "schema_version": "1",
+  "requested_start_time": "2026-01-01T00:00:00Z",
+  "requested_end_time": "2026-01-01T06:00:00Z",
+  "excluded_hour_count": 1,
+  "sources": [
+    {"source": "household_load", "status": "available", "reason": null, "excluded_hour_count": 1},
+    {"source": "grid_flow", "status": "not_configured",
+     "reason": "no Home Assistant grid import and export entities are configured",
+     "excluded_hour_count": 0},
+    {"source": "battery_efficiency", "status": "unavailable",
+     "reason": "no persisted battery efficiency history is available yet",
+     "excluded_hour_count": 0}
+  ],
+  "summary": [
+    {"source": "household_load", "reason": "counter_decrease", "excluded_hour_count": 1}
+  ],
+  "hours": [
+    {
+      "hour_start": "2026-01-01T03:00:00Z",
+      "source": "household_load",
+      "causes": [
+        {
+          "reason": "counter_decrease",
+          "message": "sensor.household_energy decreased from 700 kWh at 2026-01-01T02:59:50+00:00 to 0 kWh at 2026-01-01T03:00:10+00:00.",
+          "entity_id": "sensor.household_energy",
+          "data_point_count": 1,
+          "data_points": [
+            {
+              "timestamp": "2026-01-01T03:00:10Z",
+              "state": "0",
+              "unit": "kWh",
+              "entity_id": null,
+              "previous_timestamp": "2026-01-01T02:59:50Z",
+              "previous_value": 700.0,
+              "value": 0.0,
+              "step_kwh": -700.0,
+              "maximum_kwh": 100.0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+- `source` is `household_load`, `grid_flow`, or `battery_efficiency`. Grid import and
+  export are excluded together, and an hour excluded in any battery-efficiency leg
+  or in the state of charge is excluded in all of them.
+- A source `status` is `available` when its persisted history was read,
+  `not_configured` when the installation has no such source, `unavailable` when no
+  history has been persisted yet, and `invalid` when persisted data is corrupt and
+  withheld. One source never hides the others.
+- Every cause has a `reason` from the closed set below, a human-readable
+  `message`, the `entity_id`, and its `data_points`. A data point carries the time
+  Home Assistant recorded it, the raw `state` exactly as reported, and, for a
+  counter step, the previous and current observation (`previous_timestamp`,
+  `previous_value`, `value`, in the entity's unit), `step_kwh`, and `maximum_kwh`.
+  For a combined hour, each data point names one component `entity_id` and its
+  signed `step_kwh`. At most 50 data points are kept per entity and hour;
+  `data_point_count` is the number before that bound.
+- `summary` counts excluded hours per source and reason; an hour counts once per
+  distinct reason.
+
+| Reason | Meaning |
+| --- | --- |
+| `unavailable`, `non_numeric`, `not_finite`, `negative_value`, `invalid_attribute` | The state, or an attribute needed to read it, is not usable |
+| `unit_mismatch`, `unit_missing`, `state_class_mismatch` | A sample reports another unit, no unit, or another `state_class` than configured |
+| `counter_decrease` | A counter decreased, however little |
+| `step_after_decrease` | The step directly after a decrease cannot be told apart from a glitch |
+| `last_reset_changed` | The `last_reset` marker changed |
+| `step_above_maximum`, `hour_above_maximum` | A step, or the sum of one hour, exceeds `maximum_interval_energy_kwh` |
+| `soc_out_of_range` | A state of charge is outside 0 to 100 percent |
+| `combined_negative`, `combined_not_finite` | The signed operations of an hour give a negative or non-finite value |
+| `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` |
+
+The Excluded hours tab loads this endpoint for the chosen UTC window. It shows the
+checked sources with their status, a summary by source and reason, and a table with
+one row per data point: the hour, source, entity, reason with its message, the data
+point's time and reported value, and its detail (previous value, step, and maximum).
+A window without exclusions shows "No hours were excluded in this window."; a
+window whose sources have no history does not claim that nothing was excluded.
 
 ## PV-generation API
 

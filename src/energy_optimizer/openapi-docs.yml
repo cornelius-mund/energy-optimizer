@@ -233,6 +233,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/dashboard/excluded-hours:
+    get:
+      summary: Excluded Hours
+      description: 'List every hour excluded from imported history in a UTC range.
+
+
+        An hour of Home Assistant history is imported only if every data point that
+
+        contributes to it is valid. Every other hour has no value and is listed here
+
+        with each cause: the entity, a reason code, a message, and the exact data
+
+        points. A source that is not configured, has no persisted history yet, or
+        is
+
+        corrupt is reported in `sources` and never hides the other sources.'
+      operationId: excluded_hours_api_v1_dashboard_excluded_hours_get
+      parameters:
+      - name: start_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          description: Inclusive timezone-aware range start
+          title: Start Time
+        description: Inclusive timezone-aware range start
+      - name: end_time
+        in: query
+        required: true
+        schema:
+          type: string
+          format: date-time
+          description: Exclusive timezone-aware range end
+          title: End Time
+        description: Exclusive timezone-aware range end
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExcludedHoursResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/pv-generation:
     post:
       summary: Pv Generation
@@ -896,6 +945,288 @@ components:
       - expires_at
       title: ElectricityPriceResponse
       description: Response returned after electricity-price data passes validation.
+    ExcludedDataPoint:
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          title: Timestamp
+          description: When Home Assistant recorded the data point, or the hour start
+        state:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: State
+          description: The raw state exactly as Home Assistant reported it
+        unit:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Unit
+        entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+          description: Set when the data point belongs to another entity than its
+            cause
+        previous_timestamp:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Previous Timestamp
+          description: For a counter step, when the previous observation was recorded
+        previous_value:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Previous Value
+          description: For a counter step, the previous counter value in the entity
+            unit
+        value:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Value
+          description: For a counter step, the counter value in the entity unit
+        step_kwh:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Step Kwh
+          description: Energy of the counter step or hour in kWh; signed for components
+        maximum_kwh:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Maximum Kwh
+          description: The configured maximum energy that applies, in kWh
+      additionalProperties: false
+      type: object
+      required:
+      - timestamp
+      - state
+      - unit
+      - entity_id
+      - previous_timestamp
+      - previous_value
+      - value
+      - step_kwh
+      - maximum_kwh
+      title: ExcludedDataPoint
+      description: One observation that contributed to an exclusion.
+    ExcludedHour:
+      properties:
+        hour_start:
+          type: string
+          format: date-time
+          title: Hour Start
+          description: UTC start of the excluded hour
+        source:
+          type: string
+          enum:
+          - household_load
+          - grid_flow
+          - battery_efficiency
+          title: Source
+        causes:
+          items:
+            $ref: '#/components/schemas/ExclusionCause'
+          type: array
+          minItems: 1
+          title: Causes
+      additionalProperties: false
+      type: object
+      required:
+      - hour_start
+      - source
+      - causes
+      title: ExcludedHour
+      description: One excluded hour of one source.
+    ExcludedHoursResponse:
+      properties:
+        schema_version:
+          type: string
+          const: '1'
+          title: Schema Version
+        requested_start_time:
+          type: string
+          format: date-time
+          title: Requested Start Time
+          description: Inclusive range start
+        requested_end_time:
+          type: string
+          format: date-time
+          title: Requested End Time
+          description: Exclusive range end
+        excluded_hour_count:
+          type: integer
+          minimum: 0.0
+          title: Excluded Hour Count
+          description: Excluded hours summed over all sources
+        sources:
+          items:
+            $ref: '#/components/schemas/ExcludedHoursSource'
+          type: array
+          title: Sources
+        summary:
+          items:
+            $ref: '#/components/schemas/ExcludedHoursSummary'
+          type: array
+          title: Summary
+        hours:
+          items:
+            $ref: '#/components/schemas/ExcludedHour'
+          type: array
+          title: Hours
+          description: Excluded hours in ascending order of the hour
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - requested_start_time
+      - requested_end_time
+      - excluded_hour_count
+      - sources
+      - summary
+      - hours
+      title: ExcludedHoursResponse
+      description: Every hour that was excluded from imported history in a requested
+        range.
+    ExcludedHoursSource:
+      properties:
+        source:
+          type: string
+          enum:
+          - household_load
+          - grid_flow
+          - battery_efficiency
+          title: Source
+        status:
+          type: string
+          enum:
+          - available
+          - not_configured
+          - unavailable
+          - invalid
+          title: Status
+          description: 'available: persisted history was read; not_configured: the
+            installation has no source; unavailable: no persisted history yet; invalid:
+            persisted data is corrupt and withheld'
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+        excluded_hour_count:
+          type: integer
+          minimum: 0.0
+          title: Excluded Hour Count
+      additionalProperties: false
+      type: object
+      required:
+      - source
+      - status
+      - excluded_hour_count
+      title: ExcludedHoursSource
+      description: Whether one source could be read, and how many hours it excluded.
+    ExcludedHoursSummary:
+      properties:
+        source:
+          type: string
+          enum:
+          - household_load
+          - grid_flow
+          - battery_efficiency
+          title: Source
+        reason:
+          type: string
+          enum:
+          - unavailable
+          - non_numeric
+          - not_finite
+          - negative_value
+          - invalid_attribute
+          - counter_decrease
+          - step_after_decrease
+          - step_above_maximum
+          - hour_above_maximum
+          - last_reset_changed
+          - unit_mismatch
+          - unit_missing
+          - state_class_mismatch
+          - soc_out_of_range
+          - combined_negative
+          - combined_not_finite
+          - flagged_by_earlier_version
+          title: Reason
+        excluded_hour_count:
+          type: integer
+          minimum: 1.0
+          title: Excluded Hour Count
+          description: Hours with this reason; an hour counts once per reason
+      additionalProperties: false
+      type: object
+      required:
+      - source
+      - reason
+      - excluded_hour_count
+      title: ExcludedHoursSummary
+      description: The number of excluded hours of one source for one reason.
+    ExclusionCause:
+      properties:
+        reason:
+          type: string
+          enum:
+          - unavailable
+          - non_numeric
+          - not_finite
+          - negative_value
+          - invalid_attribute
+          - counter_decrease
+          - step_after_decrease
+          - step_above_maximum
+          - hour_above_maximum
+          - last_reset_changed
+          - unit_mismatch
+          - unit_missing
+          - state_class_mismatch
+          - soc_out_of_range
+          - combined_negative
+          - combined_not_finite
+          - flagged_by_earlier_version
+          title: Reason
+        message:
+          type: string
+          title: Message
+          description: Human-readable explanation of the exclusion
+        entity_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+        data_points:
+          items:
+            $ref: '#/components/schemas/ExcludedDataPoint'
+          type: array
+          title: Data Points
+          description: The offending data points, bounded per entity and hour
+        data_point_count:
+          type: integer
+          minimum: 0.0
+          title: Data Point Count
+          description: The number of offending data points, before any bound
+      additionalProperties: false
+      type: object
+      required:
+      - reason
+      - message
+      - entity_id
+      - data_points
+      - data_point_count
+      title: ExclusionCause
+      description: One reason an hour is excluded, with the data points behind it.
     GridFlowRequest:
       properties:
         schema_version:
@@ -986,16 +1317,20 @@ components:
           title: Interval Minutes
         import_kw:
           items:
-            type: number
-            maximum: 1000.0
-            minimum: 0.0
+            anyOf:
+            - type: number
+              maximum: 1000.0
+              minimum: 0.0
+            - type: 'null'
           type: array
           title: Import Kw
         export_kw:
           items:
-            type: number
-            maximum: 1000.0
-            minimum: 0.0
+            anyOf:
+            - type: number
+              maximum: 1000.0
+              minimum: 0.0
+            - type: 'null'
           type: array
           title: Export Kw
         unit:
@@ -1044,7 +1379,6 @@ components:
           enum:
           - validated
           - stale
-          - suspect
           - empty
           title: Status
         data_type:
@@ -1077,14 +1411,12 @@ components:
           title: Timestamps
         load_kw:
           items:
-            type: number
+            anyOf:
+            - type: number
+            - type: 'null'
           type: array
           title: Load Kw
-        quality:
-          items:
-            $ref: '#/components/schemas/HouseholdLoadQuality'
-          type: array
-          title: Quality
+          description: Household load in kW per interval; null for an excluded hour
         unit:
           type: string
           const: kW
@@ -1119,12 +1451,6 @@ components:
           type: string
           format: date-time
           title: Latest Observation At
-        validation_status:
-          type: string
-          enum:
-          - valid
-          - suspect
-          title: Validation Status
         freshness:
           type: string
           enum:
@@ -1147,7 +1473,6 @@ components:
       - interval_minutes
       - timestamps
       - load_kw
-      - quality
       - unit
       - source
       - coverage_start_time
@@ -1156,7 +1481,6 @@ components:
       - available_end_time
       - retrieved_at
       - latest_observation_at
-      - validation_status
       - freshness
       - freshness_checked_at
       title: HistoricHouseholdLoadResponse
@@ -1218,32 +1542,6 @@ components:
       - export_price_eur_per_kwh
       title: HourlyOptimizationRequest
       description: Validated hourly inputs accepted by the optimization boundary.
-    HouseholdLoadQuality:
-      properties:
-        status:
-          type: string
-          enum:
-          - valid
-          - suspect
-          title: Status
-        reason:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Reason
-        entity_id:
-          anyOf:
-          - type: string
-          - type: 'null'
-          title: Entity Id
-      additionalProperties: false
-      type: object
-      required:
-      - status
-      - reason
-      - entity_id
-      title: HouseholdLoadQuality
-      description: Quality metadata for one historic household-load interval.
     HouseholdLoadRequest:
       properties:
         schema_version:
@@ -1323,9 +1621,12 @@ components:
           title: Interval Minutes
         load_kw:
           items:
-            type: number
+            anyOf:
+            - type: number
+            - type: 'null'
           type: array
           title: Load Kw
+          description: Household load in kW per interval; null for an excluded hour
         unit:
           type: string
           const: kW

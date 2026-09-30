@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 
 from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.exclusions import merge_exclusions
 from energy_optimizer.providers.home_assistant_energy import (
     EnergyAggregate,
     HomeAssistantEnergySeries,
@@ -20,7 +21,6 @@ from energy_optimizer.providers.home_assistant_history import (
 from energy_optimizer.providers.interfaces import (
     GRID_FLOW_SOURCE_ID,
     GridFlowData,
-    IntervalQuality,
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import as_utc
@@ -96,10 +96,11 @@ class HomeAssistantGridFlowImporter:
             logger.info(
                 "event=provider_fetch_succeeded component=home_assistant "
                 "operation=fetch data_type=grid_flow start_time=%s end_time=%s "
-                "record_count=%s",
+                "record_count=%s excluded_hour_count=%s",
                 data.start_time,
                 effective_end_time,
                 len(data.import_kw),
+                len(data.exclusions),
             )
             return data
 
@@ -145,6 +146,18 @@ class HomeAssistantGridFlowImporter:
                 "Home Assistant grid import and export entities returned "
                 "misaligned hourly series"
             )
+        # An hour that either channel excludes is excluded for both, so the
+        # stored import and export of an hour always describe the same hour.
+        incomplete = [
+            imported is None or exported is None
+            for imported, exported in zip(import_values, export_values)
+        ]
+        import_values = tuple(
+            None if skip else value for value, skip in zip(import_values, incomplete)
+        )
+        export_values = tuple(
+            None if skip else value for value, skip in zip(export_values, incomplete)
+        )
         return GridFlowData(
             schema_version="1",
             start_time=aggregate_start,
@@ -160,35 +173,16 @@ class HomeAssistantGridFlowImporter:
                 import_series.latest_observation_at,
                 export_series.latest_observation_at,
             ),
-            quality=self._combine_quality(
-                import_series.quality,
-                export_series.quality,
-                value_count,
-                import_offset,
-                export_offset,
+            exclusions=merge_exclusions(
+                *(
+                    [
+                        item
+                        for item in series.exclusions
+                        if aggregate_start <= item.hour_start < effective_end_time
+                    ]
+                    for series in (import_series, export_series)
+                )
             ),
-        )
-
-    @staticmethod
-    def _combine_quality(
-        import_quality: tuple[IntervalQuality, ...],
-        export_quality: tuple[IntervalQuality, ...],
-        value_count: int,
-        import_offset: int,
-        export_offset: int,
-    ) -> tuple[IntervalQuality, ...]:
-        """Propagate the worst quality from either grid channel."""
-        quality = [IntervalQuality()] * value_count
-        for source_quality, offset in (
-            (import_quality, import_offset),
-            (export_quality, export_offset),
-        ):
-            aligned = source_quality[offset : offset + value_count]
-            for index, item in enumerate(aligned):
-                if item.status == "suspect":
-                    quality[index] = item
-        return (
-            tuple(quality) if any(item.status == "suspect" for item in quality) else ()
         )
 
     def is_fresh(

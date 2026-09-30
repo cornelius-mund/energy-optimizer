@@ -23,6 +23,7 @@ from energy_optimizer.household_load_store import (
     household_load_records,
     merge_household_load_history,
 )
+from energy_optimizer.legacy_quality import upgrade_legacy_quality
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     GridFlowData,
@@ -357,7 +358,9 @@ class ProviderDataStore:
             ) from error
 
         try:
-            model = adapter.validate_json(payload)
+            # Data persisted before hour exclusion may flag hours as suspect.
+            # Those hours are converted to excluded hours as they are read.
+            model = upgrade_legacy_quality(adapter.validate_json(payload))
         except ValueError, ValidationError:
             return None
         return payload, model

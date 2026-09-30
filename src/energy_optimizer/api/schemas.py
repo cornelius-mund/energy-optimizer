@@ -16,6 +16,7 @@ from energy_optimizer.api.validation import (
     require_aware_timestamp,
     require_aware_timestamps,
 )
+from energy_optimizer.exclusions import ExclusionReason
 
 MAX_HORIZON_HOURS = 87_672
 
@@ -313,21 +314,13 @@ class HouseholdLoadResponse(BaseModel):
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
-    load_kw: list[float]
+    load_kw: list[float | None] = Field(
+        description="Household load in kW per interval; null for an excluded hour"
+    )
     unit: Literal["kW"]
     source: SourceMetadata | None = None
     retrieved_at: datetime
     latest_observation_at: datetime
-
-
-class HouseholdLoadQuality(BaseModel):
-    """Quality metadata for one historic household-load interval."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["valid", "suspect"]
-    reason: str | None
-    entity_id: str | None
 
 
 class HistoricHouseholdLoadResponse(BaseModel):
@@ -335,15 +328,16 @@ class HistoricHouseholdLoadResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["validated", "stale", "suspect", "empty"]
+    status: Literal["validated", "stale", "empty"]
     data_type: Literal["household_load"]
     schema_version: Literal["1"]
     start_time: datetime = Field(description="Inclusive requested range start")
     end_time: datetime = Field(description="Exclusive requested range end")
     interval_minutes: Literal[60]
     timestamps: list[datetime]
-    load_kw: list[float]
-    quality: list[HouseholdLoadQuality]
+    load_kw: list[float | None] = Field(
+        description="Household load in kW per interval; null for an excluded hour"
+    )
     unit: Literal["kW"]
     source: SourceMetadata
     coverage_start_time: datetime | None
@@ -352,7 +346,6 @@ class HistoricHouseholdLoadResponse(BaseModel):
     available_end_time: datetime
     retrieved_at: datetime
     latest_observation_at: datetime
-    validation_status: Literal["valid", "suspect"]
     freshness: Literal["fresh", "stale", "unknown"]
     freshness_checked_at: datetime
 
@@ -455,6 +448,111 @@ class DashboardAssetAvailability(BaseModel):
     series_ids: list[str] = Field(default_factory=list)
     reason: str | None = Field(
         default=None, description="Actionable explanation when status is not available"
+    )
+
+
+class ExcludedDataPoint(BaseModel):
+    """One observation that contributed to an exclusion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timestamp: datetime = Field(
+        description="When Home Assistant recorded the data point, or the hour start"
+    )
+    state: str | None = Field(
+        description="The raw state exactly as Home Assistant reported it"
+    )
+    unit: str | None
+    entity_id: str | None = Field(
+        description="Set when the data point belongs to another entity than its cause"
+    )
+    previous_timestamp: datetime | None = Field(
+        description="For a counter step, when the previous observation was recorded"
+    )
+    previous_value: float | None = Field(
+        description="For a counter step, the previous counter value in the entity unit"
+    )
+    value: float | None = Field(
+        description="For a counter step, the counter value in the entity unit"
+    )
+    step_kwh: float | None = Field(
+        description="Energy of the counter step or hour in kWh; signed for components"
+    )
+    maximum_kwh: float | None = Field(
+        description="The configured maximum energy that applies, in kWh"
+    )
+
+
+class ExclusionCause(BaseModel):
+    """One reason an hour is excluded, with the data points behind it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: ExclusionReason
+    message: str = Field(description="Human-readable explanation of the exclusion")
+    entity_id: str | None
+    data_points: list[ExcludedDataPoint] = Field(
+        description="The offending data points, bounded per entity and hour"
+    )
+    data_point_count: int = Field(
+        ge=0, description="The number of offending data points, before any bound"
+    )
+
+
+class ExcludedHour(BaseModel):
+    """One excluded hour of one source."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hour_start: datetime = Field(description="UTC start of the excluded hour")
+    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    causes: list[ExclusionCause] = Field(min_length=1)
+
+
+class ExcludedHoursSource(BaseModel):
+    """Whether one source could be read, and how many hours it excluded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    status: Literal["available", "not_configured", "unavailable", "invalid"] = Field(
+        description=(
+            "available: persisted history was read; not_configured: the "
+            "installation has no source; unavailable: no persisted history yet; "
+            "invalid: persisted data is corrupt and withheld"
+        )
+    )
+    reason: str | None = None
+    excluded_hour_count: int = Field(ge=0)
+
+
+class ExcludedHoursSummary(BaseModel):
+    """The number of excluded hours of one source for one reason."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    reason: ExclusionReason
+    excluded_hour_count: int = Field(
+        ge=1, description="Hours with this reason; an hour counts once per reason"
+    )
+
+
+class ExcludedHoursResponse(BaseModel):
+    """Every hour that was excluded from imported history in a requested range."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["1"]
+    requested_start_time: datetime = Field(description="Inclusive range start")
+    requested_end_time: datetime = Field(description="Exclusive range end")
+    excluded_hour_count: int = Field(
+        ge=0, description="Excluded hours summed over all sources"
+    )
+    sources: list[ExcludedHoursSource]
+    summary: list[ExcludedHoursSummary]
+    hours: list[ExcludedHour] = Field(
+        description="Excluded hours in ascending order of the hour"
     )
 
 
@@ -597,8 +695,8 @@ class GridFlowResponse(BaseModel):
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
-    import_kw: list[Annotated[float, Field(ge=0, le=1000)]]
-    export_kw: list[Annotated[float, Field(ge=0, le=1000)]]
+    import_kw: list[Annotated[float, Field(ge=0, le=1000)] | None]
+    export_kw: list[Annotated[float, Field(ge=0, le=1000)] | None]
     unit: Literal["kW"]
     source: SourceMetadata | None = None
     retrieved_at: datetime

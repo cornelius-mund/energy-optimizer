@@ -1,15 +1,19 @@
 """Property-based tests for the shared Home Assistant history import.
 
 A consumer that reads its window of a series shared with other consumers must get
-exactly what it would have got from an independent request for that window.
+exactly what it would have got from an independent request for that window: the
+same hourly values, the same excluded hours, and the same causes.
 """
 
+import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from hypothesis import given, settings
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from energy_optimizer.config import HomeAssistantEnergyEntityConfiguration
+from energy_optimizer.exclusions import ExcludedDataPoint, ExclusionCause
 from energy_optimizer.providers.home_assistant_energy import (
     EnergyAggregate,
     HomeAssistantEnergySeries,
@@ -36,19 +40,30 @@ ENTITY = HomeAssistantEnergyEntityConfiguration.model_validate(
 )
 configuration = home_assistant_configuration_factory()
 
-# Mostly rising readings, some resets (the counter restarts from a small value)
-# and some unavailable samples.
-STEP_KINDS = st.sampled_from(["rise"] * 8 + ["reset", "unavailable"])
+# Mostly rising readings, some resets (the counter restarts from a small value,
+# which is a decrease), some large steps that only exceed the default maximum of
+# 100 kWh together within one hour, some jumps above it in a single step, and
+# some invalid samples of every kind.
+STEP_KINDS = st.sampled_from(
+    ["rise"] * 6
+    + ["reset", "large", "jump", "unavailable", "garbage", "nan", "negative"]
+)
+INVALID_STATES = {
+    "unavailable": "unavailable",
+    "garbage": "n/a",
+    "nan": "nan",
+    "negative": "-1.000",
+}
 
 
 @st.composite
 def counter_states(draw: st.DrawFn) -> list[tuple[datetime, str]]:
-    """Draw the state changes of one counter over about five days."""
+    """Draw the state changes of one counter over about a day."""
     steps = draw(
         st.lists(
-            st.tuples(st.integers(1, 200), st.integers(0, 3000), STEP_KINDS),
-            min_size=1,
-            max_size=40,
+            st.tuples(st.integers(1, 60), st.integers(0, 3000), STEP_KINDS),
+            min_size=10,
+            max_size=60,
         )
     )
     minute = draw(st.integers(0, 120))
@@ -57,10 +72,17 @@ def counter_states(draw: st.DrawFn) -> list[tuple[datetime, str]]:
     for gap_minutes, rise_milli_kwh, kind in steps:
         minute += gap_minutes
         timestamp = BASE + timedelta(minutes=minute)
-        if kind == "unavailable":
-            states.append((timestamp, "unavailable"))
+        if kind in INVALID_STATES:
+            states.append((timestamp, INVALID_STATES[kind]))
             continue
-        milli_kwh = rise_milli_kwh if kind == "reset" else milli_kwh + rise_milli_kwh
+        if kind == "reset":
+            milli_kwh = rise_milli_kwh
+        elif kind == "large":
+            milli_kwh += 60_000
+        elif kind == "jump":
+            milli_kwh += 150_000
+        else:
+            milli_kwh += rise_milli_kwh
         states.append((timestamp, f"{milli_kwh / 1000:.3f}"))
     return states
 
@@ -69,7 +91,7 @@ def counter_states(draw: st.DrawFn) -> list[tuple[datetime, str]]:
 # any history exists and may overlap or nest.
 WINDOWS = st.lists(
     st.tuples(
-        st.integers(-3, 120), st.integers(1, 12), st.sampled_from([0, 3600, 7200])
+        st.integers(-3, 24), st.integers(1, 12), st.sampled_from([0, 3600, 7200])
     ),
     min_size=1,
     max_size=3,
@@ -84,6 +106,53 @@ def build_or_none(
         return aggregate.build(history)
     except HomeAssistantError:
         return None
+
+
+ISO_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00")
+
+
+def as_seen_by_an_independent_request(
+    series: HomeAssistantEnergySeries, window_start: datetime
+) -> HomeAssistantEnergySeries:
+    """Hide the one thing that a shared series knows and a request cannot.
+
+    Home Assistant answers a request with the state in force at its start,
+    stamped with that start, so an independent request cannot tell when that state
+    was really recorded. The shared series can, and the data points and messages
+    of its exclusions report that earlier time. Clamping every time to the
+    window start leaves everything else, such as values, excluded hours, reasons,
+    and counts, to be compared exactly.
+    """
+
+    def clamp(timestamp: datetime | None) -> datetime | None:
+        return None if timestamp is None else max(timestamp, window_start)
+
+    def restamp_message(match: re.Match[str]) -> str:
+        return max(datetime.fromisoformat(match.group()), window_start).isoformat()
+
+    def restamp_point(point: ExcludedDataPoint) -> ExcludedDataPoint:
+        timestamp = clamp(point.timestamp)
+        assert timestamp is not None
+        return replace(
+            point,
+            timestamp=timestamp,
+            previous_timestamp=clamp(point.previous_timestamp),
+        )
+
+    def restamp_cause(cause: ExclusionCause) -> ExclusionCause:
+        return replace(
+            cause,
+            message=ISO_TIMESTAMP.sub(restamp_message, cause.message),
+            data_points=tuple(restamp_point(point) for point in cause.data_points),
+        )
+
+    return replace(
+        series,
+        exclusions=tuple(
+            replace(item, causes=tuple(restamp_cause(cause) for cause in item.causes))
+            for item in series.exclusions
+        ),
+    )
 
 
 @settings(max_examples=200, deadline=None, derandomize=True)
@@ -124,4 +193,20 @@ def test_a_window_of_the_shared_series_equals_an_independent_fetch_of_it(
         build_or_none(aggregate, import_needs([aggregate])) for aggregate in aggregates
     ]
 
-    assert shared == independent
+    for series in independent:
+        if series is None:
+            event("consumer without a complete hour")
+            continue
+        for item in series.exclusions:
+            for cause in item.causes:
+                event(f"excluded for {cause.reason}")
+    history_starts = [
+        BASE + timedelta(hours=start_hour, seconds=-lookback_seconds)
+        for start_hour, _, lookback_seconds in windows
+    ]
+    assert [
+        None
+        if series is None
+        else as_seen_by_an_independent_request(series, history_start)
+        for series, history_start in zip(shared, history_starts)
+    ] == independent

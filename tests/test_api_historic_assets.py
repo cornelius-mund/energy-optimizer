@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,12 @@ from pydantic import TypeAdapter
 from energy_optimizer.api import app, historic
 from energy_optimizer.api.schemas import DashboardSeries, SourceMetadata
 from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.exclusions import (
+    ExcludedDataPoint,
+    ExclusionCause,
+    ExclusionReason,
+    HourExclusion,
+)
 from energy_optimizer.providers.home_assistant_battery_efficiency import (
     HomeAssistantBatteryEfficiencyImporter,
 )
@@ -23,7 +30,6 @@ from energy_optimizer.providers.interfaces import (
     ElectricityPriceData,
     GridFlowData,
     HouseholdLoadData,
-    IntervalQuality,
     PvGenerationData,
 )
 from energy_optimizer.providers.interfaces import (
@@ -163,13 +169,34 @@ def write_configuration(
     return path
 
 
+def exclusion(
+    hour: int,
+    reason: ExclusionReason = "counter_decrease",
+    entity_id: str = "sensor.grid_import",
+) -> HourExclusion:
+    hour_start = START + timedelta(hours=hour)
+    return HourExclusion(
+        hour_start,
+        (
+            ExclusionCause.of(
+                reason,
+                f"{entity_id} is excluded in hour {hour}",
+                entity_id,
+                [ExcludedDataPoint(hour_start, state="2", unit="kWh")],
+            ),
+        ),
+    )
+
+
 def seed_household(
     store: ProviderDataStore,
-    values: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0),
+    values: tuple[float | None, ...] = (1.0, 2.0, 3.0, 4.0),
     *,
     start: datetime = START,
     observed: datetime = START,
+    excluded: tuple[int, ...] = (),
 ) -> None:
+    """Persist household load; the ``excluded`` offsets are hours without value."""
     store.save(
         HOUSEHOLD_KEY,
         TypeAdapter(HouseholdLoadData),
@@ -177,11 +204,18 @@ def seed_household(
             schema_version="1",
             start_time=start,
             interval_minutes=60,
-            load_kw=values,
+            load_kw=tuple(
+                None if index in excluded else value
+                for index, value in enumerate(values)
+            ),
             unit="kW",
             source=ProviderSourceMetadata("home-assistant", "household_load"),
             retrieved_at=observed,
             latest_observation_at=observed,
+            exclusions=tuple(
+                exclusion(offset, entity_id="sensor.household_energy")
+                for offset in excluded
+            ),
         ),
     )
 
@@ -190,19 +224,25 @@ def grid_flow(
     values: tuple[float, ...] = (0.5, 1.5, 2.5, 3.5),
     *,
     observed: datetime = START,
-    quality: tuple[IntervalQuality, ...] = (),
+    excluded: tuple[int, ...] = (),
 ) -> GridFlowData:
+    """Build grid flow; the ``excluded`` offsets are hours without both values."""
     return GridFlowData(
         schema_version="1",
         start_time=START,
         interval_minutes=60,
-        import_kw=values,
-        export_kw=tuple(value / 10 for value in values),
+        import_kw=tuple(
+            None if index in excluded else value for index, value in enumerate(values)
+        ),
+        export_kw=tuple(
+            None if index in excluded else value / 10
+            for index, value in enumerate(values)
+        ),
         unit="kW",
         source=ProviderSourceMetadata("home-assistant", "grid_flow"),
         retrieved_at=observed,
         latest_observation_at=observed,
-        quality=quality,
+        exclusions=tuple(exclusion(offset) for offset in excluded),
     )
 
 
@@ -249,27 +289,36 @@ def battery_history(
     *,
     intervals: int = 4,
     observed: datetime = START,
-    quality: tuple[IntervalQuality, ...] = (),
+    excluded: tuple[int, ...] = (),
 ) -> BatteryEfficiencyHistoryData:
-    zeros = (0.5,) * intervals
+    """Build aligned history; an excluded hour has no energy in any leg.
+
+    Following the importer, the state of charge at both boundaries of an excluded
+    hour (values ``k`` and ``k + 1``) is ``None`` as well.
+    """
+    energy = tuple(None if index in excluded else 0.5 for index in range(intervals))
+    boundaries = set(excluded) | {index + 1 for index in excluded}
     return BatteryEfficiencyHistoryData(
         schema_version="1",
         start_time=START,
         interval_minutes=60,
-        battery_energy_in_kwh=zeros,
-        battery_energy_out_kwh=zeros,
-        inverter_charge_energy_in_kwh=zeros,
-        inverter_charge_energy_out_kwh=zeros,
-        inverter_discharge_energy_in_kwh=zeros,
-        inverter_discharge_energy_out_kwh=zeros,
+        battery_energy_in_kwh=energy,
+        battery_energy_out_kwh=energy,
+        inverter_charge_energy_in_kwh=energy,
+        inverter_charge_energy_out_kwh=energy,
+        inverter_discharge_energy_in_kwh=energy,
+        inverter_discharge_energy_out_kwh=energy,
         state_of_charge_percent=tuple(
-            20.0 + 10 * index for index in range(intervals + 1)
+            None if index in boundaries else 20.0 + 10 * index
+            for index in range(intervals + 1)
         ),
         unit="kWh",
         source=ProviderSourceMetadata("home-assistant", "battery_efficiency_history"),
         retrieved_at=observed,
         latest_observation_at=observed,
-        quality=quality,
+        exclusions=tuple(
+            exclusion(offset, entity_id="sensor.battery_in") for offset in excluded
+        ),
     )
 
 
@@ -507,15 +556,15 @@ def test_unconfigured_and_unseeded_assets_do_not_invalidate_configured_ones(
     )
 
 
-def test_battery_history_imported_from_jittery_total_counters_is_served(
+def test_battery_history_imported_from_total_counters_with_a_dip_is_served(
     environment: Environment,
 ) -> None:
-    """Regression test for issue #179, criterion 7, end to end.
+    """Import, persist and serve battery history with a 1 Wh counter decrease.
 
-    The battery history is produced by the real importer from ``total`` counters
-    that dip by 1 Wh without ``last_reset``. Before the fix that import failed,
-    nothing was persisted, and the dashboard reported the battery as
-    unavailable.
+    All legs use ``total`` counters without ``last_reset``. The counters dip by
+    1 Wh in hour 1. Nothing is tolerated or repaired: hour 1 is excluded in every
+    leg and in the state of charge around it, and the other hours are imported,
+    persisted, and served.
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -595,13 +644,49 @@ def test_battery_history_imported_from_jittery_total_counters_is_served(
         )
     finally:
         client.close()
+    for leg_values in (
+        history.battery_energy_in_kwh,
+        history.battery_energy_out_kwh,
+        history.inverter_charge_energy_in_kwh,
+        history.inverter_charge_energy_out_kwh,
+        history.inverter_discharge_energy_in_kwh,
+        history.inverter_discharge_energy_out_kwh,
+    ):
+        assert leg_values == (1.0, None, 1.0, 1.0)
+    assert history.state_of_charge_percent == (20.0, None, None, 50.0, 60.0)
+    assert [item.hour_start for item in history.exclusions] == hours(1)
     seed_battery(environment.store, history)
 
     body = environment.get_actual()
 
     assert availability(body)["battery"]["status"] == "available"
-    values = by_id(body)["battery_state_of_charge_actual"]["values"]
-    assert values == pytest.approx([20.0, 30.0, 40.0, 50.0])
+    state_of_charge = by_id(body)["battery_state_of_charge_actual"]
+    assert state_of_charge["values"] == [20.0, None, None, 50.0]
+    assert state_of_charge["missing_intervals"] == iso(1, 2)
+    assert state_of_charge["validation_status"] == "valid"
+    persisted = ProviderDataStore(environment.directory / "provider-data").load(
+        BATTERY_HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData)
+    )
+    assert persisted == history
+    excluded_hours = environment.client.get(
+        "/api/v1/dashboard/excluded-hours",
+        params={
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T04:00:00Z",
+        },
+    ).json()
+    assert [
+        (item["hour_start"], item["source"]) for item in excluded_hours["hours"]
+    ] == [("2026-01-01T01:00:00Z", "battery_efficiency")]
+    causes = excluded_hours["hours"][0]["causes"]
+    assert {(cause["reason"], cause["entity_id"]) for cause in causes} == {
+        (reason, entity_id)
+        for reason in ("counter_decrease", "step_after_decrease")
+        for entity_id in (
+            "sensor.charging_battery_energy",
+            "sensor.discharging_battery_energy",
+        )
+    }
 
 
 def test_battery_without_efficiency_calculation_explains_missing_state_history(
@@ -767,6 +852,40 @@ def test_only_corrupt_data_reports_an_invalid_dashboard(
             ),
         ),
         (
+            # Import is excluded, export is not: excluded hours must be excluded
+            # for both channels together.
+            GRID_KEY,
+            TypeAdapter(GridFlowData),
+            GridFlowData(
+                "1",
+                START,
+                60,
+                (None, 2.0),
+                (1.0, 2.0),
+                "kW",
+                ProviderSourceMetadata("home-assistant", "grid_flow"),
+                START,
+                START,
+                exclusions=(exclusion(0),),
+            ),
+        ),
+        (
+            # An hour without values has no explaining exclusion.
+            GRID_KEY,
+            TypeAdapter(GridFlowData),
+            GridFlowData(
+                "1",
+                START,
+                60,
+                (None, 2.0),
+                (None, 2.0),
+                "kW",
+                ProviderSourceMetadata("home-assistant", "grid_flow"),
+                START,
+                START,
+            ),
+        ),
+        (
             PRICE_HISTORY_KEY,
             TypeAdapter(ElectricityPriceData),
             ElectricityPriceData(
@@ -906,48 +1025,155 @@ def test_polling_freshness_never_invalidates_historical_actuals(
         assert "polling threshold" in " ".join(body["diagnostics"])
 
 
-def test_suspect_intervals_mark_only_the_series_they_affect(
+def test_excluded_hours_are_null_gaps_only_in_the_series_they_belong_to(
     environment: Environment,
 ) -> None:
-    suspect = IntervalQuality(
-        status="suspect", reason="counter_reset", entity_id="sensor.grid_import"
+    seed_household(environment.store, excluded=(1,))
+    seed_grid(environment.store, grid_flow(excluded=(2,)))
+    seed_prices(environment.store)
+    seed_battery(environment.store, battery_history(excluded=(3,)))
+
+    body = environment.get_actual()
+
+    series = by_id(body)
+    assert series["household_load_actual"]["values"] == [1.0, None, 3.0, 4.0]
+    assert series["household_load_actual"]["missing_intervals"] == iso(1)
+    assert series["grid_import_actual"]["values"] == [0.5, 1.5, None, 3.5]
+    assert series["grid_import_actual"]["missing_intervals"] == iso(2)
+    assert series["grid_export_actual"]["values"] == pytest.approx(
+        [0.05, 0.15, None, 0.35]
     )
-    seed_household(environment.store)
-    seed_grid(
-        environment.store,
-        grid_flow(
-            quality=(IntervalQuality(), suspect, IntervalQuality(), IntervalQuality())
-        ),
-    )
-    seed_battery(
-        environment.store,
-        battery_history(
-            quality=(IntervalQuality(), IntervalQuality(), suspect, IntervalQuality())
-        ),
-    )
-
-    series = by_id(environment.get_actual())
-
-    assert series["grid_import_actual"]["validation_status"] == "suspect"
-    assert series["grid_export_actual"]["validation_status"] == "suspect"
-    assert series["battery_state_of_charge_actual"]["validation_status"] == "suspect"
-    assert series["household_load_actual"]["validation_status"] == "valid"
+    assert series["grid_export_actual"]["missing_intervals"] == iso(2)
+    # Hour 3 is excluded, so the boundary values 3 and 4 are unavailable.
+    assert series["battery_state_of_charge_actual"]["values"] == [
+        20.0,
+        30.0,
+        40.0,
+        None,
+    ]
+    assert series["battery_state_of_charge_actual"]["missing_intervals"] == iso(3)
+    assert series["import_price_actual"]["missing_intervals"] == []
+    assert series["export_price_actual"]["missing_intervals"] == []
+    assert {item["validation_status"] for item in series.values()} == {"valid"}
+    assert availability(body)["household_load"]["status"] == "available"
+    assert availability(body)["grid_flow"]["status"] == "available"
+    assert availability(body)["battery"]["status"] == "available"
+    assert body["status"] == "partial"
 
 
-def test_suspect_intervals_outside_the_requested_range_are_not_reported(
+def test_a_range_of_only_excluded_hours_is_empty_not_invalid(
     environment: Environment,
 ) -> None:
-    suspect = IntervalQuality(status="suspect", reason="counter_reset")
-    seed_grid(
-        environment.store,
-        grid_flow(
-            quality=(IntervalQuality(), IntervalQuality(), IntervalQuality(), suspect)
-        ),
-    )
+    seed_household(environment.store, excluded=(0, 1, 2, 3))
+    seed_grid(environment.store, grid_flow(excluded=(0, 1, 2, 3)))
+
+    body = environment.get_actual()
+
+    household = by_id(body)["household_load_actual"]
+    assert household["values"] == [None, None, None, None]
+    assert household["missing_intervals"] == iso(0, 1, 2, 3)
+    assert by_id(body)["grid_import_actual"]["values"] == [None] * 4
+    assert availability(body)["household_load"]["status"] == "empty"
+    assert availability(body)["grid_flow"]["status"] == "empty"
+    assert "no household-load observations exist" in " ".join(body["diagnostics"])
+
+
+def test_excluded_hours_outside_the_requested_range_are_not_reported(
+    environment: Environment,
+) -> None:
+    seed_household(environment.store, excluded=(3,))
+    seed_grid(environment.store, grid_flow(excluded=(3,)))
 
     body = environment.get_actual(end="2026-01-01T03:00:00Z")
 
-    assert by_id(body)["grid_import_actual"]["validation_status"] == "valid"
+    assert by_id(body)["household_load_actual"]["values"] == [1.0, 2.0, 3.0]
+    assert by_id(body)["household_load_actual"]["missing_intervals"] == []
+    assert by_id(body)["grid_import_actual"]["values"] == [0.5, 1.5, 2.5]
+    assert by_id(body)["grid_import_actual"]["missing_intervals"] == []
+    assert body["status"] == "validated"
+
+
+def test_suspect_hours_of_persisted_legacy_history_are_served_as_gaps(
+    environment: Environment,
+) -> None:
+    """Grid-flow and battery files of earlier versions flag hours with quality."""
+    suspect = {"status": "suspect", "reason": "counter_reset", "entity_id": "s.grid"}
+    valid = {"status": "valid", "reason": None, "entity_id": None}
+    directory = environment.directory / "provider-data"
+    directory.mkdir(exist_ok=True)
+    common = {
+        "schema_version": "1",
+        "start_time": START.isoformat(),
+        "interval_minutes": 60,
+        "retrieved_at": START.isoformat(),
+        "latest_observation_at": START.isoformat(),
+    }
+    legacy_grid = {
+        **common,
+        "import_kw": [0.5, 1.5, 2.5, 3.5],
+        "export_kw": [0.05, 0.15, 0.25, 0.35],
+        "unit": "kW",
+        "source": {"provider": "home-assistant", "entity_id": "grid_flow"},
+        "quality": [valid, suspect, valid, valid],
+    }
+    legacy_battery = {
+        **common,
+        **{
+            name: [0.5] * 4
+            for name in (
+                "battery_energy_in_kwh",
+                "battery_energy_out_kwh",
+                "inverter_charge_energy_in_kwh",
+                "inverter_charge_energy_out_kwh",
+                "inverter_discharge_energy_in_kwh",
+                "inverter_discharge_energy_out_kwh",
+            )
+        },
+        "state_of_charge_percent": [20.0, 30.0, 40.0, 50.0, 60.0],
+        "unit": "kWh",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "battery_efficiency_history",
+        },
+        "quality": [valid, valid, suspect, valid],
+    }
+    for key, payload in (
+        (GRID_KEY, legacy_grid),
+        (BATTERY_HISTORY_KEY, legacy_battery),
+    ):
+        (directory / f"{key.data_type}-{key.digest()}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    body = environment.get_actual()
+
+    series = by_id(body)
+    assert series["grid_import_actual"]["values"] == [0.5, None, 2.5, 3.5]
+    assert series["grid_export_actual"]["values"] == pytest.approx(
+        [0.05, None, 0.25, 0.35]
+    )
+    assert series["grid_import_actual"]["missing_intervals"] == iso(1)
+    state_of_charge = series["battery_state_of_charge_actual"]
+    # The suspect hour 2 has no state of charge at its own boundary.
+    assert state_of_charge["values"][0] == 20.0
+    assert state_of_charge["values"][2] is None
+    assert iso(2)[0] in state_of_charge["missing_intervals"]
+    assert {item["validation_status"] for item in series.values()} == {"valid"}
+    excluded_hours = environment.client.get(
+        "/api/v1/dashboard/excluded-hours",
+        params={
+            "start_time": "2026-01-01T00:00:00Z",
+            "end_time": "2026-01-01T04:00:00Z",
+        },
+    ).json()
+    assert [
+        (item["hour_start"], item["source"], cause["reason"])
+        for item in excluded_hours["hours"]
+        for cause in item["causes"]
+    ] == [
+        ("2026-01-01T01:00:00Z", "grid_flow", "flagged_by_earlier_version"),
+        ("2026-01-01T02:00:00Z", "battery_efficiency", "flagged_by_earlier_version"),
+    ]
 
 
 def test_price_history_exposes_only_completed_hours_as_actuals(

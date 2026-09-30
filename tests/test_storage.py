@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,9 +11,18 @@ import pytest
 from pydantic import TypeAdapter
 
 from energy_optimizer import storage as storage_module
+from energy_optimizer.exclusions import (
+    ExcludedDataPoint,
+    ExclusionCause,
+    ExclusionReason,
+    HourExclusion,
+)
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    merge_battery_efficiency_history,
+)
 from energy_optimizer.providers.interfaces import (
+    BatteryEfficiencyHistoryData,
     HouseholdLoadData,
-    IntervalQuality,
     SourceMetadata,
 )
 from energy_optimizer.storage import (
@@ -27,6 +37,20 @@ KEY = ProviderDataKey(
     entity_id="sensor.household_load",
 )
 ADAPTER = TypeAdapter(HouseholdLoadData)
+EFFICIENCY_KEY = ProviderDataKey(
+    data_type="battery-efficiency-history",
+    provider="home-assistant",
+    entity_id="battery_efficiency_history",
+)
+EFFICIENCY_ADAPTER = TypeAdapter(BatteryEfficiencyHistoryData)
+ENERGY_LEGS = (
+    "battery_energy_in_kwh",
+    "battery_energy_out_kwh",
+    "inverter_charge_energy_in_kwh",
+    "inverter_charge_energy_out_kwh",
+    "inverter_discharge_energy_in_kwh",
+    "inverter_discharge_energy_out_kwh",
+)
 
 
 def normalized_data(load_kw: list[float] | None = None) -> dict[str, object]:
@@ -68,15 +92,15 @@ def test_store_initializes_and_returns_normalized_data(tmp_path: Path) -> None:
         assert len(lines) == 2
         assert all(json.loads(line)["unit"] == expected_json["unit"] for line in lines)
     expected_payload = (
-        b'{"timestamp":"2026-01-01T00:00:00+00:00","load_kw":1.2,"quality":'
-        b'{"status":"valid","reason":null,"entity_id":null},"schema_version":"1",'
-        b'"unit":"kW","source":{"provider":"home-assistant","entity_id":'
-        b'"sensor.household_load"},"retrieved_at":"2026-01-01T00:00:00+00:00",'
+        b'{"timestamp":"2026-01-01T00:00:00+00:00","load_kw":1.2,'
+        b'"schema_version":"1","unit":"kW","source":{"provider":"home-assistant",'
+        b'"entity_id":"sensor.household_load"},'
+        b'"retrieved_at":"2026-01-01T00:00:00+00:00",'
         b'"latest_observation_at":"2026-01-01T01:00:00+00:00"}\n'
-        b'{"timestamp":"2026-01-01T01:00:00+00:00","load_kw":1.0,"quality":'
-        b'{"status":"valid","reason":null,"entity_id":null},"schema_version":"1",'
-        b'"unit":"kW","source":{"provider":"home-assistant","entity_id":'
-        b'"sensor.household_load"},"retrieved_at":"2026-01-01T00:00:00+00:00",'
+        b'{"timestamp":"2026-01-01T01:00:00+00:00","load_kw":1.0,'
+        b'"schema_version":"1","unit":"kW","source":{"provider":"home-assistant",'
+        b'"entity_id":"sensor.household_load"},'
+        b'"retrieved_at":"2026-01-01T00:00:00+00:00",'
         b'"latest_observation_at":"2026-01-01T01:00:00+00:00"}\n'
     )
     assert primary.read_bytes() == expected_payload
@@ -278,8 +302,9 @@ def test_missing_data_returns_none(tmp_path: Path) -> None:
 
 def household_load_data(
     start_time: datetime,
-    values: list[float],
+    values: Sequence[float | None],
     retrieved_at: datetime | None = None,
+    exclusions: tuple[HourExclusion, ...] = (),
 ) -> HouseholdLoadData:
     retrieved = retrieved_at or start_time
     return HouseholdLoadData(
@@ -291,7 +316,84 @@ def household_load_data(
         source=SourceMetadata(provider="home-assistant", entity_id="household_load"),
         retrieved_at=retrieved,
         latest_observation_at=retrieved,
+        exclusions=exclusions,
     )
+
+
+def exclusion(
+    hour_start: datetime,
+    reason: ExclusionReason = "counter_decrease",
+    entity_id: str = "sensor.household_energy",
+) -> HourExclusion:
+    return HourExclusion(
+        hour_start,
+        (
+            ExclusionCause.of(
+                reason,
+                f"{entity_id} is excluded in the hour starting {hour_start}",
+                entity_id,
+                [
+                    ExcludedDataPoint(
+                        hour_start,
+                        state="2",
+                        unit="kWh",
+                        previous_timestamp=hour_start - timedelta(minutes=30),
+                        previous_value=3.0,
+                        value=2.0,
+                        step_kwh=-1.0,
+                        maximum_kwh=100.0,
+                    )
+                ],
+            ),
+        ),
+    )
+
+
+def legacy_record(
+    hour: int,
+    load_kw: float,
+    quality: dict[str, object] | None,
+) -> bytes:
+    """Return one NDJSON record as versions before exclusion wrote it."""
+    record: dict[str, object] = {
+        "timestamp": (datetime(2026, 1, 1, hour, tzinfo=timezone.utc)).isoformat(),
+        "load_kw": load_kw,
+    }
+    if quality is not None:
+        record["quality"] = quality
+    record |= {
+        "schema_version": "1",
+        "unit": "kW",
+        "source": {"provider": "home-assistant", "entity_id": "household_load"},
+        "retrieved_at": "2026-01-01T00:00:00+00:00",
+        "latest_observation_at": "2026-01-01T03:00:00+00:00",
+    }
+    return json.dumps(record, separators=(",", ":")).encode() + b"\n"
+
+
+SUSPECT_QUALITY: dict[str, object] = {
+    "status": "suspect",
+    "reason": "reset_recovery",
+    "entity_id": "sensor.household_load",
+}
+VALID_QUALITY: dict[str, object] = {
+    "status": "valid",
+    "reason": None,
+    "entity_id": None,
+}
+
+
+def write_legacy_household_ndjson(directory: Path) -> None:
+    """Persist household load in which an earlier version flagged hour 1 suspect."""
+    payload = (
+        legacy_record(0, 1.0, VALID_QUALITY)
+        + legacy_record(1, 2.0, SUSPECT_QUALITY)
+        + legacy_record(2, 3.0, VALID_QUALITY)
+    )
+    directory.mkdir(exist_ok=True)
+    primary, backup = paths(directory)
+    primary.write_bytes(payload)
+    backup.write_bytes(payload)
 
 
 def test_store_merges_hourly_history_and_incoming_values_win(
@@ -318,60 +420,286 @@ def test_store_merges_hourly_history_and_incoming_values_win(
     assert reloaded == merged
 
 
-def test_store_round_trips_interval_quality_and_legacy_records(
+def test_store_round_trips_excluded_hours_after_restart(tmp_path: Path) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    excluded = exclusion(start + timedelta(hours=1))
+    data = household_load_data(start, [1.0, None, 3.0], exclusions=(excluded,))
+
+    saved = ProviderDataStore(tmp_path).save(KEY, ADAPTER, data)
+    restarted = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+    assert saved == data
+    assert restarted == data
+    assert restarted is not None
+    assert restarted.load_kw == (1.0, None, 3.0)
+    assert restarted.exclusions == (excluded,)
+    assert restarted.quality == ()
+    primary, backup = paths(tmp_path)
+    for path in (primary, backup):
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert [record["load_kw"] for record in records] == [1.0, None, 3.0]
+        assert all("quality" not in record for record in records)
+        assert [("exclusion" in record) for record in records] == [False, True, False]
+    stored = json.loads(primary.read_text().splitlines()[1])["exclusion"]
+    assert stored["hour_start"] == "2026-01-01T01:00:00Z"
+    assert stored["causes"][0]["reason"] == "counter_decrease"
+    assert stored["causes"][0]["entity_id"] == "sensor.household_energy"
+    assert stored["causes"][0]["data_points"][0]["state"] == "2"
+    assert stored["causes"][0]["data_points"][0]["step_kwh"] == -1.0
+
+
+def test_store_appends_excluded_hours_and_keeps_earlier_ones_after_restart(
     tmp_path: Path,
 ) -> None:
-    store = ProviderDataStore(tmp_path)
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    data = household_load_data(start, [1.0, 2.0, 3.0])
-    suspect = HouseholdLoadData(
-        **{
-            **data.__dict__,
-            "quality": (
-                IntervalQuality(),
-                IntervalQuality(
-                    status="suspect",
-                    reason="reset_recovery",
-                    entity_id="sensor.household_load",
-                ),
-                IntervalQuality(),
-            ),
-        }
+    first = exclusion(start)
+    third = exclusion(start + timedelta(hours=2), "unavailable")
+    store = ProviderDataStore(tmp_path)
+    store.save(
+        KEY, ADAPTER, household_load_data(start, [None, 2.0], exclusions=(first,))
     )
 
-    saved = store.save(KEY, ADAPTER, suspect)
+    saved = store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(
+            start + timedelta(hours=2), [None, 4.0], exclusions=(third,)
+        ),
+    )
 
-    assert store.load(KEY, ADAPTER) == saved
-    assert saved.quality[1].reason == "reset_recovery"
-    primary, _ = paths(tmp_path)
-    assert json.loads(primary.read_text().splitlines()[1])["quality"] == {
-        "status": "suspect",
-        "reason": "reset_recovery",
-        "entity_id": "sensor.household_load",
-    }
+    restarted = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+    assert saved.load_kw == (None, 2.0, None, 4.0)
+    assert restarted == saved
+    assert restarted is not None
+    assert restarted.exclusions == (first, third)
 
 
-def test_store_accepts_legacy_records_without_quality(tmp_path: Path) -> None:
-    store = ProviderDataStore(tmp_path)
+def test_store_replaces_an_excluded_hour_with_a_valid_incoming_hour(
+    tmp_path: Path,
+) -> None:
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    data = household_load_data(start, [1.0, 2.0])
-    store.save(KEY, ADAPTER, data)
-    primary, backup = paths(tmp_path)
+    store = ProviderDataStore(tmp_path)
+    excluded = exclusion(start + timedelta(hours=1))
+    store.save(
+        KEY, ADAPTER, household_load_data(start, [1.0, None], exclusions=(excluded,))
+    )
 
-    for path in (primary, backup):
-        records = [json.loads(line) for line in path.read_bytes().splitlines()]
-        path.write_bytes(
-            b"".join(
-                json.dumps(
-                    {key: value for key, value in record.items() if key != "quality"},
-                    separators=(",", ":"),
-                ).encode()
-                + b"\n"
-                for record in records
-            )
+    store.save(KEY, ADAPTER, household_load_data(start + timedelta(hours=1), [2.5]))
+
+    restarted = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+    assert restarted is not None
+    assert restarted.load_kw == (1.0, 2.5)
+    assert restarted.exclusions == ()
+
+
+def test_store_replaces_a_valid_hour_with_an_incoming_exclusion(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    excluded = exclusion(start + timedelta(hours=1), "unavailable")
+
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start + timedelta(hours=1), [None], exclusions=(excluded,)),
+    )
+
+    restarted = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+    assert restarted is not None
+    assert restarted.load_kw == (1.0, None)
+    assert restarted.exclusions == (excluded,)
+
+
+def test_merge_prefers_incoming_hours_completely_including_their_exclusion() -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    hour = [start + timedelta(hours=index) for index in range(3)]
+    existing = household_load_data(
+        start,
+        [1.0, None, 3.0],
+        exclusions=(exclusion(hour[1], "counter_decrease"),),
+    )
+    incoming = household_load_data(
+        hour[1],
+        [None, None],
+        exclusions=(
+            exclusion(hour[1], "unavailable"),
+            exclusion(hour[2], "unavailable"),
+        ),
+    )
+
+    merged = storage_module.merge_household_load_history(existing, incoming)
+
+    assert merged.load_kw == (1.0, None, None)
+    assert merged.exclusions == (
+        exclusion(hour[1], "unavailable"),
+        exclusion(hour[2], "unavailable"),
+    )
+
+
+@pytest.mark.parametrize(
+    "hour_of_exclusion",
+    [None, 0, 1],
+    ids=[
+        "value-null-without-exclusion",
+        "exclusion-of-other-hour",
+        "value-and-exclusion",
+    ],
+)
+def test_store_rejects_a_household_record_whose_value_and_exclusion_disagree(
+    tmp_path: Path, hour_of_exclusion: int | None
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, backup = paths(tmp_path)
+    backup.unlink()
+    first, second = (json.loads(line) for line in primary.read_text().splitlines())
+    if hour_of_exclusion is None:
+        # The record has no value but nothing explains its absence.
+        second["load_kw"] = None
+    else:
+        # Hour 0's exclusion sits on hour 1's record (another hour); hour 1's
+        # exclusion sits on a record that still has its value.
+        second["exclusion"] = TypeAdapter(HourExclusion).dump_python(
+            exclusion(start + timedelta(hours=hour_of_exclusion)), mode="json"
+        )
+        second["load_kw"] = None if hour_of_exclusion == 0 else 2.0
+    primary.write_bytes(
+        b"".join(json.dumps(record).encode() + b"\n" for record in (first, second))
+    )
+
+    with pytest.raises(ProviderDataStoreError, match="invalid and cannot be recovered"):
+        ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+
+def test_store_rejects_household_hours_without_a_value_that_lack_an_exclusion(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(ProviderDataStoreError, match="match their exclusions"):
+        ProviderDataStore(tmp_path).save(
+            KEY, ADAPTER, household_load_data(start, [1.0, None])
         )
 
-    assert store.load(KEY, ADAPTER) == data
+
+def test_store_converts_suspect_records_of_legacy_ndjson_into_excluded_hours(
+    tmp_path: Path,
+) -> None:
+    write_legacy_household_ndjson(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    loaded = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+    assert loaded is not None
+    assert loaded.load_kw == (1.0, None, 3.0)
+    assert loaded.quality == ()
+    assert [item.hour_start for item in loaded.exclusions] == [
+        start + timedelta(hours=1)
+    ]
+    (cause,) = loaded.exclusions[0].causes
+    assert cause.reason == "flagged_by_earlier_version"
+    assert cause.entity_id == "sensor.household_load"
+    assert cause.data_points == ()
+    assert "reset_recovery" in cause.message
+
+
+def test_store_appends_new_records_without_quality_to_legacy_ndjson(
+    tmp_path: Path,
+) -> None:
+    write_legacy_household_ndjson(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    primary, _ = paths(tmp_path)
+    before = primary.read_bytes()
+
+    saved = store.save(
+        KEY, ADAPTER, household_load_data(start + timedelta(hours=3), [4.0])
+    )
+
+    assert saved.load_kw == (1.0, None, 3.0, 4.0)
+    assert saved.exclusions[0].causes[0].reason == "flagged_by_earlier_version"
+    appended = primary.read_bytes()[len(before) :]
+    assert b"quality" not in appended
+    assert json.loads(appended)["load_kw"] == 4.0
+    assert ProviderDataStore(tmp_path).load(KEY, ADAPTER) == saved
+
+
+def test_store_compaction_rewrites_legacy_ndjson_in_the_current_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(storage_module, "HOUSEHOLD_LOAD_COMPACTION_THRESHOLD", 3)
+    write_legacy_household_ndjson(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+
+    saved = store.save(
+        KEY, ADAPTER, household_load_data(start + timedelta(hours=3), [4.0])
+    )
+
+    primary, backup = paths(tmp_path)
+    for path in (primary, backup):
+        assert b"quality" not in path.read_bytes()
+    records = [json.loads(line) for line in primary.read_text().splitlines()]
+    assert [record["load_kw"] for record in records] == [1.0, None, 3.0, 4.0]
+    assert records[1]["exclusion"]["causes"][0]["reason"] == (
+        "flagged_by_earlier_version"
+    )
+    assert ProviderDataStore(tmp_path).load(KEY, ADAPTER) == saved
+
+
+def test_a_valid_incoming_hour_supersedes_a_suspect_record_of_legacy_ndjson(
+    tmp_path: Path,
+) -> None:
+    write_legacy_household_ndjson(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+
+    store.save(KEY, ADAPTER, household_load_data(start + timedelta(hours=1), [2.5]))
+
+    restarted = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+    assert restarted is not None
+    assert restarted.load_kw == (1.0, 2.5, 3.0)
+    assert restarted.exclusions == ()
+
+
+def test_store_converts_suspect_hours_when_it_migrates_monolithic_json(
+    tmp_path: Path,
+) -> None:
+    quality = [VALID_QUALITY, SUSPECT_QUALITY, VALID_QUALITY]
+    legacy = json.dumps(
+        {
+            "schema_version": "1",
+            "start_time": "2026-01-01T00:00:00+00:00",
+            "interval_minutes": 60,
+            "load_kw": [1.0, 2.0, 3.0],
+            "unit": "kW",
+            "source": {"provider": "home-assistant", "entity_id": "household_load"},
+            "retrieved_at": "2026-01-01T00:00:00+00:00",
+            "latest_observation_at": "2026-01-01T03:00:00+00:00",
+            "quality": quality,
+        }
+    ).encode()
+    primary, backup = legacy_paths(tmp_path)
+    tmp_path.mkdir(exist_ok=True)
+    primary.write_bytes(legacy)
+    backup.write_bytes(legacy)
+
+    loaded = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+
+    assert loaded is not None
+    assert loaded.load_kw == (1.0, None, 3.0)
+    assert loaded.quality == ()
+    assert loaded.exclusions[0].causes[0].reason == "flagged_by_earlier_version"
+    ndjson_primary, ndjson_backup = paths(tmp_path)
+    for path in (ndjson_primary, ndjson_backup):
+        assert b"quality" not in path.read_bytes()
+    records = [json.loads(line) for line in ndjson_primary.read_text().splitlines()]
+    assert [record["load_kw"] for record in records] == [1.0, None, 3.0]
+    assert "exclusion" in records[1]
+    assert ProviderDataStore(tmp_path).load(KEY, ADAPTER) == loaded
 
 
 def test_store_loads_only_points_in_a_half_open_range(tmp_path: Path) -> None:
@@ -390,22 +718,17 @@ def test_store_loads_only_points_in_a_half_open_range(tmp_path: Path) -> None:
     assert selected.load_kw == (2.0, 3.0)
 
 
-def test_store_slices_quality_from_retained_start_when_range_predates_history(
+def test_store_slices_exclusions_from_retained_start_when_range_predates_history(
     tmp_path: Path,
 ) -> None:
     store = ProviderDataStore(tmp_path)
     retained_start = datetime(2026, 1, 1, 2, tzinfo=timezone.utc)
-    data = household_load_data(retained_start, [1.0, 2.0])
-    suspect = HouseholdLoadData(
-        **{
-            **data.__dict__,
-            "quality": (
-                IntervalQuality(),
-                IntervalQuality(status="suspect", reason="reset_recovery"),
-            ),
-        }
+    excluded = exclusion(retained_start + timedelta(hours=1))
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(retained_start, [1.0, None], exclusions=(excluded,)),
     )
-    store.save(KEY, ADAPTER, suspect)
 
     selected = store.load_household_load_range(
         KEY,
@@ -415,8 +738,35 @@ def test_store_slices_quality_from_retained_start_when_range_predates_history(
 
     assert selected is not None
     assert selected.start_time == retained_start
-    assert selected.load_kw == (1.0, 2.0)
-    assert selected.quality[1].reason == "reset_recovery"
+    assert selected.load_kw == (1.0, None)
+    assert selected.exclusions == (excluded,)
+
+
+def test_store_slices_only_the_exclusions_of_the_requested_hours(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    excluded = exclusion(start + timedelta(hours=1))
+    store.save(
+        KEY,
+        ADAPTER,
+        household_load_data(start, [1.0, None, 3.0, 4.0], exclusions=(excluded,)),
+    )
+
+    inside = store.load_household_load_range(
+        KEY, start + timedelta(hours=1), start + timedelta(hours=3)
+    )
+    outside = store.load_household_load_range(
+        KEY, start + timedelta(hours=2), start + timedelta(hours=4)
+    )
+
+    assert inside is not None
+    assert inside.load_kw == (None, 3.0)
+    assert inside.exclusions == (excluded,)
+    assert outside is not None
+    assert outside.load_kw == (3.0, 4.0)
+    assert outside.exclusions == ()
 
 
 def test_store_returns_none_for_a_range_without_points(tmp_path: Path) -> None:
@@ -725,3 +1075,151 @@ def test_non_household_provider_data_remains_json(tmp_path: Path) -> None:
 
     assert (tmp_path / f"electricity-prices-{key.digest()}.json").exists()
     assert not (tmp_path / f"electricity-prices-{key.digest()}.ndjson").exists()
+
+
+def efficiency_path(directory: Path) -> Path:
+    return directory / f"{EFFICIENCY_KEY.data_type}-{EFFICIENCY_KEY.digest()}.json"
+
+
+def efficiency_history(
+    start: datetime,
+    hours: int,
+    *,
+    excluded: tuple[int, ...] = (),
+) -> BatteryEfficiencyHistoryData:
+    """Build a history whose excluded hours have no energy and no adjacent SoC."""
+    energy = tuple(None if index in excluded else 0.5 for index in range(hours))
+    boundaries = set(excluded) | {index - 1 for index in excluded}
+    return BatteryEfficiencyHistoryData(
+        schema_version="1",
+        start_time=start,
+        interval_minutes=60,
+        battery_energy_in_kwh=energy,
+        battery_energy_out_kwh=energy,
+        inverter_charge_energy_in_kwh=energy,
+        inverter_charge_energy_out_kwh=energy,
+        inverter_discharge_energy_in_kwh=energy,
+        inverter_discharge_energy_out_kwh=energy,
+        state_of_charge_percent=tuple(
+            None if index in boundaries else 20.0 + 10 * index
+            for index in range(hours + 1)
+        ),
+        unit="kWh",
+        source=SourceMetadata("home-assistant", "battery_efficiency_history"),
+        retrieved_at=start,
+        latest_observation_at=start + timedelta(hours=hours),
+        exclusions=tuple(
+            exclusion(
+                start + timedelta(hours=index),
+                "counter_decrease",
+                "sensor.battery_in",
+            )
+            for index in sorted(excluded)
+        ),
+    )
+
+
+def test_store_round_trips_excluded_efficiency_history_hours_after_restart(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    data = efficiency_history(start, 4, excluded=(2,))
+
+    saved = ProviderDataStore(tmp_path).save(EFFICIENCY_KEY, EFFICIENCY_ADAPTER, data)
+    restarted = ProviderDataStore(tmp_path).load(EFFICIENCY_KEY, EFFICIENCY_ADAPTER)
+
+    assert saved == data
+    assert restarted == data
+    assert restarted is not None
+    for name in ENERGY_LEGS:
+        assert getattr(restarted, name) == (0.5, 0.5, None, 0.5), name
+    assert restarted.state_of_charge_percent == (20.0, None, None, 50.0, 60.0)
+    assert restarted.exclusions == (
+        exclusion(start + timedelta(hours=2), "counter_decrease", "sensor.battery_in"),
+    )
+    payload = json.loads(efficiency_path(tmp_path).read_text())
+    assert payload["battery_energy_in_kwh"] == [0.5, 0.5, None, 0.5]
+    assert payload["state_of_charge_percent"] == [20.0, None, None, 50.0, 60.0]
+    assert payload["quality"] == []
+    assert payload["exclusions"][0]["hour_start"] == "2026-01-01T02:00:00Z"
+    assert payload["exclusions"][0]["causes"][0]["reason"] == "counter_decrease"
+
+
+def write_legacy_efficiency_history(directory: Path) -> None:
+    """Persist a history in which an earlier version flagged hour 2 as suspect."""
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    valid = {"status": "valid", "reason": None, "entity_id": None}
+    suspect = {
+        "status": "suspect",
+        "reason": "counter_reset",
+        "entity_id": "sensor.battery_in",
+    }
+    payload: dict[str, object] = {
+        "schema_version": "1",
+        "start_time": start.isoformat(),
+        "interval_minutes": 60,
+        **{name: [0.5, 0.5, 0.5, 0.5] for name in ENERGY_LEGS},
+        "state_of_charge_percent": [20.0, 30.0, 40.0, 50.0, 60.0],
+        "unit": "kWh",
+        "source": {
+            "provider": "home-assistant",
+            "entity_id": "battery_efficiency_history",
+        },
+        "retrieved_at": start.isoformat(),
+        "latest_observation_at": (start + timedelta(hours=4)).isoformat(),
+        "quality": [valid, valid, suspect, valid],
+    }
+    directory.mkdir(exist_ok=True)
+    efficiency_path(directory).write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_store_converts_suspect_hours_of_legacy_efficiency_history(
+    tmp_path: Path,
+) -> None:
+    write_legacy_efficiency_history(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    loaded = ProviderDataStore(tmp_path).load(EFFICIENCY_KEY, EFFICIENCY_ADAPTER)
+
+    assert loaded is not None
+    for name in ENERGY_LEGS:
+        assert getattr(loaded, name) == (0.5, 0.5, None, 0.5), name
+    assert loaded.quality == ()
+    # The boundary value of the excluded hour is dropped and values far from it
+    # are unchanged; boundary values directly next to it are not asserted.
+    assert loaded.state_of_charge_percent[0] == 20.0
+    assert loaded.state_of_charge_percent[2] is None
+    assert loaded.state_of_charge_percent[4] == 60.0
+    assert len(loaded.state_of_charge_percent) == 5
+    assert [item.hour_start for item in loaded.exclusions] == [
+        start + timedelta(hours=2)
+    ]
+    (cause,) = loaded.exclusions[0].causes
+    assert cause.reason == "flagged_by_earlier_version"
+    assert cause.entity_id == "sensor.battery_in"
+    assert cause.data_points == ()
+    assert "counter_reset" in cause.message
+
+
+def test_store_persists_converted_efficiency_history_without_quality(
+    tmp_path: Path,
+) -> None:
+    write_legacy_efficiency_history(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    existing = store.load(EFFICIENCY_KEY, EFFICIENCY_ADAPTER)
+    incoming = efficiency_history(start + timedelta(hours=4), 1)
+
+    merged = merge_battery_efficiency_history(existing, incoming)
+    saved = store.save(EFFICIENCY_KEY, EFFICIENCY_ADAPTER, merged)
+
+    payload = json.loads(efficiency_path(tmp_path).read_text())
+    assert payload["quality"] == []
+    assert payload["battery_energy_in_kwh"] == [0.5, 0.5, None, 0.5, 0.5]
+    assert [item["hour_start"] for item in payload["exclusions"]] == [
+        "2026-01-01T02:00:00Z"
+    ]
+    assert payload["exclusions"][0]["causes"][0]["reason"] == (
+        "flagged_by_earlier_version"
+    )
+    assert ProviderDataStore(tmp_path).load(EFFICIENCY_KEY, EFFICIENCY_ADAPTER) == saved

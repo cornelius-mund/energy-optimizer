@@ -151,71 +151,74 @@ def household_entity_configuration(tmp_path: Path, entity_lines: str) -> Path:
     return path
 
 
-def test_total_entity_decrease_tolerance_defaults_to_ten_watt_hours(
-    tmp_path: Path,
+@pytest.mark.parametrize("state_class", ["total", "total_increasing"])
+@pytest.mark.parametrize("tolerance", ["0.01", "0", "0.5"])
+def test_decrease_tolerance_is_rejected_as_an_unknown_key(
+    tmp_path: Path, state_class: str, tolerance: str
 ) -> None:
-    path = household_entity_configuration(tmp_path, "      state_class: total\n")
+    """A counter decrease of any size excludes its hours, so nothing tolerates it.
 
-    configuration = load_configuration(path)
-
-    assert configuration.home_assistant is not None
-    entities = configuration.home_assistant.household_load_entities
-    assert entities is not None
-    assert entities[0].decrease_tolerance_kwh == 0.01
-
-
-@pytest.mark.parametrize("tolerance", ["0.001", "0", "0.5"])
-def test_total_entity_accepts_a_configured_decrease_tolerance(
-    tmp_path: Path, tolerance: str
-) -> None:
+    ``decrease_tolerance_kwh`` no longer exists. A configuration that still sets
+    it must fail at load and name the key, instead of silently ignoring a setting
+    that used to change which data is imported.
+    """
     path = household_entity_configuration(
         tmp_path,
-        f"      state_class: total\n      decrease_tolerance_kwh: {tolerance}\n",
+        f"      state_class: {state_class}\n"
+        f"      decrease_tolerance_kwh: {tolerance}\n",
     )
 
-    configuration = load_configuration(path)
+    with pytest.raises(ConfigurationError) as error:
+        load_configuration(path)
 
-    assert configuration.home_assistant is not None
-    entities = configuration.home_assistant.household_load_entities
-    assert entities is not None
-    assert entities[0].decrease_tolerance_kwh == float(tolerance)
+    assert (
+        "home_assistant.household_load_entities.0.decrease_tolerance_kwh: "
+        "Extra inputs are not permitted"
+    ) in str(error.value)
 
 
-@pytest.mark.parametrize("tolerance", ["-0.001", ".nan", ".inf"])
-def test_total_entity_rejects_an_invalid_decrease_tolerance(
-    tmp_path: Path, tolerance: str
+def test_decrease_tolerance_is_rejected_for_every_energy_expression(
+    tmp_path: Path,
 ) -> None:
-    path = household_entity_configuration(
-        tmp_path,
-        f"      state_class: total\n      decrease_tolerance_kwh: {tolerance}\n",
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        VALID_CONFIGURATION.replace(
+            CONFIG_MARKER,
+            "  grid_import_entities:\n"
+            "    - entity_id: sensor.grid_import\n"
+            "      state_class: total\n"
+            "      unit: kWh\n"
+            "      operation: add\n"
+            "      decrease_tolerance_kwh: 0.01\n"
+            "  grid_export_entities:\n"
+            "    - entity_id: sensor.grid_export\n"
+            "      state_class: total\n"
+            "      unit: kWh\n"
+            "      operation: add\n",
+        ),
+        encoding="utf-8",
     )
 
     with pytest.raises(ConfigurationError, match="decrease_tolerance_kwh"):
         load_configuration(path)
 
 
-def test_total_increasing_entity_rejects_a_decrease_tolerance(
-    tmp_path: Path,
+@pytest.mark.parametrize("state_class", ["total", "total_increasing"])
+def test_energy_entity_accepts_a_maximum_interval_limit_for_either_state_class(
+    tmp_path: Path, state_class: str
 ) -> None:
     path = household_entity_configuration(
         tmp_path,
-        "      state_class: total_increasing\n      decrease_tolerance_kwh: 0.01\n",
-    )
-
-    with pytest.raises(ConfigurationError, match="only.*state_class: total"):
-        load_configuration(path)
-
-
-def test_total_increasing_entity_still_loads_without_a_decrease_tolerance(
-    tmp_path: Path,
-) -> None:
-    path = household_entity_configuration(
-        tmp_path, "      state_class: total_increasing\n"
+        f"      state_class: {state_class}\n      maximum_interval_energy_kwh: 25\n",
     )
 
     configuration = load_configuration(path)
 
     assert configuration.home_assistant is not None
+    entities = configuration.home_assistant.household_load_entities
+    assert entities is not None
+    assert entities[0].state_class == state_class
+    assert entities[0].maximum_interval_energy_kwh == 25
 
 
 def test_load_configuration_returns_grid_flow_entity_mappings(
@@ -982,3 +985,15 @@ def test_load_configuration_allows_persistence_without_provider(
 
     assert configuration.persistence is not None
     assert configuration.home_assistant is None
+
+
+def test_the_example_configuration_loads() -> None:
+    """The documented example must stay valid as settings are added or removed."""
+    example = Path(__file__).parents[1] / "config.example.yaml"
+
+    configuration = load_configuration(example)
+
+    assert configuration.home_assistant is not None
+    entities = configuration.home_assistant.household_load_entities
+    assert entities is not None
+    assert [entity.maximum_interval_energy_kwh for entity in entities] == [15, 11]

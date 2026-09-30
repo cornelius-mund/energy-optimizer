@@ -6,6 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from energy_optimizer.api import historic
+from energy_optimizer.api.excluded import read_excluded_hours
 from energy_optimizer.api.routers.context import (
     ELECTRICITY_PRICE_ADAPTER,
     PV_GENERATION_ADAPTER,
@@ -18,6 +19,7 @@ from energy_optimizer.api.schemas import (
     DashboardMetric,
     DashboardPlanSummary,
     DashboardSeries,
+    ExcludedHoursResponse,
     SourceMetadata,
 )
 from energy_optimizer.api.series import align_hourly_values
@@ -546,6 +548,27 @@ def dashboard_data(
     if scenario_kind == "efficiency":
         return _efficiency_dashboard_data(request, start, end)
     return _actual_dashboard_data(request, start, end)
+
+
+@router.get(
+    "/api/v1/dashboard/excluded-hours",
+    response_model=ExcludedHoursResponse,
+)
+def excluded_hours(
+    request: Request,
+    start_time: datetime = Query(description="Inclusive timezone-aware range start"),
+    end_time: datetime = Query(description="Exclusive timezone-aware range end"),
+) -> ExcludedHoursResponse:
+    """List every hour excluded from imported history in a UTC range.
+
+    An hour of Home Assistant history is imported only if every data point that
+    contributes to it is valid. Every other hour has no value and is listed here
+    with each cause: the entity, a reason code, a message, and the exact data
+    points. A source that is not configured, has no persisted history yet, or is
+    corrupt is reported in `sources` and never hides the other sources.
+    """
+    start, end = _dashboard_range(start_time, end_time)
+    return read_excluded_hours(request, start, end)
 
 
 @router.get(

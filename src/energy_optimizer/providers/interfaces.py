@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol
 
+from energy_optimizer.exclusions import HourExclusion
+
 HOUSEHOLD_LOAD_SOURCE_ID = "household_load"
 HOUSEHOLD_LOAD_MAX_VALUES = 87_672
 PV_GENERATION_SOURCE_ID = "pv_generation"
@@ -28,7 +30,13 @@ class SourceMetadata:
 
 @dataclass(frozen=True)
 class IntervalQuality:
-    """Quality assessment for one normalized hourly interval."""
+    """Interval quality as persisted before hours were excluded.
+
+    Versions before hour exclusion flagged hours as ``suspect`` and kept a value
+    for them. That is never produced any more. It is only read from data that
+    an earlier version persisted, where ``legacy_quality`` turns every suspect
+    hour into an excluded hour.
+    """
 
     status: Literal["valid", "suspect"] = "valid"
     reason: str | None = None
@@ -37,16 +45,21 @@ class IntervalQuality:
 
 @dataclass(frozen=True)
 class HouseholdLoadData:
-    """Normalized hourly household-load data from a provider."""
+    """Normalized hourly household-load data from a provider.
+
+    An excluded hour has no value (``None``) and one entry in ``exclusions``.
+    ``quality`` is only read from data persisted by an earlier version.
+    """
 
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
-    load_kw: tuple[float, ...]
+    load_kw: tuple[float | None, ...]
     unit: Literal["kW"]
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+    exclusions: tuple[HourExclusion, ...] = ()
     quality: tuple[IntervalQuality, ...] = ()
 
 
@@ -68,17 +81,22 @@ class PvGenerationData:
 
 @dataclass(frozen=True)
 class GridFlowData:
-    """Normalized hourly grid import and export data from a provider."""
+    """Normalized hourly grid import and export data from a provider.
+
+    An hour is excluded for both channels at once: import and export are then
+    ``None`` and the hour has one entry in ``exclusions``.
+    """
 
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
-    import_kw: tuple[float, ...]
-    export_kw: tuple[float, ...]
+    import_kw: tuple[float | None, ...]
+    export_kw: tuple[float | None, ...]
     unit: Literal["kW"]
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+    exclusions: tuple[HourExclusion, ...] = ()
     quality: tuple[IntervalQuality, ...] = ()
 
 
@@ -106,22 +124,30 @@ class BatteryData:
 
 @dataclass(frozen=True)
 class BatteryEfficiencyHistoryData:
-    """Aligned measured energy and state-of-charge history for efficiency work."""
+    """Aligned measured energy and state-of-charge history for efficiency work.
+
+    An hour excluded in any component is excluded in all six energy legs, so the
+    ratios never mix valid and invalid legs. A state-of-charge value is one
+    hour boundary: ``state_of_charge_percent[i]`` lies between hour ``i - 1`` and
+    hour ``i``. It is ``None`` when the state of charge was invalid there or an
+    adjacent hour is excluded.
+    """
 
     schema_version: Literal["1"]
     start_time: datetime
     interval_minutes: Literal[60]
-    battery_energy_in_kwh: tuple[float, ...]
-    battery_energy_out_kwh: tuple[float, ...]
-    inverter_charge_energy_in_kwh: tuple[float, ...]
-    inverter_charge_energy_out_kwh: tuple[float, ...]
-    inverter_discharge_energy_in_kwh: tuple[float, ...]
-    inverter_discharge_energy_out_kwh: tuple[float, ...]
-    state_of_charge_percent: tuple[float, ...]
+    battery_energy_in_kwh: tuple[float | None, ...]
+    battery_energy_out_kwh: tuple[float | None, ...]
+    inverter_charge_energy_in_kwh: tuple[float | None, ...]
+    inverter_charge_energy_out_kwh: tuple[float | None, ...]
+    inverter_discharge_energy_in_kwh: tuple[float | None, ...]
+    inverter_discharge_energy_out_kwh: tuple[float | None, ...]
+    state_of_charge_percent: tuple[float | None, ...]
     unit: Literal["kWh"]
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime
+    exclusions: tuple[HourExclusion, ...] = ()
     quality: tuple[IntervalQuality, ...] = ()
 
 
@@ -146,7 +172,6 @@ class BatteryEfficiencyData:
     retrieved_at: datetime
     latest_observation_at: datetime
     warnings: tuple[str, ...] = ()
-    quality: tuple[IntervalQuality, ...] = ()
     defaulted_components: tuple[str, ...] = ()
     component_statuses: dict[str, EfficiencyComponentStatus] | None = None
 

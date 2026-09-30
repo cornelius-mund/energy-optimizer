@@ -146,7 +146,10 @@ Configuration is expected to contain parameters such as:
   tab displays the calculated components as raw ratio summaries over retained
   history; any component that cannot be calculated is shown as a marked 95%
   ratio default. Complete round-trip efficiency is always calculated from the
-  three effective component ratios, including defaults.
+  three effective component ratios, including defaults. An hour that is excluded
+  in any energy leg or in the state of charge (see "Which hours are imported") is
+  excluded in all of them, and a full-charge cycle that contains an excluded hour
+  is not used, so the ratios never mix valid and invalid data.
 - Electric vehicle parameters
 - Heat-pump parameters
 - Solver settings
@@ -276,17 +279,19 @@ need it, with one HTTP client and in seven-day chunks. Third, each source builds
 and persists its record from those shared series, applying its own entity
 settings, so one entity ID can be configured with different
 `maximum_interval_energy_kwh` values in different aggregates. The imported series
-live only until the cycle ends. A failing entity fails only the sources that read
-it, the error names the entity, and a failed source keeps its last valid
-persisted data.
+live only until the cycle ends. An entity that cannot be imported at all, for
+example after a request failure, fails only the sources that read it, the error
+names the entity, and a failed source keeps its last valid persisted data. Bad
+samples never fail a source: they exclude hours (see below).
 
 Grid-flow collection bootstraps and refreshes like household load: the first run
 requests up to the 87,672-hour maximum (or all history Home Assistant retains),
 and every later run requests only the completed hours after the retained history.
 Each save is merged into one contiguous hourly history in the generic JSON
 provider store, with incoming values replacing overlapping hours and the oldest
-hours dropped beyond the retention limit. A fetched range that would leave a gap
-fails the run and keeps the last valid history for the next attempt. It uses the
+hours dropped beyond the retention limit. An excluded hour keeps its place without
+values, so it never leaves a gap. A fetched range that would leave a gap fails
+the run and keeps the last valid history for the next attempt. It uses the
 same Home Assistant energy semantics as household load and can combine multiple
 signed entities independently for import and export. The retained history is
 served by the historic multi-asset dashboard read API (see
@@ -358,77 +363,81 @@ implicitly converted to energy.
 Configure the Home Assistant URL, bearer token, one or more household-load energy
 entities, and request timeout in `config.yaml`. An optional
 `max_data_age_seconds` setting enables a polling health check; it does not
-invalidate historical data. No interpolation is performed: the latest observed
-counter value is carried forward until the next observation. For
-`total_increasing`, a decrease starts a new meter cycle and establishes the new
-value as a zero-contribution baseline. For `total`, a changed `last_reset`
-timestamp marks a reset, and that reset reading also establishes a
-zero-contribution baseline. A `total` decrease without a
-changed `last_reset` is measurement jitter, such as a 1 Wh rounding step of a
-chatty sensor, when the counter stays within `decrease_tolerance_kwh` (default
-`0.01` kWh) of the highest value it reached. The step contributes no energy and
-no negative energy, the counter climbing back to that value is not counted a
-second time, and the hour is not marked `suspect`. A larger `total` decrease
-without a changed `last_reset` never fails the import. It is handled like a
-`total_increasing` decrease: it contributes no energy, the affected hourly
-interval is marked `suspect` with reason `counter_reset`, and a
-`home_assistant_counter_reset` warning names the entity, the timestamp, the
-previous and current values, the decrease, and the tolerance.
-A subsequent value that returns close to the pre-reset counter is treated as
-recovery rather than energy. Every
-other observed increase within an hour is summed, so valid energy after a reset
-is retained without turning the post-reset absolute counter value into fabricated
-energy. Reset transitions and recovery decisions are logged with the entity and
-observed values and mark the affected hourly interval as `suspect`; suspect
-intervals are exposed with a reason and source entity and block optimization.
-If a `total_increasing` counter, or a `total` counter that decreases by more than
-its tolerance, rises and the next valid observation returns close
-to the value before that rise, the earlier increase is retracted as a transient
-counter spike. Both observations contribute zero for the correction and the
-affected interval is marked `suspect`.
-`unknown` and `unavailable` history samples are
-skipped without assigning energy, and the importer logs the affected entity
-and time range. The next valid cumulative observation determines the delta;
-the delta is assigned to that observation's hour rather than interpolated
-across the skipped sample. An entity with no usable observations still rejects
-the complete aggregate, as do malformed, non-finite, incompatible, or failed
-entity responses. The token is a secret and must not be committed to source
-control. The importer raises actionable errors for authentication failures,
-missing history, malformed or non-numeric values, unsupported power units,
-invalid state classes, and request failures.
+invalidate historical data. The token is a secret and must not be committed to
+source control.
 
-Each cumulative-energy entity may also define
-`maximum_interval_energy_kwh`. The default is `100` kWh. The importer compares
-every normalized hourly delta after unit conversion with that physical upper
-bound. A delta above the limit is replaced with zero, marked `suspect` with
-reason `physical_limit_exceeded`, and logged with the entity, timestamp, observed
-delta, and configured limit. Equality is accepted. The limit is per source
-entity and is not applied to other mappings; override it with the meter or
-inverter's credible maximum hourly energy.
+#### Which hours are imported
 
-A `total` entity may also define `decrease_tolerance_kwh`, the largest decrease
-below the counter's highest value that is treated as measurement jitter instead
-of an unmarked reset. The default is `0.01` kWh (10 Wh), and `0` treats every
-decrease as a reset. The importer converts the decrease to kWh before comparing it,
-so the setting is independent of the entity's `unit`, and it measures every
-decrease against the highest value reached, so a slow downward drift is not
-accepted one small step at a time. The importer logs one
-`home_assistant_counter_jitter_tolerated` message per entity and fetch with the
-number of tolerated decreases, the first timestamp, and the largest decrease.
-The setting applies to every mapping that uses `state_class: total`: household
-load, grid import and export, and every measured battery-efficiency leg. It is
-rejected for `total_increasing`, where a decrease starts a new meter cycle.
+An hour is imported only if every data point that contributes to it is valid.
+Every other hour is **excluded**: it has no value (`null` in the API), it is left
+out of every chart and calculation, and it is listed with each cause and its exact
+data points on the **Excluded hours** dashboard tab and through
+`GET /api/v1/dashboard/excluded-hours`. Nothing is repaired, tolerated, or
+estimated, so there is no reset, spike, recovery, or jitter handling. One bad
+sample never fails an import and never blocks a later one: the persisted history
+advances past excluded hours, which keep their place without a value.
 
-After signed aggregation, a negative combined household-load or grid-flow hour
-normally fails the fetch with an error that names the hour by its UTC timestamp,
-because it indicates a misconfigured `add` or `subtract` operation. When at
-least one contributing entity has already flagged that hour `suspect` (for
-example `counter_reset` or `physical_limit_exceeded`), the negative value is
-explained by the flagged counter instead: the hour is clamped to zero, stays
-`suspect`, and the surrounding hours are ingested. One
-`home_assistant_negative_hour_clamped` warning per aggregation lists each
-clamped hour's UTC timestamp together with the suspect reason and entity of
-every flagged contributor. A non-finite combined value always fails the fetch.
+No interpolation is performed: the latest observed counter value is carried
+forward until the next observation, and Home Assistant records only state changes,
+so a counter keeps its value between two observations. The observations of an
+entity, in time order, form steps. The energy of a step belongs to the hour of its
+later observation, and an observation exactly on an hour boundary belongs to the
+hour it closes. A sensor that publishes on the hour and is unavailable at
+`01:00:00` therefore has no closing reading for the hour before it.
+
+| Reason | Cause | Excluded hours |
+|---|---|---|
+| `unavailable` | The state is `unknown` or `unavailable` | Every hour from the first invalid sample until the first valid observation after it, including the hour in which the entity returns; a trailing outage runs to the end of the imported period |
+| `non_numeric` | The state is not a number | As `unavailable` |
+| `not_finite` | The state is `nan` or infinite | As `unavailable` |
+| `negative_value` | A counter reports a negative value | As `unavailable` |
+| `invalid_attribute` | `state_class` or `last_reset` is not usable | As `unavailable` |
+| `unit_mismatch`, `unit_missing`, `state_class_mismatch` | A sample reports another unit, no unit, or another `state_class` than configured | As `unavailable` |
+| `counter_decrease` | A counter decreases, however little (a 1 Wh step included) | The hours of both observations of the step |
+| `step_after_decrease` | The step directly after a decrease: a reset cannot be told apart from a glitch, so a return from zero is not trusted | The hours of both observations of the step |
+| `last_reset_changed` | The `last_reset` marker changes between two observations | The hours of both observations of the step |
+| `step_above_maximum` | A step exceeds `maximum_interval_energy_kwh` | The hour of the later observation |
+| `hour_above_maximum` | The steps of one hour add up to more than `maximum_interval_energy_kwh` | That hour |
+| `soc_out_of_range` | A state of charge is outside 0 to 100 percent | As `unavailable`, for the state-of-charge entity |
+| `combined_negative`, `combined_not_finite` | The `add` and `subtract` operations of an hour give a negative or non-finite value | That hour |
+| `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` | That hour |
+
+A counter that drops to zero and returns therefore excludes the hours of the drop
+and of the step back up, and the hours before and after keep their true energy.
+The set of reason codes is closed; every excluded hour lists at least one.
+
+`maximum_interval_energy_kwh` is a per-entity setting (default `100` kWh) with the
+unit-converted maximum energy of one entity in one hour and in one counter step.
+Equality is accepted. The limit applies to the source entity only; override it
+with the meter or inverter's credible maximum hourly energy. The former
+`decrease_tolerance_kwh` setting no longer exists, and a configuration that still
+contains it is rejected at startup because unknown keys are not accepted; remove
+it from any existing `config.yaml`.
+
+A combined household-load or grid-flow hour is excluded when any contributing
+entity is excluded for it, and also when the signed operations make it negative or
+not finite; it is never clamped to zero. Grid import and export are excluded
+together, and the state-of-charge and energy legs of the battery efficiency
+history are excluded together (see below). Only the entity that caused an
+exclusion is named.
+
+Every cause names the entity, a reason code, a message, and its data points. A
+data point holds the time Home Assistant recorded it, the raw state exactly as
+reported, and for a counter step the previous and current observation, the step's
+energy, and the maximum. At most 50 data points are kept per entity and hour; the
+cause keeps the full count. Excluded hours are persisted with the history, next to
+the hour they explain, and survive restarts. A refresh that excluded hours still
+completes as `success` and does not block optimization; it logs one
+`provider_hours_excluded` warning per source and refresh with the number of
+excluded hours by reason.
+
+Some problems make an entity unusable as a whole and remain errors that fail the
+sources that read it, with a message naming the entity: authentication or request
+failures, malformed responses, an entity without any history, an instantaneous
+power unit (`W` or `kW`) configured as a cumulative energy entity, duplicate
+timestamps, and a period without a complete hour. Data persisted by an earlier
+version keeps its valid hours unchanged; hours that were flagged `suspect` become
+excluded hours with the reason `flagged_by_earlier_version`.
 
 For example, a household meter can be added while an EV meter is subtracted:
 
@@ -464,8 +473,8 @@ period. `end_time` may be omitted to fetch through the latest completed UTC
 hour. The lookback asks Home Assistant for an earlier state so the importer can
 carry the last known value into the first requested hour. It is applied only to
 the first weekly request; later requests start exactly at the previous request's
-end. Raw chunks are combined before counter normalization, so deltas, reset
-boundaries, and recovery handling remain correct across chunk boundaries. A
+end. Raw chunks are combined before counter normalization, so steps and excluded
+hours remain correct across chunk boundaries. A
 failed chunk fails the complete fetch. During scheduled collection, the failed
 refresh is logged and the last valid persisted history remains available for a
 later retry. The caller owns the lookback and polling policy. Call
@@ -480,9 +489,9 @@ retrieval and normalization functionality for grid import and export. Configure
 one or more entities for each channel; every entity uses `state_class` (`total` or
 `total_increasing`), an energy `unit` (`Wh`, `kWh`, or `MWh`), and an explicit
 `operation` (`add` or `subtract`). Import and export are aligned to their common
-available hourly start. Long grid-flow requests use the same contiguous,
-seven-day maximum chunks as household load, and a failed chunk or channel never
-produces a partial result.
+available hourly start, and an hour excluded in either channel is excluded in both.
+Long grid-flow requests use the same contiguous, seven-day maximum chunks as
+household load, and a failed chunk or channel never produces a partial result.
 
 ```yaml
 home_assistant:
