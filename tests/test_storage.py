@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -802,6 +803,163 @@ def test_store_appends_new_observations_without_rewriting_existing_lines(
     after = primary.read_bytes()
     assert after.startswith(before)
     assert len(after.splitlines()) == 3
+
+
+def test_merge_excludes_hours_between_history_and_a_later_range_as_unavailable() -> (
+    None
+):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    existing = household_load_data(start, [1.0, 2.0])
+    incoming = household_load_data(
+        start + timedelta(hours=5), [3.0, 4.0], retrieved_at=start + timedelta(days=1)
+    )
+
+    merged = storage_module.merge_household_load_history(existing, incoming)
+
+    assert merged.start_time == start
+    assert merged.load_kw == (1.0, 2.0, None, None, None, 3.0, 4.0)
+    assert [item.hour_start for item in merged.exclusions] == [
+        start + timedelta(hours=hour) for hour in (2, 3, 4)
+    ]
+    for item in merged.exclusions:
+        assert [
+            (cause.reason, cause.entity_id, cause.data_points, cause.data_point_count)
+            for cause in item.causes
+        ] == [("history_unavailable", None, (), 0)]
+        assert item.causes[0].message == (
+            "The provider holds no history from 2026-01-01T02:00:00+00:00 until "
+            "2026-01-01T05:00:00+00:00 (3 hours), so these hours cannot be imported."
+        )
+    assert merged.retrieved_at == incoming.retrieved_at
+
+
+@pytest.mark.parametrize(
+    ("incoming_start_hour", "expected"),
+    [
+        (1, (1.0, 9.0, 8.0)),
+        (2, (1.0, 2.0, 9.0, 8.0)),
+    ],
+)
+def test_merge_of_an_overlapping_or_adjacent_range_creates_no_exclusion(
+    incoming_start_hour: int, expected: tuple[float, ...]
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    merged = storage_module.merge_household_load_history(
+        household_load_data(start, [1.0, 2.0]),
+        household_load_data(start + timedelta(hours=incoming_start_hour), [9.0, 8.0]),
+    )
+
+    assert merged.load_kw == expected
+    assert merged.exclusions == ()
+
+
+def test_merge_still_rejects_a_range_that_leaves_a_gap_after_the_incoming_hours() -> (
+    None
+):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(ProviderDataStoreError, match="contiguous"):
+        storage_module.merge_household_load_history(
+            household_load_data(start + timedelta(hours=5), [1.0]),
+            household_load_data(start, [2.0]),
+        )
+
+
+def test_store_persists_a_gap_that_survives_restart_and_continues_incrementally(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0, 2.0]))
+    primary, _ = paths(tmp_path)
+    before = primary.read_bytes()
+
+    saved = store.save(
+        KEY, ADAPTER, household_load_data(start + timedelta(hours=5), [3.0])
+    )
+
+    assert saved.load_kw == (1.0, 2.0, None, None, None, 3.0)
+    # The gap is appended like any other hour, so the file stays contiguous.
+    assert primary.read_bytes().startswith(before)
+    records = [json.loads(line) for line in primary.read_text().splitlines()]
+    assert [record["timestamp"] for record in records] == [
+        (start + timedelta(hours=hour)).isoformat() for hour in range(6)
+    ]
+    assert [record["load_kw"] for record in records] == [
+        1.0,
+        2.0,
+        None,
+        None,
+        None,
+        3.0,
+    ]
+    assert [
+        record.get("exclusion", {}).get("causes", [{}])[0].get("reason")
+        for record in records
+    ] == [None, None] + ["history_unavailable"] * 3 + [None]
+    restarted = ProviderDataStore(tmp_path).load(KEY, ADAPTER)
+    assert restarted == saved
+    continued = ProviderDataStore(tmp_path).save(
+        KEY, ADAPTER, household_load_data(start + timedelta(hours=6), [4.0])
+    )
+    assert continued.load_kw == (1.0, 2.0, None, None, None, 3.0, 4.0)
+    assert len(continued.exclusions) == 3
+
+
+def test_store_lets_a_later_submission_of_the_missing_hours_replace_the_gap(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0]))
+    store.save(KEY, ADAPTER, household_load_data(start + timedelta(hours=3), [4.0]))
+
+    filled = store.save(
+        KEY, ADAPTER, household_load_data(start + timedelta(hours=1), [2.0, 3.0])
+    )
+
+    assert filled.load_kw == (1.0, 2.0, 3.0, 4.0)
+    assert filled.exclusions == ()
+    assert ProviderDataStore(tmp_path).load(KEY, ADAPTER) == filled
+
+
+def test_store_lists_gap_hours_in_a_range_query_like_any_excluded_hour(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0]))
+    store.save(KEY, ADAPTER, household_load_data(start + timedelta(hours=3), [2.0]))
+
+    ranged = store.load_household_load_range(
+        KEY, start + timedelta(hours=1), start + timedelta(hours=3)
+    )
+
+    assert ranged is not None
+    assert ranged.load_kw == (None, None)
+    assert [cause.reason for item in ranged.exclusions for cause in item.causes] == [
+        "history_unavailable"
+    ] * 2
+
+
+def test_store_rejects_a_gap_range_from_another_source_without_changing_history(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    store = ProviderDataStore(tmp_path)
+    store.save(KEY, ADAPTER, household_load_data(start, [1.0]))
+    primary, _ = paths(tmp_path)
+    before = primary.read_bytes()
+    other = replace(
+        household_load_data(start + timedelta(hours=4), [2.0]),
+        source=SourceMetadata(provider="home-assistant", entity_id="other"),
+    )
+
+    with pytest.raises(ProviderDataStoreError, match="source identity"):
+        store.save(KEY, ADAPTER, other)
+
+    assert primary.read_bytes() == before
 
 
 def test_store_ignores_only_an_interrupted_final_append(tmp_path: Path) -> None:

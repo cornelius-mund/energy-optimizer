@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
-from energy_optimizer.exclusions import HourExclusion
+from energy_optimizer.exclusions import HourExclusion, history_unavailable_exclusions
 from energy_optimizer.household_load_records import as_utc
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
@@ -88,17 +88,29 @@ def merge_grid_flow_history(
     """Merge hourly grid-flow data, preferring incoming values, within retention.
 
     The retained history must stay contiguous so that consumers can rely on one
-    start time and equally spaced values; a gap is rejected instead of hidden.
-    An excluded hour occupies its place without values.
+    start time and equally spaced values. An excluded hour occupies its place
+    without values, and so does every hour between the retained history and an
+    incoming range that starts later: the provider no longer holds those hours,
+    so they are excluded as ``history_unavailable`` instead of failing forever.
+    An incoming range that leaves any other gap is rejected.
     """
     points = {}
+    existing_end = None
     if existing is not None:
         if existing.source != incoming.source:
             raise ProviderDataStoreError(
                 "grid-flow history source identity does not match incoming data"
             )
         points.update(grid_flow_points(existing))
-    points.update(grid_flow_points(incoming))
+        existing_end = max(points) + _HOUR
+    incoming_points = grid_flow_points(incoming)
+    incoming_start = min(incoming_points)
+    if existing_end is not None and incoming_start > existing_end:
+        for item in history_unavailable_exclusions(
+            "grid_flow", existing_end, incoming_start
+        ):
+            points[item.hour_start] = (None, None, item)
+    points.update(incoming_points)
     ordered = sorted(points.items())[-HISTORY_RETENTION_HOURS:]
     timestamps = [timestamp for timestamp, _ in ordered]
     if any(

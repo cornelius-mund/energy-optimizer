@@ -18,6 +18,7 @@ from energy_optimizer.exclusions import (
     ExclusionReason,
     HourExclusion,
     cap_data_points,
+    history_unavailable_exclusions,
     merge_exclusions,
 )
 from energy_optimizer.providers.home_assistant_energy import (
@@ -398,50 +399,75 @@ def merge_battery_efficiency_history(
 ) -> BatteryEfficiencyHistoryData:
     """Extend persisted battery-efficiency history with newly fetched hours.
 
-    ``incoming`` must start exactly where ``existing`` ends, so ingestion only
-    ever needs to request the missing hours from Home Assistant instead of
-    re-fetching the complete retained history on every scheduled run.
+    ``incoming`` starts where ``existing`` ends, so ingestion only ever needs to
+    request the missing hours from Home Assistant instead of re-fetching the
+    complete retained history on every scheduled run. When Home Assistant no
+    longer holds the hours between the two, ``incoming`` starts later and those
+    hours can never be fetched: they are excluded as ``history_unavailable``.
     """
     if existing is None:
         return bound_battery_efficiency_history(incoming)
     expected_start = existing.start_time + timedelta(
         hours=len(existing.battery_energy_in_kwh)
     )
-    if incoming.start_time != expected_start:
+    gap_hours, remainder = divmod(incoming.start_time - expected_start, _HOUR)
+    if gap_hours < 0 or remainder:
         raise HomeAssistantError(
             "battery efficiency history is not contiguous with the persisted history"
         )
+    gap = (
+        history_unavailable_exclusions(
+            "battery_efficiency", expected_start, incoming.start_time
+        )
+        if gap_hours
+        else ()
+    )
+    unavailable: tuple[float | None, ...] = (None,) * gap_hours
+    # The incoming SoC series repeats the boundary sample already recorded as the
+    # existing series' last value; keep it only once. Over a gap, the boundaries
+    # of the missing hours are all unknown, including the two that touch a valid
+    # hour, exactly as a full import drops the state of charge around every
+    # excluded hour.
+    state_of_charge = existing.state_of_charge_percent[:-1] + (
+        (None,) * (gap_hours + 1) + incoming.state_of_charge_percent[1:]
+        if gap_hours
+        else incoming.state_of_charge_percent
+    )
     merged = replace(
         incoming,
         start_time=existing.start_time,
         battery_energy_in_kwh=(
-            existing.battery_energy_in_kwh + incoming.battery_energy_in_kwh
+            existing.battery_energy_in_kwh
+            + unavailable
+            + incoming.battery_energy_in_kwh
         ),
         battery_energy_out_kwh=(
-            existing.battery_energy_out_kwh + incoming.battery_energy_out_kwh
+            existing.battery_energy_out_kwh
+            + unavailable
+            + incoming.battery_energy_out_kwh
         ),
         inverter_charge_energy_in_kwh=(
             existing.inverter_charge_energy_in_kwh
+            + unavailable
             + incoming.inverter_charge_energy_in_kwh
         ),
         inverter_charge_energy_out_kwh=(
             existing.inverter_charge_energy_out_kwh
+            + unavailable
             + incoming.inverter_charge_energy_out_kwh
         ),
         inverter_discharge_energy_in_kwh=(
             existing.inverter_discharge_energy_in_kwh
+            + unavailable
             + incoming.inverter_discharge_energy_in_kwh
         ),
         inverter_discharge_energy_out_kwh=(
             existing.inverter_discharge_energy_out_kwh
+            + unavailable
             + incoming.inverter_discharge_energy_out_kwh
         ),
-        # The incoming SoC series repeats the boundary sample already recorded
-        # as the existing series' last value; keep it only once.
-        state_of_charge_percent=(
-            existing.state_of_charge_percent[:-1] + incoming.state_of_charge_percent
-        ),
-        exclusions=merge_exclusions(existing.exclusions, incoming.exclusions),
+        state_of_charge_percent=state_of_charge,
+        exclusions=merge_exclusions(existing.exclusions, gap, incoming.exclusions),
     )
     # A full import drops the state of charge around every excluded hour. The
     # incoming series cannot know that the last persisted hour is excluded, and

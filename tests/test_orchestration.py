@@ -956,7 +956,7 @@ def test_grid_flow_failure_preserves_the_retained_history(
     assert store.load(GRID_KEY, GRID_FLOW_ADAPTER) == retained
 
 
-def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
+def test_grid_flow_gap_in_fetched_hours_is_excluded_as_history_unavailable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     grid_flow_requests: list[tuple[datetime, datetime | None]],
@@ -967,7 +967,6 @@ def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
     )
     assert orchestrator is not None
     orchestrator.run_due(START + timedelta(hours=5, minutes=1))
-    retained = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
     original_plan = RecordingGridFlowImporter.plan
 
     def skip_first_requested_hour(
@@ -989,9 +988,25 @@ def test_grid_flow_gap_in_fetched_hours_is_rejected_without_losing_history(
     monkeypatch.setattr(RecordingGridFlowImporter, "plan", skip_first_requested_hour)
     cycle = orchestrator.run_due(START + timedelta(hours=8, minutes=1), force=True)
 
-    assert cycle.provider_runs[0].status == "failed"
-    assert "contiguous" in (cycle.provider_runs[0].error or "")
-    assert store.load(GRID_KEY, GRID_FLOW_ADAPTER) == retained
+    assert cycle.provider_runs[0].status == "success"
+    history = store.load(GRID_KEY, GRID_FLOW_ADAPTER)
+    assert history is not None
+    assert history.start_time == START + timedelta(hours=3)
+    assert history.import_kw == (1.0, 2.0, None, 1.0, 2.0)
+    assert history.export_kw == (0.5, 0.5, None, 0.5, 0.5)
+    assert [
+        (item.hour_start, [cause.reason for cause in item.causes])
+        for item in history.exclusions
+    ] == [(START + timedelta(hours=5), ["history_unavailable"])]
+
+    monkeypatch.setattr(RecordingGridFlowImporter, "plan", original_plan)
+    third = orchestrator.run_due(START + timedelta(hours=10, minutes=1), force=True)
+
+    assert third.provider_runs[0].status == "success"
+    assert grid_flow_requests[-1] == (
+        START + timedelta(hours=8),
+        START + timedelta(hours=10),
+    )
 
 
 PRICE_KEY = ProviderDataKey("electricity-prices", "awattar.de", "de")

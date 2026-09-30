@@ -565,8 +565,11 @@ def excluded_hours(
     An hour of Home Assistant history is imported only if every data point that
     contributes to it is valid. Every other hour has no value and is listed here
     with each cause: the entity, a reason code, a message, and the exact data
-    points. A source that is not configured, has no persisted history yet, or is
-    corrupt is reported in `sources` and never hides the other sources.
+    points. Hours that Home Assistant no longer holds, because the service was
+    down for longer than its history is retained, are listed with the reason
+    `history_unavailable`; their cause names the missing range and has no entity
+    and no data points. A source that is not configured, has no persisted history
+    yet, or is corrupt is reported in `sources` and never hides the other sources.
     """
     start, end = _dashboard_range(start_time, end_time)
     return read_excluded_hours(request, start, end)

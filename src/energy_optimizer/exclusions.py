@@ -11,10 +11,14 @@ or HTTP.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, get_args
+
+logger = logging.getLogger(__name__)
+_HOUR_SECONDS = 3600
 
 ExclusionReason = Literal[
     "unavailable",
@@ -34,6 +38,7 @@ ExclusionReason = Literal[
     "combined_negative",
     "combined_not_finite",
     "flagged_by_earlier_version",
+    "history_unavailable",
 ]
 """Every reason an hour can be excluded. The set is closed and documented."""
 
@@ -101,6 +106,39 @@ class HourExclusion:
     causes: tuple[ExclusionCause, ...]
 
 
+def history_unavailable_exclusions(
+    source: str, missing_start: datetime, missing_end: datetime
+) -> tuple[HourExclusion, ...]:
+    """Exclude every hour of a range that the provider no longer holds.
+
+    The range is half-open: ``missing_start`` is the first missing hour and
+    ``missing_end`` the first hour after it that has history again. Every hour
+    gets the same cause, which names the whole range, so an operator reading one
+    hour can see the extent of the gap. The cause belongs to no entity and holds
+    no data points, because nothing was recorded for these hours. ``source`` names
+    the history that has the gap in the warning that reports it.
+    """
+    hours = round((missing_end - missing_start).total_seconds() / _HOUR_SECONDS)
+    message = (
+        f"The provider holds no history from {missing_start.isoformat()} until "
+        f"{missing_end.isoformat()} ({hours} hour{'' if hours == 1 else 's'}), so "
+        f"{'this hour' if hours == 1 else 'these hours'} cannot be imported."
+    )
+    logger.warning(
+        "event=provider_history_unavailable component=storage operation=merge "
+        "source=%s hour_count=%s first_hour=%s last_hour=%s",
+        source,
+        hours,
+        missing_start.isoformat(),
+        (missing_end - timedelta(hours=1)).isoformat(),
+    )
+    cause = ExclusionCause.of("history_unavailable", message, None, [])
+    return tuple(
+        HourExclusion(missing_start + timedelta(hours=index), (cause,))
+        for index in range(hours)
+    )
+
+
 def cap_data_points(causes: Iterable[ExclusionCause]) -> tuple[ExclusionCause, ...]:
     """Bound the stored data points per entity while keeping the full counts."""
     remaining: dict[str | None, int] = {}
@@ -152,5 +190,6 @@ __all__ = [
     "HourExclusion",
     "cap_data_points",
     "exclusion_summary",
+    "history_unavailable_exclusions",
     "merge_exclusions",
 ]

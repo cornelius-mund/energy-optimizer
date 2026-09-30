@@ -1528,6 +1528,123 @@ def test_merge_rejects_a_non_contiguous_incoming_history() -> None:
         merge_battery_efficiency_history(existing, incoming)
 
 
+def gapped_history(gap_hours: int = 4) -> BatteryEfficiencyHistoryData:
+    """Merge two six-hour histories that Home Assistant left a gap between."""
+    existing = history()
+    incoming = replace(history(), start_time=START + timedelta(hours=6 + gap_hours))
+    return merge_battery_efficiency_history(existing, incoming)
+
+
+def test_merge_excludes_the_hours_between_the_histories_as_unavailable() -> None:
+    merged = gapped_history(gap_hours=4)
+
+    assert merged.start_time == START
+    hours = 6 + 4 + 6
+    for leg in (
+        merged.battery_energy_in_kwh,
+        merged.battery_energy_out_kwh,
+        merged.inverter_charge_energy_in_kwh,
+        merged.inverter_charge_energy_out_kwh,
+        merged.inverter_discharge_energy_in_kwh,
+        merged.inverter_discharge_energy_out_kwh,
+    ):
+        assert len(leg) == hours
+        assert leg[6:10] == (None,) * 4
+        assert None not in leg[:6] + leg[10:]
+    assert merged.battery_energy_in_kwh[:6] == history().battery_energy_in_kwh
+    assert merged.battery_energy_in_kwh[10:] == history().battery_energy_in_kwh
+    assert [item.hour_start for item in merged.exclusions] == [
+        START + timedelta(hours=hour) for hour in range(6, 10)
+    ]
+    for item in merged.exclusions:
+        assert [
+            (cause.reason, cause.entity_id, cause.data_points, cause.data_point_count)
+            for cause in item.causes
+        ] == [("history_unavailable", None, (), 0)]
+        assert item.causes[0].message == (
+            "The provider holds no history from 2026-01-01T06:00:00+00:00 until "
+            "2026-01-01T10:00:00+00:00 (4 hours), so these hours cannot be imported."
+        )
+
+
+def test_merge_over_a_gap_keeps_one_more_state_of_charge_than_hours() -> None:
+    merged = gapped_history(gap_hours=4)
+
+    assert len(merged.state_of_charge_percent) == len(merged.battery_energy_in_kwh) + 1
+    # Boundary i lies before hour i, so the missing hours 6 to 9 drop boundaries 6
+    # to 10, as a full import that excludes them would.
+    assert merged.state_of_charge_percent[:6] == (50, 100, 50, 100, 50, 100)
+    assert merged.state_of_charge_percent[6:11] == (None,) * 5
+    assert merged.state_of_charge_percent[11:] == (100, 50, 100, 50, 100, 50)
+
+
+def test_merge_over_a_gap_of_one_hour_drops_the_two_boundaries_around_it() -> None:
+    merged = gapped_history(gap_hours=1)
+
+    assert len(merged.state_of_charge_percent) == 6 + 1 + 6 + 1
+    assert merged.state_of_charge_percent[5:8] == (100, None, None)
+    assert merged.battery_energy_in_kwh[6] is None
+    assert [item.hour_start for item in merged.exclusions] == [
+        START + timedelta(hours=6)
+    ]
+
+
+def test_merge_over_a_gap_keeps_earlier_exclusions_and_incoming_exclusions() -> None:
+    existing = history(excluded=(1,), soc=(50, None, None, 100, 50, 100, 50))
+    incoming = replace(
+        history(excluded=(2,), soc=(50, 100, None, None, 50, 100, 50)),
+        start_time=START + timedelta(hours=8),
+        exclusions=(exclusion(10, "unavailable", "sensor.soc"),),
+    )
+
+    merged = merge_battery_efficiency_history(existing, incoming)
+
+    assert [
+        (item.hour_start, [cause.reason for cause in item.causes])
+        for item in merged.exclusions
+    ] == [
+        (START + timedelta(hours=1), ["counter_decrease"]),
+        (START + timedelta(hours=6), ["history_unavailable"]),
+        (START + timedelta(hours=7), ["history_unavailable"]),
+        (START + timedelta(hours=10), ["unavailable"]),
+    ]
+    assert len(merged.state_of_charge_percent) == len(merged.battery_energy_in_kwh) + 1
+
+
+def test_calculation_ignores_gap_hours_and_the_cycles_that_span_them() -> None:
+    merged = gapped_history(gap_hours=4)
+
+    result = calculate_battery_efficiency(
+        merged, calculation_configuration(), capacity_kwh=10, now=START
+    )
+
+    assert result.status == "ok"
+    # Each six-hour history alone holds two full-charge cycles of 5 kWh. Across the
+    # gap the state of charge is unknown, so no cycle may start or end inside it:
+    # the two cycles before it and the one after it remain.
+    assert result.complete_cycle_count == 3
+    assert result.battery_efficiency == pytest.approx(0.8)
+    assert result.battery_throughput_kwh == pytest.approx(3 * 5.0)
+    assert result.warnings == ()
+
+
+def test_merge_rejects_an_incoming_history_that_starts_before_the_persisted_end() -> (
+    None
+):
+    existing = history()
+    incoming = replace(history(), start_time=START + timedelta(hours=5))
+
+    with pytest.raises(HomeAssistantError, match="not contiguous"):
+        merge_battery_efficiency_history(existing, incoming)
+
+
+def test_merge_rejects_an_incoming_history_that_is_not_aligned_to_the_hour() -> None:
+    incoming = replace(history(), start_time=START + timedelta(hours=8, minutes=30))
+
+    with pytest.raises(HomeAssistantError, match="not contiguous"):
+        merge_battery_efficiency_history(history(), incoming)
+
+
 def test_merge_returns_the_incoming_history_when_nothing_is_persisted() -> None:
     incoming = history()
 

@@ -140,6 +140,107 @@ def test_grid_flow_merge_extends_history_and_keeps_both_channels() -> None:
     assert merged.latest_observation_at == START + timedelta(hours=3)
 
 
+def test_grid_flow_merge_excludes_a_gap_before_the_fetched_range_as_unavailable() -> (
+    None
+):
+    existing = grid_flow(0, (1.0, 2.0))
+    incoming = grid_flow(5, (3.0, 4.0))
+
+    merged = merge_grid_flow_history(existing, incoming)
+
+    assert merged.start_time == START
+    assert merged.import_kw == (1.0, 2.0, None, None, None, 3.0, 4.0)
+    assert merged.export_kw == (0.5, 1.0, None, None, None, 1.5, 2.0)
+    assert [item.hour_start for item in merged.exclusions] == [
+        START + timedelta(hours=hour) for hour in (2, 3, 4)
+    ]
+    for item in merged.exclusions:
+        assert [
+            (cause.reason, cause.entity_id, cause.data_points, cause.data_point_count)
+            for cause in item.causes
+        ] == [("history_unavailable", None, (), 0)]
+        assert item.causes[0].message == (
+            "The provider holds no history from 2026-01-01T02:00:00+00:00 until "
+            "2026-01-01T05:00:00+00:00 (3 hours), so these hours cannot be imported."
+        )
+    assert merged.latest_observation_at == incoming.latest_observation_at
+    assert grid_flow_points(merged)[START] == (1.0, 0.5, None)
+    assert grid_flow_points(merged)[START + timedelta(hours=6)] == (4.0, 2.0, None)
+
+
+def test_grid_flow_merge_excludes_a_single_missing_hour() -> None:
+    merged = merge_grid_flow_history(grid_flow(0, (1.0,)), grid_flow(2, (2.0,)))
+
+    assert merged.import_kw == (1.0, None, 2.0)
+    assert [item.hour_start for item in merged.exclusions] == [
+        START + timedelta(hours=1)
+    ]
+    assert merged.exclusions[0].causes[0].message == (
+        "The provider holds no history from 2026-01-01T01:00:00+00:00 until "
+        "2026-01-01T02:00:00+00:00 (1 hour), so this hour cannot be imported."
+    )
+
+
+def test_grid_flow_merge_keeps_earlier_exclusions_next_to_a_gap() -> None:
+    existing = grid_flow(0, (1.0, None), exclusions=(exclusion(1),))
+
+    merged = merge_grid_flow_history(existing, grid_flow(3, (3.0,)))
+
+    assert merged.import_kw == (1.0, None, None, 3.0)
+    assert [
+        (item.hour_start, [cause.reason for cause in item.causes])
+        for item in merged.exclusions
+    ] == [
+        (START + timedelta(hours=1), ["counter_decrease"]),
+        (START + timedelta(hours=2), ["history_unavailable"]),
+    ]
+
+
+def test_grid_flow_merge_leaves_a_range_that_follows_directly_without_a_gap() -> None:
+    merged = merge_grid_flow_history(grid_flow(0, (1.0, 2.0)), grid_flow(2, (3.0,)))
+
+    assert merged.import_kw == (1.0, 2.0, 3.0)
+    assert merged.exclusions == ()
+
+
+def test_grid_flow_merge_lets_a_later_submission_fill_the_gap() -> None:
+    gapped = merge_grid_flow_history(grid_flow(0, (1.0,)), grid_flow(3, (4.0,)))
+
+    filled = merge_grid_flow_history(gapped, grid_flow(1, (2.0, 3.0)))
+
+    assert filled.import_kw == (1.0, 2.0, 3.0, 4.0)
+    assert filled.exclusions == ()
+
+
+def test_grid_flow_merge_bounds_a_gap_with_the_retention_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(history_merge, "HISTORY_RETENTION_HOURS", 4)
+
+    merged = merge_grid_flow_history(grid_flow(0, (1.0, 2.0)), grid_flow(5, (3.0,)))
+
+    assert merged.start_time == START + timedelta(hours=2)
+    assert merged.import_kw == (None, None, None, 3.0)
+    assert len(merged.exclusions) == 3
+
+
+def test_store_persists_a_grid_flow_gap_and_continues_incrementally(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0, 2.0)))
+
+    saved = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(6, (3.0,)))
+    restarted = ProviderDataStore(tmp_path).load(GRID_KEY, GRID_ADAPTER)
+    continued = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(7, (4.0,)))
+
+    assert saved.import_kw == (1.0, 2.0, None, None, None, None, 3.0)
+    assert restarted == saved
+    assert continued.start_time == START
+    assert continued.import_kw == (1.0, 2.0, None, None, None, None, 3.0, 4.0)
+    assert len(continued.exclusions) == 4
+
+
 def test_grid_flow_merge_prefers_incoming_values_for_overlapping_hours() -> None:
     merged = merge_grid_flow_history(
         grid_flow(0, (1.0, 2.0, 3.0)), grid_flow(1, (9.0, 8.0), exports=(4.0, 5.0))
@@ -241,7 +342,7 @@ def test_grid_flow_points_index_excluded_hours_with_their_exclusion() -> None:
 @pytest.mark.parametrize(
     ("existing", "incoming", "message"),
     [
-        (grid_flow(0, (1.0,)), grid_flow(2, (2.0,)), "contiguous"),
+        (grid_flow(3, (1.0,)), grid_flow(0, (2.0,)), "contiguous"),
         (
             grid_flow(0, (1.0,)),
             grid_flow(1, (2.0,), source=SourceMetadata("other", "grid_flow")),
@@ -412,10 +513,10 @@ def test_store_keeps_existing_grid_flow_history_when_a_merge_is_rejected(
     tmp_path: Path,
 ) -> None:
     store = ProviderDataStore(tmp_path)
-    original = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0, 2.0)))
+    original = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(3, (1.0, 2.0)))
 
     with pytest.raises(ProviderDataStoreError, match="contiguous"):
-        store.save(GRID_KEY, GRID_ADAPTER, grid_flow(5, (9.0,)))
+        store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (9.0,)))
 
     assert store.load(GRID_KEY, GRID_ADAPTER) == original
 

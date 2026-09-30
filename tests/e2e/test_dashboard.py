@@ -20,6 +20,9 @@ from energy_optimizer.exclusions import (
     ExclusionCause,
     HourExclusion,
 )
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    merge_battery_efficiency_history,
+)
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
@@ -1128,7 +1131,12 @@ def _excluded_stamp(timestamp: datetime) -> str:
 
 
 def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
-    """Persist history with excluded hours in every source, as an import would."""
+    """Persist history with excluded hours in every source, as an import would.
+
+    Every source first holds hours 0 to 3 and is then refreshed with hour 5 only,
+    as after Home Assistant purged the hours between: hour 4 becomes an excluded
+    hour that the production merge creates.
+    """
     observation = datetime.now(UTC)
     store = ProviderDataStore(server.data_directory)
     unavailable = HourExclusion(
@@ -1186,6 +1194,22 @@ def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
         ),
     )
     store.save(
+        ProviderDataKey("household-load", "home-assistant", "household_load"),
+        TypeAdapter(HouseholdLoadData),
+        HouseholdLoadData(
+            schema_version="1",
+            start_time=start + timedelta(hours=5),
+            interval_minutes=60,
+            load_kw=(2.0,),
+            unit="kW",
+            source=SourceMetadata(
+                provider="home-assistant", entity_id="household_load"
+            ),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+        ),
+    )
+    store.save(
         ProviderDataKey("grid-flow", "home-assistant", "grid_flow"),
         TypeAdapter(GridFlowData),
         GridFlowData(
@@ -1217,15 +1241,31 @@ def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
             ),
         ),
     )
-    intervals: tuple[float | None, ...] = (0.5, None)
     store.save(
-        ProviderDataKey(
-            "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
-        ),
-        TypeAdapter(BatteryEfficiencyHistoryData),
-        BatteryEfficiencyHistoryData(
+        ProviderDataKey("grid-flow", "home-assistant", "grid_flow"),
+        TypeAdapter(GridFlowData),
+        GridFlowData(
             schema_version="1",
-            start_time=start,
+            start_time=start + timedelta(hours=5),
+            interval_minutes=60,
+            import_kw=(0.4,),
+            export_kw=(0.3,),
+            unit="kW",
+            source=SourceMetadata(provider="home-assistant", entity_id="grid_flow"),
+            retrieved_at=observation,
+            latest_observation_at=observation,
+        ),
+    )
+
+    def efficiency(
+        first_hour: int,
+        intervals: tuple[float | None, ...],
+        state_of_charge: tuple[float | None, ...],
+        exclusions: tuple[HourExclusion, ...] = (),
+    ) -> BatteryEfficiencyHistoryData:
+        return BatteryEfficiencyHistoryData(
+            schema_version="1",
+            start_time=start + timedelta(hours=first_hour),
             interval_minutes=60,
             battery_energy_in_kwh=intervals,
             battery_energy_out_kwh=intervals,
@@ -1233,31 +1273,41 @@ def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
             inverter_charge_energy_out_kwh=intervals,
             inverter_discharge_energy_in_kwh=intervals,
             inverter_discharge_energy_out_kwh=intervals,
-            state_of_charge_percent=(35.0, None, None),
+            state_of_charge_percent=state_of_charge,
             unit="kWh",
             source=SourceMetadata(
                 provider="home-assistant", entity_id="battery_efficiency_history"
             ),
             retrieved_at=observation,
             latest_observation_at=observation,
-            exclusions=(
-                HourExclusion(
-                    start + timedelta(hours=1),
-                    (
-                        ExclusionCause.of(
-                            "soc_out_of_range",
-                            "sensor.battery_soc reported a state of charge outside "
-                            "0 to 100 percent.",
-                            "sensor.battery_soc",
-                            [
-                                ExcludedDataPoint(
-                                    start + timedelta(hours=1, minutes=45), "150", "%"
-                                )
-                            ],
-                        ),
-                    ),
-                ),
+            exclusions=exclusions,
+        )
+
+    soc_out_of_range = HourExclusion(
+        start + timedelta(hours=1),
+        (
+            ExclusionCause.of(
+                "soc_out_of_range",
+                "sensor.battery_soc reported a state of charge outside "
+                "0 to 100 percent.",
+                "sensor.battery_soc",
+                [ExcludedDataPoint(start + timedelta(hours=1, minutes=45), "150", "%")],
             ),
+        ),
+    )
+    store.save(
+        ProviderDataKey(
+            "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
+        ),
+        TypeAdapter(BatteryEfficiencyHistoryData),
+        merge_battery_efficiency_history(
+            efficiency(
+                0,
+                (0.5, None, 0.5, 0.5),
+                (35.0, None, None, 40.0, 45.0),
+                (soc_out_of_range,),
+            ),
+            efficiency(5, (0.5,), (50.0, 55.0)),
         ),
     )
 
@@ -1265,11 +1315,15 @@ def _seed_excluded_history(server: LiveServer, start: datetime) -> None:
 def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
     e2e_server: LiveServer, page: Page
 ) -> None:
-    """Verify excluded hours are listed with their exact data points and reasons."""
+    """Verify excluded hours are listed with their exact data points and reasons.
+
+    Hour 4 is an hour that Home Assistant no longer held when the sources were
+    refreshed, so every source lists it as ``history_unavailable``.
+    """
     start = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(
         hours=8
     )
-    end = start + timedelta(hours=4)
+    end = start + timedelta(hours=6)
     _seed_excluded_history(e2e_server, start)
 
     _open_dashboard(page, e2e_server)
@@ -1281,7 +1335,7 @@ def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
     expect(page.locator("#scenario-badge")).to_contain_text("Excluded hours")
     expect(page.locator("#excluded-content")).to_be_visible()
     expect(page.locator("#content")).to_be_hidden()
-    expect(page.locator("#status")).to_have_text("4 excluded hours listed.")
+    expect(page.locator("#status")).to_have_text("7 excluded hours listed.")
     expect(page.locator("#excluded-empty")).to_be_hidden()
 
     expect(page.locator("#excluded-sources li")).to_have_text(
@@ -1294,14 +1348,17 @@ def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
     expect(page.locator("#excluded-summary li")).to_have_text(
         [
             "Household load · counter_decrease: 1 hour",
+            "Household load · history_unavailable: 1 hour",
             "Household load · unavailable: 1 hour",
+            "Grid import and export · history_unavailable: 1 hour",
             "Grid import and export · not_finite: 1 hour",
+            "Battery efficiency · history_unavailable: 1 hour",
             "Battery efficiency · soc_out_of_range: 1 hour",
         ]
     )
 
     rows = page.locator("#excluded-rows tr")
-    expect(rows).to_have_count(4)
+    expect(rows).to_have_count(7)
     hour_1 = _excluded_stamp(start + timedelta(hours=1))
     unavailable = rows.filter(has=page.locator('code:text-is("unavailable")'))
     expect(unavailable).to_have_count(1)
@@ -1330,6 +1387,33 @@ def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
     expect(battery.locator("td").nth(2)).to_have_text("sensor.battery_soc")
     expect(battery.locator("td").nth(5)).to_have_text("150")
 
+    # The gap hour of each source names the missing range and has no entity and no
+    # data point, because nothing was recorded for it.
+    unavailable_gap = rows.filter(
+        has=page.locator('code:text-is("history_unavailable")')
+    )
+    expect(unavailable_gap).to_have_count(3)
+    expect(unavailable_gap.locator("td:nth-child(1)")).to_have_text(
+        [_excluded_stamp(start + timedelta(hours=4))] * 3
+    )
+    expect(unavailable_gap.locator("td:nth-child(2)")).to_have_text(
+        ["Household load", "Grid import and export", "Battery efficiency"]
+    )
+    for column in (3, 5, 6):
+        expect(unavailable_gap.locator(f"td:nth-child({column})")).to_have_text(
+            ["-"] * 3
+        )
+    expect(unavailable_gap.locator("td:nth-child(7)")).to_have_text([""] * 3)
+    expect(unavailable_gap.locator("td:nth-child(4) .excluded-message")).to_have_text(
+        [
+            "The provider holds no history from "
+            f"{start + timedelta(hours=4):%Y-%m-%dT%H:%M:%S}+00:00 until "
+            f"{start + timedelta(hours=5):%Y-%m-%dT%H:%M:%S}+00:00 (1 hour), "
+            "so this hour cannot be imported."
+        ]
+        * 3
+    )
+
     # A window without exclusions says so instead of showing an empty table.
     _load_range(page, start - timedelta(hours=4), start)
     expect(page.locator("#status")).to_have_text("0 excluded hours listed.")
@@ -1345,10 +1429,12 @@ def test_excluded_hours_tab_lists_every_excluded_hour_and_its_data_point(
     expect(page.locator("#status")).to_have_text(
         "Partial coverage is available. Missing intervals are shown as gaps."
     )
-    # Household load has two valid hours; grid import and export three each.
-    expect(page.locator("#power-points circle")).to_have_count(8)
+    # The gap hour holds no value either: household load has three valid hours
+    # (0, 2, and 5), grid import and export four each (0, 2, 3, and 5), and the
+    # gap splits every series line into three segments.
+    expect(page.locator("#power-points circle")).to_have_count(11)
     for path in page.locator("#power-series-paths path").all():
-        assert (path.get_attribute("d") or "").count("M") == 2
+        assert (path.get_attribute("d") or "").count("M") == 3
 
 
 def test_excluded_hours_tab_reports_sources_without_history(

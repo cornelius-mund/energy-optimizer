@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ from energy_optimizer.exclusions import (
     ExcludedDataPoint,
     ExclusionCause,
     HourExclusion,
+)
+from energy_optimizer.providers.home_assistant_battery_efficiency import (
+    merge_battery_efficiency_history,
 )
 from energy_optimizer.providers.interfaces import HouseholdLoadData
 from energy_optimizer.providers.interfaces import (
@@ -137,6 +141,55 @@ def test_every_source_is_listed_in_hour_order_with_its_causes(
             }
         ],
     }
+
+
+def test_hours_the_provider_no_longer_holds_are_listed_as_history_unavailable(
+    environment: Environment,
+) -> None:
+    """Every source persisted one hour, then Home Assistant only had hour 3."""
+    later = START + timedelta(hours=3)
+    seed_household(environment.store, (1.0,))
+    seed_household(environment.store, (4.0,), start=later)
+    seed_grid(environment.store, grid_flow((0.5,)))
+    seed_grid(environment.store, replace(grid_flow((3.5,)), start_time=later))
+    seed_battery(
+        environment.store,
+        merge_battery_efficiency_history(
+            battery_history(intervals=1),
+            replace(battery_history(intervals=1), start_time=later),
+        ),
+    )
+
+    body = get(environment.client)
+
+    assert body["excluded_hour_count"] == 6
+    assert [(item["hour_start"], item["source"]) for item in body["hours"]] == [
+        ("2026-01-01T01:00:00Z", "household_load"),
+        ("2026-01-01T01:00:00Z", "grid_flow"),
+        ("2026-01-01T01:00:00Z", "battery_efficiency"),
+        ("2026-01-01T02:00:00Z", "household_load"),
+        ("2026-01-01T02:00:00Z", "grid_flow"),
+        ("2026-01-01T02:00:00Z", "battery_efficiency"),
+    ]
+    assert [source["excluded_hour_count"] for source in body["sources"]] == [2, 2, 2]
+    assert body["summary"] == [
+        {"source": source, "reason": "history_unavailable", "excluded_hour_count": 2}
+        for source in ("household_load", "grid_flow", "battery_efficiency")
+    ]
+    for item in body["hours"]:
+        assert item["causes"] == [
+            {
+                "reason": "history_unavailable",
+                "message": (
+                    "The provider holds no history from 2026-01-01T01:00:00+00:00 "
+                    "until 2026-01-01T03:00:00+00:00 (2 hours), so these hours "
+                    "cannot be imported."
+                ),
+                "entity_id": None,
+                "data_point_count": 0,
+                "data_points": [],
+            }
+        ]
 
 
 def test_only_hours_inside_the_requested_range_are_returned(
@@ -382,3 +435,4 @@ def test_the_endpoint_is_documented_in_the_generated_contract(
     ]
     assert "counter_decrease" in reasons
     assert "flagged_by_earlier_version" in reasons
+    assert "history_unavailable" in reasons
