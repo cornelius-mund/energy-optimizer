@@ -12,6 +12,11 @@
   const rangeEyebrow = document.querySelector("#range-eyebrow");
   const rangeHeading = document.querySelector("#range-heading");
   const rangeHelp = document.querySelector("#range-help");
+  const zoneLabel = document.querySelector("#zone-name");
+  const startLabel = document.querySelector("#start-label");
+  const endLabel = document.querySelector("#end-label");
+  const excludedHourHeading = document.querySelector("#excluded-hour-heading");
+  const excludedPointHeading = document.querySelector("#excluded-point-heading");
   const status = document.querySelector("#status");
   const content = document.querySelector("#content");
   const details = document.querySelector("#details");
@@ -33,37 +38,101 @@
   let scenario = "actual";
 
   const pad = (value) => String(value).padStart(2, "0");
-  const isoDate = (date) => `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+  const hourMilliseconds = 60 * 60 * 1000;
+  const dayMilliseconds = 24 * hourMilliseconds;
+  const inputPattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/;
+
+  // Every time the dashboard shows or accepts belongs to the time zone the
+  // service is configured with, never to the browser's zone. Only the data API
+  // speaks UTC. A "wall time" below is a local date and time encoded as
+  // milliseconds as if it were UTC, so arithmetic on it never meets a
+  // daylight-saving change.
+  let timeZone = null;
+  let timeZoneProblem = "The dashboard time zone has not been loaded.";
+  let zoneFormat = null;
+  const offsetCache = new Map();
+
+  const useTimeZone = (name) => {
+    // The constructor throws a RangeError for a zone this browser does not know.
+    zoneFormat = new Intl.DateTimeFormat("en-US", {
+      timeZone: name,
+      hourCycle: "h23",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    });
+    timeZone = name;
+    offsetCache.clear();
+  };
+  const wallTimeAt = (instant) => {
+    const parts = {};
+    zoneFormat.formatToParts(instant).forEach(({ type, value }) => { parts[type] = Number(value); });
+    return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  };
+  // Supported zones have whole-hour offsets that change on UTC hour boundaries,
+  // so one lookup per UTC hour is exact and keeps labelling long ranges cheap.
+  const offsetAt = (instant) => {
+    const hourStart = Math.floor(instant / hourMilliseconds) * hourMilliseconds;
+    if (!offsetCache.has(hourStart)) offsetCache.set(hourStart, wallTimeAt(hourStart) - hourStart);
+    return offsetCache.get(hourStart);
+  };
+  // The instants at which the zone's clock shows this wall time: none when a
+  // clock change skips it, two when a clock change repeats it.
+  const instantsForWall = (wall) => [...new Set([wall - dayMilliseconds, wall + dayMilliseconds].map(offsetAt))]
+    .map((offset) => wall - offset)
+    .filter((instant) => offsetAt(instant) === wall - instant)
+    .sort((first, second) => first - second);
+  // A repeated time resolves to its first occurrence. A skipped time resolves
+  // forward by the length of the gap, which is what reading it with the offset
+  // in force before the change yields (02:30 becomes 03:30).
+  const wallToInstant = (wall) => instantsForWall(wall)[0] ?? wall - offsetAt(wall - dayMilliseconds);
+  const isRepeatedTime = (instant) => instantsForWall(instant + offsetAt(instant)).length > 1;
+
+  const wallText = (wall) => {
+    const date = new Date(wall);
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+      + `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+  };
   const dateTimeInputValue = (value) => {
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-    return `${isoDate(date)}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+    const instant = new Date(value).getTime();
+    if (Number.isNaN(instant)) return "";
+    return wallText(instant + offsetAt(instant));
   };
-  const utcTimestamp = (value) => `${value}:00Z`;
-  const parseInputTimestamp = (value) => new Date(utcTimestamp(value));
+  const parseInputTimestamp = (value) => {
+    const match = inputPattern.exec(value);
+    if (!match) return Number.NaN;
+    const [year, month, day, hour, minute] = match.slice(1).map(Number);
+    return wallToInstant(Date.UTC(year, month - 1, day, hour, minute));
+  };
+  const utcTimestamp = (value) => new Date(parseInputTimestamp(value)).toISOString().replace(".000Z", "Z");
   const isValidRange = (start, end) => {
-    const startTimestamp = parseInputTimestamp(start).getTime();
-    const endTimestamp = parseInputTimestamp(end).getTime();
-    return Number.isFinite(startTimestamp) && Number.isFinite(endTimestamp) && endTimestamp > startTimestamp;
+    const startInstant = parseInputTimestamp(start);
+    const endInstant = parseInputTimestamp(end);
+    return Number.isFinite(startInstant) && Number.isFinite(endInstant) && endInstant > startInstant;
   };
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
-  const todayValue = dateTimeInputValue(today);
-  const tomorrowValue = dateTimeInputValue(new Date(today.getTime() + 24 * 60 * 60 * 1000));
-  startInput.value = todayValue;
-  endInput.value = tomorrowValue;
+  const formatOffset = (offset) => {
+    const minutes = Math.abs(offset) / 60000;
+    return `${offset < 0 ? "-" : "+"}${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
+  };
+  // A time that the clock shows twice also carries its UTC offset, so the two
+  // occurrences stay distinguishable.
+  const formatTimestamp = (value) => {
+    const instant = new Date(value).getTime();
+    const text = wallText(instant + offsetAt(instant)).replace("T", " ");
+    return isRepeatedTime(instant) ? `${text}${formatOffset(offsetAt(instant))}` : text;
+  };
+  const localDayRange = (instant) => {
+    const wall = instant + offsetAt(instant);
+    const start = Math.floor(wall / dayMilliseconds) * dayMilliseconds;
+    return { start: wallText(start), end: wallText(start + dayMilliseconds) };
+  };
+  const zoneName = () => timeZone || "the configured time zone";
+  const rangeRules = () => "The end time is exclusive and must be later than the start. "
+    + "When the clocks go back, a time in the repeated hour means its first occurrence; "
+    + "when they go forward, a skipped time moves ahead by the length of the gap.";
 
   const setStatus = (message, kind = "") => {
     status.className = `status ${kind}`;
     status.textContent = message;
-  };
-
-  const formatTimestamp = (value) => new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
-  }).format(new Date(value));
-  const formatAxisTimestamp = (value) => {
-    const date = new Date(value);
-    return `${isoDate(date)} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}Z`;
   };
 
   const addDetail = (label, value) => {
@@ -315,7 +384,7 @@
       label.setAttribute("y", "304");
       label.setAttribute("class", "axis-label x-axis-label");
       label.setAttribute("text-anchor", tick === 0 ? "start" : tick === tickCount - 1 ? "end" : "middle");
-      label.textContent = formatAxisTimestamp(timestamps[index]);
+      label.textContent = formatTimestamp(timestamps[index]);
       labels.append(label);
     }
     series.forEach((item, seriesIndex) => {
@@ -393,7 +462,7 @@
       chartNote.textContent = "Each value is a calculated ratio over the retained battery and inverter history, not an hourly observation.";
       return;
     }
-    chartNote.textContent = "Each point represents one hourly interval. Charts are separated by unit. Focus a point to inspect it.";
+    chartNote.textContent = `Each point represents one hourly interval. Times are shown in ${zoneName()}. Charts are separated by unit. Focus a point to inspect it.`;
     Object.entries(chartSeries(series)).forEach(([kind, groupedSeries]) => {
       const usableSeries = groupedSeries.filter((item) => hasSeriesData([item], item.id));
       if (usableSeries.length) renderGraph(chartDefinitions[kind], usableSeries);
@@ -409,7 +478,7 @@
   const excludedPointDetail = (point) => {
     const parts = [];
     if (point.previous_timestamp !== null && point.previous_value !== null) {
-      parts.push(`previous ${excludedNumber(point.previous_value)}${point.unit ? ` ${point.unit}` : ""} at ${formatAxisTimestamp(point.previous_timestamp)}`);
+      parts.push(`previous ${excludedNumber(point.previous_value)}${point.unit ? ` ${point.unit}` : ""} at ${formatTimestamp(point.previous_timestamp)}`);
     }
     if (point.step_kwh !== null) parts.push(`${point.previous_timestamp === null ? "energy" : "step"} ${excludedNumber(point.step_kwh)} kWh`);
     if (point.maximum_kwh !== null) parts.push(`maximum ${excludedNumber(point.maximum_kwh)} kWh`);
@@ -449,7 +518,7 @@
           row.dataset.source = hour.source;
           row.dataset.reason = cause.reason;
           const repeated = pointIndex > 0 ? "repeated" : "";
-          appendCell(row, formatAxisTimestamp(hour.hour_start), repeated);
+          appendCell(row, formatTimestamp(hour.hour_start), repeated);
           appendCell(row, excludedSourceLabel(hour.source), repeated);
           appendCell(row, (point && point.entity_id) || cause.entity_id || "-", repeated);
           const reason = document.createElement("td");
@@ -467,7 +536,7 @@
             reason.append(message);
           }
           row.append(reason);
-          appendCell(row, point ? formatAxisTimestamp(point.timestamp) : "-");
+          appendCell(row, point ? formatTimestamp(point.timestamp) : "-");
           appendCell(row, point && point.state !== null ? point.state : "-");
           appendCell(row, point ? excludedPointDetail(point) : "");
           excludedRows.append(row);
@@ -483,8 +552,8 @@
     if (scenario === "excluded") {
       badge.innerHTML = "<span></span> Excluded hours";
       rangeEyebrow.textContent = "Time window";
-      rangeHeading.textContent = "Choose a UTC time window";
-      rangeHelp.textContent = "Lists every hour in the window that was left out of the imported history. The end time is exclusive and must be later than the start.";
+      rangeHeading.textContent = `Choose a time window in ${zoneName()}`;
+      rangeHelp.textContent = `Lists every hour in the window that was left out of the imported history. ${rangeRules()}`;
       form.hidden = false;
       return;
     }
@@ -500,10 +569,10 @@
     badge.innerHTML = `<span></span> ${forecast ? "Forecast inputs" : efficiency ? "Measured diagnostics" : "Historic actuals"}`;
     eyebrow.textContent = forecast ? "Planning inputs" : efficiency ? "Efficiency components" : "Imported series";
     rangeEyebrow.textContent = efficiency ? "Calculation period" : "Time window";
-    rangeHeading.textContent = efficiency ? "Complete retained history" : "Choose a UTC time window";
+    rangeHeading.textContent = efficiency ? "Complete retained history" : `Choose a time window in ${zoneName()}`;
     rangeHelp.textContent = efficiency
       ? "Ratios use the complete retained battery and inverter history. Coverage and retrieval time are shown beside the results."
-      : "Use UTC date and time boundaries. The end time is exclusive and must be later than the start.";
+      : `Use ${zoneName()} date and time boundaries. ${rangeRules()}`;
     form.hidden = efficiency;
     if (forecast) {
       const forecastTypes = [];
@@ -635,6 +704,15 @@
     }
   };
 
+  const loadSelectedRange = () => {
+    if (!timeZone) { setStatus(timeZoneProblem, "error"); return; }
+    if (!isValidRange(startInput.value, endInput.value)) {
+      setStatus("End time must be later than the start time.", "error");
+      return;
+    }
+    load(startInput.value, endInput.value);
+  };
+
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
     scenario = { "forecast-tab": "forecast", "efficiency-tab": "efficiency", "excluded-tab": "excluded" }[tab.id] || "actual";
     diagnostic("info", "tab_clicked", { tab: tab.id, scenario });
@@ -645,18 +723,58 @@
     renderHeader();
     content.hidden = true;
     excludedContent.hidden = true;
-    if (!isValidRange(startInput.value, endInput.value)) {
-      setStatus("End time must be later than the start time.", "error");
-      return;
-    }
-    load(startInput.value, endInput.value);
+    loadSelectedRange();
   }));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!isValidRange(startInput.value, endInput.value)) { setStatus("End time must be later than the start time.", "error"); return; }
-    load(startInput.value, endInput.value);
+    loadSelectedRange();
   });
-  renderHeader();
-  diagnostic("debug", "initialized", { scenario });
-  load(todayValue, tomorrowValue);
+
+  const renderZoneLabels = () => {
+    zoneLabel.textContent = timeZone;
+    startLabel.textContent = `Start (${timeZone})`;
+    endLabel.textContent = `End (${timeZone}, exclusive)`;
+    excludedHourHeading.textContent = `Hour (${timeZone})`;
+    excludedPointHeading.textContent = `Data point (${timeZone})`;
+  };
+  // The zone decides the default range, so no data is requested until it is
+  // known and usable, and the range controls stay disabled until then. A failure
+  // is reported instead of guessing a zone.
+  const initialize = async () => {
+    renderHeader();
+    setStatus("Loading dashboard settings...");
+    let requestId = "none";
+    try {
+      let response;
+      try {
+        response = await fetch("/api/v1/dashboard/settings");
+      } catch {
+        throw new Error("The dashboard settings could not be loaded; check the connection and reload the page.");
+      }
+      requestId = response.headers.get("X-Request-ID") || "none";
+      const settings = response.ok ? await response.json().catch(() => null) : null;
+      if (!settings || typeof settings.timezone !== "string" || !settings.timezone) {
+        throw new Error(`The dashboard settings could not be loaded (HTTP ${response.status}); reload the page to try again.`);
+      }
+      try {
+        useTimeZone(settings.timezone);
+      } catch {
+        throw new Error(`This browser does not support the configured time zone ${settings.timezone}, so no times can be shown or requested.`);
+      }
+    } catch (error) {
+      timeZoneProblem = error instanceof Error ? error.message : String(error);
+      diagnostic("error", "settings_load_failed", { message: timeZoneProblem, requestId });
+      setStatus(timeZoneProblem, "error");
+      return;
+    }
+    renderZoneLabels();
+    renderHeader();
+    const range = localDayRange(Date.now());
+    startInput.value = range.start;
+    endInput.value = range.end;
+    form.querySelectorAll("input, button").forEach((control) => { control.disabled = false; });
+    diagnostic("debug", "initialized", { scenario, timeZone });
+    load(range.start, range.end);
+  };
+  initialize();
 })();

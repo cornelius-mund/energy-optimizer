@@ -12,9 +12,15 @@ import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
+
+# The service shows Berlin time while the browser runs in New York, two zones
+# that never agree, so a dashboard that used the browser's zone fails every test.
+DASHBOARD_TIME_ZONE = "Europe/Berlin"
+BROWSER_TIME_ZONE = "America/New_York"
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,7 @@ def _configuration(path: Path, data_directory: Path) -> None:
     path.write_text(
         f"""
 time_resolution_minutes: 60
+timezone: {DASHBOARD_TIME_ZONE}
 grid:
   maximum_import_kw: 10
   maximum_export_kw: 10
@@ -118,14 +125,16 @@ orchestration:
     )
 
 
-def _wait_for_server(process: subprocess.Popen[str], base_url: str) -> None:
-    """Wait until the live service answers health checks or report startup output."""
+def _wait_for_server(
+    process: subprocess.Popen[str], base_url: str, log_path: Path
+) -> None:
+    """Wait until the live service answers health checks or report its log."""
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output, _ = process.communicate()
             raise RuntimeError(
-                "E2E server exited before becoming ready:\n" + (output or "")
+                "E2E server exited before becoming ready:\n"
+                + log_path.read_text(encoding="utf-8", errors="replace")
             )
         try:
             with urllib.request.urlopen(f"{base_url}/health", timeout=1) as response:
@@ -156,16 +165,20 @@ def e2e_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[E2EServer]:
             "ENERGY_OPTIMIZER_PORT": str(port),
         }
     )
+    # The service logs every request. An unread pipe would fill after a few hundred
+    # requests and block the service, so its output goes to a file instead.
+    log_path = root / "service.log"
+    log_file = log_path.open("w", encoding="utf-8")
     process = subprocess.Popen(
         [sys.executable, "-m", "energy_optimizer"],
         cwd=Path(__file__).parents[2],
         env=environment,
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
         text=True,
     )
     try:
-        _wait_for_server(process, base_url)
+        _wait_for_server(process, base_url, log_path)
         yield E2EServer(base_url=base_url, data_directory=data_directory)
     finally:
         if process.poll() is None:
@@ -175,8 +188,7 @@ def e2e_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[E2EServer]:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-        if process.stdout is not None:
-            process.stdout.close()
+        log_file.close()
 
 
 @pytest.fixture(autouse=True)
@@ -190,6 +202,12 @@ def clean_e2e_storage(e2e_server: E2EServer) -> Iterator[None]:
     for path in e2e_server.data_directory.iterdir():
         if path.is_file():
             path.unlink()
+
+
+@pytest.fixture(scope="session")
+def browser_context_args(browser_context_args: dict[str, Any]) -> dict[str, Any]:
+    """Run every page in a zone that differs from the configured dashboard zone."""
+    return {**browser_context_args, "timezone_id": BROWSER_TIME_ZONE}
 
 
 @pytest.fixture

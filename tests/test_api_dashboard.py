@@ -47,6 +47,29 @@ def test_dashboard_root_redirects_to_the_trailing_slash_path(
     assert response.headers["location"] == "/dashboard/"
 
 
+def test_dashboard_settings_default_to_utc(client: TestClient) -> None:
+    with client as test_client:
+        response = test_client.get("/api/v1/dashboard/settings")
+
+    assert response.status_code == 200
+    assert response.json() == {"timezone": "UTC"}
+
+
+def test_dashboard_settings_return_the_configured_timezone(
+    minimal_configuration: Path,
+) -> None:
+    minimal_configuration.write_text(
+        "timezone: Europe/Berlin\n" + minimal_configuration.read_text(),
+        encoding="utf-8",
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/api/v1/dashboard/settings")
+
+    assert response.status_code == 200
+    assert response.json() == {"timezone": "Europe/Berlin"}
+
+
 def test_missing_dashboard_assets_return_service_unavailable(
     monkeypatch: MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -139,6 +139,14 @@ these events log stored values or provider tokens.
 Configuration is expected to contain parameters such as:
 
 - Time resolution
+- Dashboard time zone (`timezone`, an IANA name such as `Europe/Berlin`; defaults
+  to `UTC`). It selects the zone in which the dashboard shows and accepts times.
+  Data, API timestamps, and stored records stay in UTC. The name is matched
+  exactly, so `utc` and `../etc/passwd` are rejected, and only zones whose UTC
+  offset is a whole number of hours all year are accepted, because the dashboard
+  requests whole UTC hours. Zones such as `Asia/Kolkata`, `Asia/Kathmandu`, and
+  `Australia/Lord_Howe` fail startup with a message naming `timezone`. See
+  "Dashboard time zone".
 - Grid limits
 - Electricity pricing behavior
 - PV system parameters
@@ -165,6 +173,41 @@ Configuration is expected to contain parameters such as:
 - External data provider settings
 
 Invalid configuration should result in a clear startup error.
+
+## Dashboard time zone
+
+The dashboard shows and accepts every time in the zone set by the top-level
+`timezone` setting, not in the browser's zone, so an operator in Germany reads
+the end of the local day and tomorrow's day-ahead prices without translating UTC.
+The static frontend cannot be templated, so it reads the zone from
+`GET /api/v1/dashboard/settings` (`{"timezone": "Europe/Berlin"}`) before its first
+data request, because the default range depends on it.
+
+- **Shown in the configured zone:** the start and end controls, the default range,
+  chart axis labels, tooltips and accessible point labels, the detail lists
+  (coverage, retrieved, generated, published), and the Excluded hours table.
+  Headings and control labels name the zone. Times use the form
+  `2026-09-30 23:00`.
+- **Default range:** today at 00:00 to the next local midnight. It spans 23 or 25
+  hours on the days clocks change.
+- **Requests stay UTC:** the controls convert local wall times to whole UTC hours
+  before calling the data API, so a local `2026-09-30 00:00` to `2026-10-01 00:00`
+  in `Europe/Berlin` requests `start_time=2026-09-29T22:00:00Z` and
+  `end_time=2026-09-30T22:00:00Z`. The API contract, stored data, and all API
+  timestamps stay UTC.
+- **Daylight saving:** when clocks go back, the repeated hour appears as two
+  distinguishable points and rows whose labels carry the UTC offset
+  (`2026-10-25 02:00+02:00` and `2026-10-25 02:00+01:00`). A control value inside
+  the repeated hour means its first occurrence. When clocks go forward, a local
+  time that does not exist moves ahead by the length of the gap, so `02:30`
+  becomes `03:30`.
+- **Failure handling:** if the settings request fails, or the browser does not
+  know the configured zone, the dashboard reports an explicit error, keeps the
+  range controls disabled, and sends no data request. It never guesses a zone.
+
+The frontend uses the browser's `Intl` support and adds no dependency. Only zones
+whose UTC offset is a whole number of hours all year are supported; see the
+`timezone` entry under "Configuration".
 
 ## Docker Deployment
 
@@ -230,6 +273,14 @@ These are wholesale German market prices, not household tariffs: taxes, network
 charges, supplier margins, and feed-in adjustments are not included. The endpoint
 does not require an API key, but deployments should use a reasonable polling
 interval and configure `max_data_age_seconds` for freshness checks.
+
+Every request carries an explicit window: `start` is the importer's hour-aligned
+start time (inclusive) and `end` is its `end_time`, or 48 hours after `start` when
+no end time is given (exclusive), both as epoch milliseconds. aWATTar publishes
+the next day's prices at 14:00 local time, so the 48-hour look-ahead always reaches
+them once they exist, and the reach no longer depends on the endpoint's default
+window. The look-ahead is fixed and not configurable. A response that ends earlier,
+such as the end of the current day before publication, is accepted unchanged.
 The Forecast dashboard keeps the imported and exported price series separate while
 retaining the same timestamps and values for this single-market-price source.
 
@@ -704,7 +755,11 @@ uv run pytest tests/test_openapi.py
 ### Browser end-to-end tests
 
 The dashboard E2E suite starts the real service entry point with an isolated
-temporary data store and exercises the rendered dashboard in Chromium. Install
+temporary data store and exercises the rendered dashboard in Chromium. The service
+is configured for `Europe/Berlin` while the browser runs in `America/New_York`, so
+every scenario also proves that the configured zone, not the browser's, is shown.
+The service log is written to a file in the test's temporary directory, and startup
+failures print it. Install
 the browser once in the development environment (`scripts/bootstrap` also
 installs the system libraries Chromium needs), then run:
 

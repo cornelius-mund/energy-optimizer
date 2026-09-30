@@ -71,6 +71,59 @@ def test_load_configuration_returns_typed_values(tmp_path: Path) -> None:
     assert configuration.home_assistant.max_data_age_seconds == 7200
 
 
+def test_load_configuration_defaults_the_timezone_to_utc(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(VALID_CONFIGURATION, encoding="utf-8")
+
+    assert load_configuration(path).timezone == "UTC"
+
+
+@pytest.mark.parametrize(
+    "zone",
+    ["UTC", "Europe/Berlin", "America/New_York", "Africa/Casablanca", "Etc/GMT+5"],
+)
+def test_load_configuration_returns_a_whole_hour_timezone(
+    tmp_path: Path, zone: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(f"timezone: {zone}\n" + VALID_CONFIGURATION, encoding="utf-8")
+
+    assert load_configuration(path).timezone == zone
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("''", "not a known IANA time zone name"),
+        ("Foo/Bar", "not a known IANA time zone name"),
+        ("utc", "case-sensitive"),
+        ("../etc/passwd", "not a known IANA time zone name"),
+        ("Asia/Kolkata", "whole number of hours"),
+        ("Asia/Kathmandu", "whole number of hours"),
+        ("Australia/Lord_Howe", "whole number of hours"),
+    ],
+)
+def test_load_configuration_rejects_unusable_timezones(
+    tmp_path: Path, value: str, reason: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(f"timezone: {value}\n" + VALID_CONFIGURATION, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match=r"timezone: .*" + reason):
+        load_configuration(path)
+
+
+@pytest.mark.parametrize("value", ["null", "5", "[Europe/Berlin]"])
+def test_load_configuration_rejects_a_timezone_that_is_not_a_name(
+    tmp_path: Path, value: str
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(f"timezone: {value}\n" + VALID_CONFIGURATION, encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="timezone"):
+        load_configuration(path)
+
+
 def test_load_configuration_returns_explicit_energy_entity_mappings(
     tmp_path: Path,
 ) -> None:
