@@ -8,6 +8,9 @@
   --accent: #d8663b;
   --accent-dark: #a94428;
   --green: #1a8b72;
+  --series-0: var(--green);
+  --series-1: var(--accent);
+  --series-2: #6b62b5;
   --shadow: 0 18px 50px rgb(23 51 46 / 8%);
 }
 
@@ -63,15 +66,19 @@ button:hover { background: #28544b; }
 .excluded-grid[hidden] { display: none; }
 .card { padding: 28px 30px; }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
-.legend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; color: var(--muted); font-size: .8rem; }
-.legend-item::before { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; background: var(--green); content: ""; }
-.legend-1::before { background: var(--accent); }
-.legend-2::before { background: #6b62b5; }
-.legend strong { color: var(--ink); font-weight: 700; }
 .chart-wrap { min-height: 330px; margin: 26px -10px 0; }
 svg { width: 100%; height: auto; overflow: visible; }
 .chart-stack { display: grid; gap: 28px; }
-.data-chart[hidden] { display: none; }
+.chart-panel { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 16px; align-items: start; }
+.chart-panel[hidden] { display: none; }
+.chart-legend { display: flex; flex-direction: column; align-items: stretch; gap: 6px; padding-top: 4px; }
+.legend-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border: 1px solid var(--line); color: var(--ink); background: transparent; font-size: .78rem; font-weight: 700; line-height: 1.3; text-align: left; }
+.legend-item:hover { background: rgb(245 243 237 / 70%); }
+.legend-swatch { flex: none; width: 10px; height: 10px; margin-top: .2em; border-radius: 50%; background: var(--series-0); }
+.legend-1 .legend-swatch { background: var(--series-1); }
+.legend-2 .legend-swatch { background: var(--series-2); }
+.legend-item[aria-pressed="false"] { color: var(--muted); font-weight: 600; text-decoration: line-through; }
+.legend-item[aria-pressed="false"] .legend-swatch { opacity: .3; }
 .axis-unit { fill: var(--ink); font-size: 12px; font-weight: 800; }
 .grid-line { stroke: #dfe7e1; stroke-width: 1; }
 .axis-label { fill: #82918a; font-size: 12px; }
@@ -79,14 +86,14 @@ svg { width: 100%; height: auto; overflow: visible; }
 .area { fill: rgb(26 139 114 / 13%); }
 .line { fill: none; stroke: var(--green); stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
 .series-line { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 3; }
-.series-0 { stroke: var(--green); }
-.series-1 { stroke: var(--accent); }
-.series-2 { stroke: #6b62b5; }
-.point { fill: var(--card); stroke: var(--green); stroke-width: 2; cursor: pointer; }
-.point-1 { stroke: var(--accent); }
-.point-2 { stroke: #6b62b5; }
+.series-0 { stroke: var(--series-0); }
+.series-1 { stroke: var(--series-1); }
+.series-2 { stroke: var(--series-2); }
+.point { fill: var(--card); stroke: var(--series-0); stroke-width: 2; cursor: pointer; }
+.point-1 { stroke: var(--series-1); }
+.point-2 { stroke: var(--series-2); }
 .point:hover, .point:focus { fill: var(--accent); stroke: var(--accent-dark); outline: none; }
-.point-tooltip { position: absolute; z-index: 2; max-width: 220px; padding: 8px 10px; border: 1px solid #bddbd1; border-radius: 8px; color: var(--ink); background: var(--card); box-shadow: var(--shadow); font-size: .75rem; font-weight: 700; pointer-events: none; }
+.point-tooltip { position: absolute; z-index: 2; width: max-content; max-width: 320px; padding: 8px 10px; border: 1px solid #bddbd1; border-radius: 8px; color: var(--ink); background: var(--card); box-shadow: var(--shadow); font-size: .75rem; font-weight: 700; pointer-events: none; }
 .chart-wrap { position: relative; }
 .chart-note { margin: 10px 0 0; color: var(--muted); font-size: .76rem; }
 .efficiency-summary { display: grid; grid-template-columns: 1fr auto; gap: 0 18px; margin: 26px 0 0; }
@@ -142,7 +149,8 @@ a { color: var(--accent-dark); font-weight: 700; }
   .details-card { padding: 23px 20px; }
   .chart-wrap { min-height: 245px; margin-top: 22px; }
   .chart-stack { gap: 20px; }
+  .chart-panel { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .chart-legend { flex-flow: row wrap; padding-top: 0; }
   .card-heading { display: block; }
-  .legend { margin-top: 15px; }
   footer { padding-bottom: 12px; }
 }

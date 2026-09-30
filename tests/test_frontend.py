@@ -43,6 +43,37 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert ".excluded-grid[hidden] { display: none; }" in styles
 
 
+def test_dashboard_gives_each_chart_its_own_legend_beside_it() -> None:
+    """Keep one legend container after each chart and no shared legend above them."""
+    document = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    app = (FRONTEND / "app.js").read_text(encoding="utf-8")
+    styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="legend"' not in document
+    assert '"#legend"' not in app
+    assert "legend-0" not in app, "legend entries derive from the rendered series"
+    order = [
+        document.index(f'id="{kind}-{part}"')
+        for kind in ("power", "price", "battery")
+        for part in ("panel", "chart", "legend")
+    ]
+    assert order == sorted(order)
+    for kind in ("power", "price", "battery"):
+        legend = document[document.index(f'id="{kind}-legend"') :]
+        assert legend.startswith(
+            f'id="{kind}-legend" class="chart-legend" role="group"'
+        )
+        assert f'"#{kind}-legend"' in app
+    assert 'entry.type = "button"' in app
+    assert '"aria-pressed"' in app
+    assert (
+        ".chart-panel { display: grid; grid-template-columns: minmax(0, 1fr) 160px;"
+        in styles
+    )
+    mobile = styles[styles.index("@media (max-width: 760px)") :]
+    assert ".chart-panel { grid-template-columns: minmax(0, 1fr);" in mobile
+
+
 def test_dashboard_markup_names_no_fixed_zone_for_displayed_times() -> None:
     """Show the configured zone from the script; the markup only names the API's UTC."""
     document = (FRONTEND / "index.html").read_text(encoding="utf-8")

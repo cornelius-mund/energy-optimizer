@@ -174,6 +174,32 @@ Configuration is expected to contain parameters such as:
 
 Invalid configuration should result in a clear startup error.
 
+## Dashboard charts
+
+The Historic actuals and Forecast tabs draw one chart per unit: power (`kW`),
+prices (`EUR/kWh`), and, for actuals, battery state of charge (`%`). Each chart has
+its own legend to its right, or below it on screens up to 760px wide. The legend
+lists only the series that chart draws, in chart order, as `<label> (<unit>)` with a
+swatch in the line's color, for example `Import price (EUR/kWh)`. A series without
+data has no entry. The Efficiency and Excluded hours tabs draw no chart and show no
+legend.
+
+- **Show and hide a line:** each legend entry is a button that reflects its state in
+  `aria-pressed`. Clicking it, or pressing Enter or Space while it has keyboard focus,
+  hides the line and its points, or shows them again. Nothing is fetched again. A hidden
+  entry stays in the legend, dimmed and struck through, so it can be shown again.
+- **Axis rescaling:** the value axis is recomputed from the lines that are still shown,
+  so a small series is readable once a large one is hidden. The time axis does not
+  change. When every line of a chart is hidden, the chart keeps its axes at a default
+  scale and its legend.
+- **Hidden lines are remembered for the page session:** they stay hidden when the
+  range is reloaded and when you switch tabs, and are shown again by a page reload.
+  Nothing is stored in the browser.
+- **Tooltips:** hovering or focusing a point shows the line it belongs to, its time in
+  the configured zone, and its value with the unit, for example
+  `Import price · 2026-09-30 23:00 · 0.14 EUR/kWh`. The tooltip stays inside its chart
+  and never covers the legend. The point's accessible label is unchanged.
+
 ## Dashboard time zone
 
 The dashboard shows and accepts every time in the zone set by the top-level

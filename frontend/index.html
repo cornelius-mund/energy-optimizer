@@ -54,37 +54,45 @@
               <p id="series-eyebrow" class="eyebrow">Imported series</p>
               <h2 id="chart-heading">Household load</h2>
             </div>
-            <div id="legend" class="legend"></div>
           </div>
           <div class="chart-wrap">
             <div id="chart" class="chart-stack" role="group" aria-label="Energy charts separated by unit">
-              <svg id="power-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="power-chart-title power-chart-description">
-                <title id="power-chart-title">Power data (kW)</title>
-                <desc id="power-chart-description">Hourly power values in kW.</desc>
-                <text class="axis-unit" id="power-axis-unit" x="4" y="12">kW</text>
-                <g id="power-grid-lines"></g>
-                <g id="power-series-paths"></g>
-                <g id="power-points"></g>
-                <g id="power-labels"></g>
-              </svg>
-               <svg id="price-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="price-chart-title price-chart-description" hidden>
-                <title id="price-chart-title">Electricity prices (EUR/kWh)</title>
-                <desc id="price-chart-description">Hourly electricity prices in EUR/kWh.</desc>
-                <text class="axis-unit" id="price-axis-unit" x="4" y="12">EUR/kWh</text>
-                <g id="price-grid-lines"></g>
-                <g id="price-series-paths"></g>
-                <g id="price-points"></g>
-                <g id="price-labels"></g>
-               </svg>
-               <svg id="battery-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="battery-chart-title battery-chart-description" hidden>
-                <title id="battery-chart-title">Battery state of charge (%)</title>
-                <desc id="battery-chart-description">Hourly battery state of charge in percent.</desc>
-                <text class="axis-unit" id="battery-axis-unit" x="4" y="12">%</text>
-                <g id="battery-grid-lines"></g>
-                <g id="battery-series-paths"></g>
-                <g id="battery-points"></g>
-                <g id="battery-labels"></g>
-               </svg>
+              <div id="power-panel" class="chart-panel" hidden>
+                <svg id="power-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="power-chart-title power-chart-description">
+                  <title id="power-chart-title">Power data (kW)</title>
+                  <desc id="power-chart-description">Hourly power values in kW.</desc>
+                  <text class="axis-unit" id="power-axis-unit" x="4" y="12">kW</text>
+                  <g id="power-grid-lines"></g>
+                  <g id="power-series-paths"></g>
+                  <g id="power-points"></g>
+                  <g id="power-labels"></g>
+                </svg>
+                <div id="power-legend" class="chart-legend" role="group" aria-label="Power series"></div>
+              </div>
+              <div id="price-panel" class="chart-panel" hidden>
+                <svg id="price-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="price-chart-title price-chart-description">
+                  <title id="price-chart-title">Electricity prices (EUR/kWh)</title>
+                  <desc id="price-chart-description">Hourly electricity prices in EUR/kWh.</desc>
+                  <text class="axis-unit" id="price-axis-unit" x="4" y="12">EUR/kWh</text>
+                  <g id="price-grid-lines"></g>
+                  <g id="price-series-paths"></g>
+                  <g id="price-points"></g>
+                  <g id="price-labels"></g>
+                </svg>
+                <div id="price-legend" class="chart-legend" role="group" aria-label="Price series"></div>
+              </div>
+              <div id="battery-panel" class="chart-panel" hidden>
+                <svg id="battery-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-labelledby="battery-chart-title battery-chart-description">
+                  <title id="battery-chart-title">Battery state of charge (%)</title>
+                  <desc id="battery-chart-description">Hourly battery state of charge in percent.</desc>
+                  <text class="axis-unit" id="battery-axis-unit" x="4" y="12">%</text>
+                  <g id="battery-grid-lines"></g>
+                  <g id="battery-series-paths"></g>
+                  <g id="battery-points"></g>
+                  <g id="battery-labels"></g>
+                </svg>
+                <div id="battery-legend" class="chart-legend" role="group" aria-label="Battery series"></div>
+              </div>
                <dl id="efficiency-summary" class="efficiency-summary" aria-label="Calculated efficiency summaries" hidden></dl>
                <dl id="efficiency-metrics" class="efficiency-metrics" aria-label="Efficiency measurements" hidden></dl>
             </div>
