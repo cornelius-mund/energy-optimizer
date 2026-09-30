@@ -9,8 +9,6 @@ loses its value and becomes an excluded hour with the reason
 ``flagged_by_earlier_version``.
 """
 
-from __future__ import annotations
-
 from collections.abc import Container
 from dataclasses import replace
 from datetime import datetime, timedelta

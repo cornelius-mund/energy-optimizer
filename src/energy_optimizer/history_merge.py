@@ -1,7 +1,5 @@
 """Pure merge and retention rules for retained hourly provider history."""
 
-from __future__ import annotations
-
 import math
 from datetime import datetime, timedelta
 

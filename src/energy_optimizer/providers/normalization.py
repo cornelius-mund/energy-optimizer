@@ -1,7 +1,5 @@
 """Small provider-independent normalization utilities."""
 
-from __future__ import annotations
-
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, cast

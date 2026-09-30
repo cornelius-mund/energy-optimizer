@@ -1,7 +1,5 @@
 """Append-friendly durable storage for normalized household-load data."""
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass

@@ -1,7 +1,5 @@
 """Shared HTTP helpers for provider integrations."""
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Mapping
 from time import perf_counter

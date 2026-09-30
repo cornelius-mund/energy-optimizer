@@ -1,7 +1,5 @@
 """Direct Forecast.Solar PV forecast provider."""
 
-from __future__ import annotations
-
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any

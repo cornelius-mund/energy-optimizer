@@ -1,7 +1,5 @@
 """Historic multi-asset actuals served through the unified dashboard contract."""
 
-from __future__ import annotations
-
 import json
 from collections.abc import Iterator
 from contextlib import contextmanager

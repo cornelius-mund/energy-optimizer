@@ -1,7 +1,5 @@
 """Home Assistant battery state and capability provider."""
 
-from __future__ import annotations
-
 import logging
 import math
 from datetime import datetime, timezone

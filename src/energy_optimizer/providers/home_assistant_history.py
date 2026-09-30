@@ -14,8 +14,6 @@ limits, happens in the pure normalization steps that read a consumer's window
 from the shared series and exclude every hour an invalid sample touches.
 """
 
-from __future__ import annotations
-
 import logging
 import math
 from bisect import bisect_left, bisect_right

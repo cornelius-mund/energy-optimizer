@@ -1,7 +1,5 @@
 """The excluded-hours endpoint: every hour left out of imported history, with causes."""
 
-from __future__ import annotations
-
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import timedelta

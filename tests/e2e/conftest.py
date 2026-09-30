@@ -1,7 +1,5 @@
 """Fixtures for browser tests against a real Energy Optimizer process."""
 
-from __future__ import annotations
-
 import json
 import os
 import socket

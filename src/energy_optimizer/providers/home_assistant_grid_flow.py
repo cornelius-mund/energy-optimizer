@@ -1,7 +1,5 @@
 """Home Assistant grid import and export provider composition."""
 
-from __future__ import annotations
-
 import logging
 from datetime import datetime, timezone
 

@@ -1,7 +1,5 @@
 """aWATTar Germany EPEX Spot electricity-price provider."""
 
-from __future__ import annotations
-
 import logging
 import math
 from datetime import datetime, timedelta, timezone

@@ -1,7 +1,5 @@
 """Browser end-to-end coverage for the unified dashboard."""
 
-from __future__ import annotations
-
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta

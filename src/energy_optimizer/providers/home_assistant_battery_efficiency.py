@@ -1,7 +1,5 @@
 """Measured battery and inverter efficiency calculation."""
 
-from __future__ import annotations
-
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace

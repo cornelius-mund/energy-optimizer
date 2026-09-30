@@ -9,8 +9,6 @@ This module is pure domain code: it knows nothing about Home Assistant, storage,
 or HTTP.
 """
 
-from __future__ import annotations
-
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace

@@ -11,8 +11,6 @@ has a time span, and every hour that overlaps that span is excluded and keeps th
 cause with its exact data points. Excluded hours have no value.
 """
 
-from __future__ import annotations
-
 import logging
 import math
 from bisect import bisect_right
