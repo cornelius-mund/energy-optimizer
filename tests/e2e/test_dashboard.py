@@ -434,6 +434,29 @@ def _reload_range(page: Page) -> None:
     expect(page.locator("#status")).not_to_contain_text("Loading")
 
 
+def _expect_no_native_chart_tooltip(page: Page) -> None:
+    """Expect that nothing in any chart makes the browser draw its own tooltip.
+
+    A native tooltip is browser interface and not part of the page's DOM, so this
+    asserts its causes: a `<title>` element or a `title` attribute in a chart.
+    """
+    for chart in CHARTS:
+        svg = page.locator(f"#{chart}-chart")
+        expect(svg.locator("title")).to_have_count(0)
+        expect(svg.locator("[title]")).to_have_count(0)
+        assert svg.get_attribute("title") is None
+
+
+def _expect_chart_semantics(
+    page: Page, chart: str, name: str, description: str
+) -> None:
+    """Expect a chart to be an image with the given accessible name and description."""
+    svg = page.locator(f"#{chart}-chart")
+    expect(svg).to_have_role("img")
+    expect(svg).to_have_accessible_name(name)
+    expect(svg).to_have_accessible_description(description)
+
+
 def test_each_chart_has_its_own_legend_beside_it(
     e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
 ) -> None:
@@ -536,12 +559,25 @@ def test_legend_entries_show_and_hide_lines_and_rescale_the_axis(
     for index in range(3):
         expect(entries.nth(index)).to_have_attribute("aria-pressed", "false")
     expect(page.locator("#price-series-paths path")).to_have_count(2)
+    # A chart with every line hidden keeps a name that says so, not an empty one.
+    _expect_chart_semantics(
+        page,
+        "power",
+        "No series shown (kW)",
+        "Every series of this chart is hidden. Use the legend to show one.",
+    )
+    expect(page.locator("#price-chart")).to_have_accessible_name(
+        "Import price and Export price (EUR/kWh)"
+    )
 
     for index in range(3):
         entries.nth(index).click()
     expect(page.locator("#power-series-paths path")).to_have_count(3)
     assert _line_paths(page, "power") == original_paths
     assert _axis_ticks(page, "power") == original_ticks
+    expect(page.locator("#power-chart")).to_have_accessible_name(
+        "Household load and Grid import and Grid export (kW)"
+    )
     assert errors == []
 
 
@@ -609,7 +645,7 @@ def test_legend_entries_are_operable_from_the_keyboard(
 def test_tooltip_names_its_series_and_stays_inside_its_chart(
     e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
 ) -> None:
-    """Verify the tooltip names its line and stays clear of the legend."""
+    """Verify the tooltip names its line, fits its chart, and is the only one."""
     start, end = _seed_historic_assets(e2e_api, e2e_server)
     _open_dashboard(page, e2e_server)
     _load_range(page, start, end)
@@ -636,6 +672,76 @@ def test_tooltip_names_its_series_and_stays_inside_its_chart(
             page.locator(f"#{chart}-points circle").last.get_attribute("aria-label")
             == label
         )
+
+    _expect_no_native_chart_tooltip(page)
+    _expect_chart_semantics(
+        page,
+        "power",
+        "Household load and Grid import and Grid export (kW)",
+        "Household load in kW; Grid import in kW; Grid export in kW. "
+        "Missing intervals remain gaps.",
+    )
+    _expect_chart_semantics(
+        page,
+        "price",
+        "Import price and Export price (EUR/kWh)",
+        "Import price in EUR/kWh; Export price in EUR/kWh. "
+        "Missing intervals remain gaps.",
+    )
+    _expect_chart_semantics(
+        page,
+        "battery",
+        "Battery state of charge (%)",
+        "Battery state of charge in %. Missing intervals remain gaps.",
+    )
+
+    # The accessible name follows the lines that are shown.
+    grid_import = page.locator("#power-legend [data-series-id=grid_import_actual]")
+    grid_import.click()
+    _expect_chart_semantics(
+        page,
+        "power",
+        "Household load and Grid export (kW)",
+        "Household load in kW; Grid export in kW. Missing intervals remain gaps.",
+    )
+    _expect_no_native_chart_tooltip(page)
+    grid_import.click()
+    expect(page.locator("#power-chart")).to_have_accessible_name(
+        "Household load and Grid import and Grid export (kW)"
+    )
+
+
+def test_tooltip_of_every_line_holds_its_name_time_and_value(
+    e2e_api: httpx.Client, e2e_server: LiveServer, page: Page
+) -> None:
+    """Verify every line's tooltip reads `<line> · <time> · <value> <unit>`."""
+    start, end = _seed_historic_assets(e2e_api, e2e_server)
+    _open_dashboard(page, e2e_server)
+    _load_range(page, start, end)
+    seeded_lines = {
+        "power": (
+            ("Household load", (1.2, 1.0), "kW"),
+            ("Grid import", (0.8, 1.6), "kW"),
+            ("Grid export", (0.0, 0.4), "kW"),
+        ),
+        "price": (
+            ("Import price", (0.31, 0.27), "EUR/kWh"),
+            ("Export price", (0.09, 0.07), "EUR/kWh"),
+        ),
+        "battery": (("Battery state of charge", (35.0, 45.0), "%"),),
+    }
+    tooltip = page.locator("#point-tooltip")
+
+    for chart, lines in seeded_lines.items():
+        points = page.locator(f"#{chart}-points circle")
+        expect(points).to_have_count(2 * len(lines))
+        # A chart draws its lines in order, and every line has one point per hour.
+        for line_index, (name, values, unit) in enumerate(lines):
+            for hour, value in enumerate(values):
+                points.nth(2 * line_index + hour).hover()
+                stamp = _excluded_stamp(start + timedelta(hours=hour))
+                expect(tooltip).to_have_text(f"{name} · {stamp} · {value:g} {unit}")
+    _expect_no_native_chart_tooltip(page)
 
 
 def test_legends_are_placed_below_their_charts_on_narrow_screens(
@@ -944,6 +1050,21 @@ def test_forecast_tab_renders_pv_and_prices(e2e_server: LiveServer, page: Page) 
     assert max(tick_values) >= 0.22
     assert max(tick_values) < 0.5
     assert all(len(label.rsplit(".", 1)[-1]) >= 2 for label in tick_labels)
+
+    _expect_no_native_chart_tooltip(page)
+    _expect_chart_semantics(
+        page,
+        "power",
+        "PV generation (kW)",
+        "PV generation in kW. Missing intervals remain gaps.",
+    )
+    _expect_chart_semantics(
+        page,
+        "price",
+        "Import price and Export price (EUR/kWh)",
+        "Import price in EUR/kWh; Export price in EUR/kWh. "
+        "Missing intervals remain gaps.",
+    )
 
 
 def test_price_axis_handles_negative_flat_values(

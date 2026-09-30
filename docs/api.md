@@ -528,7 +528,16 @@ chart and show no legend.
 Chart points expose the series label, the exact timestamp in the configured zone,
 and the value with its unit on pointer hover and keyboard focus, for example
 `Import price · 2026-09-30 23:00 · 0.14 EUR/kWh`. The tooltip stays inside the chart
-its point belongs to, so it never covers that chart's legend.
+its point belongs to, so it never covers that chart's legend. It is the only tooltip:
+the charts carry no SVG `<title>` element and no `title` attribute, which browsers
+would draw as a second, native tooltip over the point tooltip.
+
+Each chart is an SVG with the role `img`. Its accessible name (`aria-label`) lists
+the lines that are shown, for example `Grid import and Grid export (kW)`, and its
+accessible description (`aria-describedby`, referencing the SVG `<desc>`) reads
+`Grid import in kW; Grid export in kW. Missing intervals remain gaps.` Hiding a line
+through its legend entry removes it from both. When every line is hidden, the name is
+`No series shown (kW)`.
 
 The dashboard also provides a Forecast tab backed by
 `GET /api/v1/dashboard/data?scenario_kind=forecast`. Forecast series identify
