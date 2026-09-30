@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -44,23 +45,11 @@ CLEAN_FILES = {
     ),
 }
 
+_run = partial(subprocess.run, capture_output=True, text=True, check=False)
+
 
 def _verify(*arguments: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [str(VERIFY), *arguments],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-
-
-def _linter_environment() -> dict[str, str]:
-    """Run the linters of the interpreter's environment, not ambient copies."""
-    environment = os.environ.copy()
-    interpreter_directory = str(Path(sys.executable).parent)
-    environment["PATH"] = os.pathsep.join([interpreter_directory, environment["PATH"]])
-    return environment
+    return _run([str(VERIFY), *arguments], timeout=30)
 
 
 def _verify_in_scratch_repository(
@@ -81,13 +70,14 @@ def _verify_in_scratch_repository(
         target = root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-    return subprocess.run(
+    # Run the linters of the interpreter's environment, not ambient copies.
+    environment = os.environ.copy()
+    interpreter_directory = str(Path(sys.executable).parent)
+    environment["PATH"] = os.pathsep.join([interpreter_directory, environment["PATH"]])
+    return _run(
         [str(root / "scripts" / "verify"), *steps],
         cwd=root,
-        env=_linter_environment(),
-        capture_output=True,
-        text=True,
-        check=False,
+        env=environment,
         timeout=60,
     )
 
@@ -113,13 +103,10 @@ def _preflight_with_linters(
         (linter_directory / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         (linter_directory / name).chmod(0o755)
 
-    result = subprocess.run(
+    result = _run(
         [str(root / "scripts" / "preflight"), *arguments],
         cwd=root,
         env={"PATH": f"{stubs}:/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        check=False,
         timeout=60,
     )
     lines: dict[str, tuple[str, str]] = {}
@@ -157,16 +144,6 @@ def _workflow_jobs() -> dict[str, Any]:
     return jobs
 
 
-def _verify_steps_called_by_ci() -> set[str]:
-    called: set[str] = set()
-    for job in _workflow_jobs().values():
-        for step in job["steps"]:
-            command = step.get("run", "")
-            if command.startswith("scripts/verify "):
-                called.add(command.removeprefix("scripts/verify "))
-    return called
-
-
 def test_verify_lists_every_step() -> None:
     result = _verify("--list")
 
@@ -186,19 +163,29 @@ def test_verify_lists_every_step() -> None:
 
 
 def test_verify_rejects_unknown_steps_and_options() -> None:
-    unknown_step = _verify("bogus")
-    unknown_option = _verify("--bogus")
+    for argument, message in (
+        ("bogus", "Unknown step: bogus"),
+        ("--bogus", "Unknown option: --bogus"),
+    ):
+        result = _verify(argument)
 
-    assert unknown_step.returncode == 2
-    assert "Unknown step: bogus" in unknown_step.stderr
-    assert unknown_option.returncode == 2
-    assert "Unknown option: --bogus" in unknown_option.stderr
+        assert result.returncode == 2
+        assert message in result.stderr
 
 
 def test_ci_runs_every_verification_step_through_the_verify_script() -> None:
     listed = set(_verify("--list").stdout.split())
+    commands = [
+        step.get("run", "")
+        for job in _workflow_jobs().values()
+        for step in job["steps"]
+    ]
 
-    assert _verify_steps_called_by_ci() == listed
+    assert {
+        command.removeprefix("scripts/verify ")
+        for command in commands
+        if command.startswith("scripts/verify ")
+    } == listed
 
 
 def test_e2e_job_runs_in_parallel_with_the_unit_job() -> None:
@@ -207,16 +194,12 @@ def test_e2e_job_runs_in_parallel_with_the_unit_job() -> None:
 
 def test_e2e_job_caches_playwright_browsers_before_installing_them() -> None:
     steps = _workflow_jobs()["e2e"]["steps"]
+    uses = [step.get("uses", "") for step in steps]
+    runs = [step.get("run", "") for step in steps]
     cache_index = next(
-        index
-        for index, step in enumerate(steps)
-        if step.get("uses", "").startswith("actions/cache@")
+        i for i, use in enumerate(uses) if use.startswith("actions/cache@")
     )
-    install_index = next(
-        index
-        for index, step in enumerate(steps)
-        if "playwright install" in step.get("run", "")
-    )
+    install_index = next(i for i, run in enumerate(runs) if "playwright install" in run)
 
     assert steps[cache_index]["with"]["path"] == "~/.cache/ms-playwright"
     assert "playwright-version" in steps[cache_index]["with"]["key"]
@@ -261,7 +244,7 @@ def test_lint_steps_pass_on_a_clean_scratch_repository(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("step", "files", "finding"),
+    ("step", "files", "findings"),
     [
         pytest.param(
             "workflows",
@@ -275,31 +258,31 @@ def test_lint_steps_pass_on_a_clean_scratch_repository(tmp_path: Path) -> None:
                     "      - run: echo ${{ github.evnt_name }}\n"
                 )
             },
-            "evnt_name",
+            ("evnt_name",),
             id="actionlint",
         ),
         pytest.param(
             "dockerfile",
             {"Dockerfile": 'FROM python:latest\n\nCMD ["python"]\n'},
-            "DL3007",
+            ("DL3007",),
             id="hadolint",
         ),
         pytest.param(
             "yaml",
             {"settings.yaml": "enabled: true\nenabled: false\n"},
-            "duplication of key",
+            ("duplication of key",),
             id="yamllint-error",
         ),
         pytest.param(
             "yaml",
             {"settings.yaml": "enabled: yes\n"},
-            "truthy value should be one of",
+            ("truthy value should be one of",),
             id="yamllint-warning-fails-under-strict",
         ),
         pytest.param(
             "shell",
             {"scripts/example": "#!/usr/bin/env bash\nprintf '%s\\n' $1\n"},
-            "SC2086",
+            ("SC2086",),
             id="shellcheck",
         ),
         pytest.param(
@@ -312,44 +295,36 @@ def test_lint_steps_pass_on_a_clean_scratch_repository(tmp_path: Path) -> None:
                     "fi\n"
                 )
             },
-            "+++ scripts/example",
+            ("+++ scripts/example",),
             id="shfmt",
+        ),
+        pytest.param(
+            "shell",
+            {
+                "scripts/example": (
+                    "#!/usr/bin/env bash\nif true; then\n  printf '%s\\n' $1\nfi\n"
+                )
+            },
+            ("SC2086", "+++ scripts/example"),
+            id="shellcheck-and-shfmt-together",
+        ),
+        pytest.param(
+            "yaml",
+            {"nested/new.yml": "a: 1\na: 2\n"},
+            ("nested/new.yml",),
+            id="file-not-yet-tracked-by-git",
         ),
     ],
 )
 def test_lint_step_fails_on_broken_input(
-    tmp_path: Path, step: str, files: dict[str, str], finding: str
+    tmp_path: Path, step: str, files: dict[str, str], findings: tuple[str, ...]
 ) -> None:
     result = _verify_in_scratch_repository(tmp_path, files, step)
 
     assert result.returncode == 1, result.stdout + result.stderr
-    assert finding in result.stdout
+    for finding in findings:
+        assert finding in result.stdout
     assert f"FAIL  {step}" in result.stdout
-
-
-def test_shell_step_reports_shellcheck_and_shfmt_findings_together(
-    tmp_path: Path,
-) -> None:
-    script = "#!/usr/bin/env bash\nif true; then\n  printf '%s\\n' $1\nfi\n"
-
-    result = _verify_in_scratch_repository(
-        tmp_path, {"scripts/example": script}, "shell"
-    )
-
-    assert result.returncode == 1
-    assert "SC2086" in result.stdout
-    assert "+++ scripts/example" in result.stdout
-
-
-def test_lint_step_checks_files_that_are_not_yet_tracked_by_git(
-    tmp_path: Path,
-) -> None:
-    result = _verify_in_scratch_repository(
-        tmp_path, {"nested/new.yml": "a: 1\na: 2\n"}, "yaml"
-    )
-
-    assert result.returncode == 1
-    assert "nested/new.yml" in result.stdout
 
 
 @pytest.mark.parametrize("missing", LINTERS)
@@ -372,15 +347,10 @@ def test_preflight_names_a_missing_linter_and_how_to_install_it(
 
 
 def test_shell_scripts_live_only_in_the_scripts_directory() -> None:
-    shell_scripts = {
-        path.relative_to(REPOSITORY)
-        for path in _repository_files()
-        if _is_shell_script(path)
-    }
+    files = _repository_files()
+    shell_scripts = {path for path in files if _is_shell_script(path)}
     scripts_directory_files = {
-        path.relative_to(REPOSITORY)
-        for path in _repository_files()
-        if path.parent == REPOSITORY / "scripts"
+        path for path in files if path.parent == REPOSITORY / "scripts"
     }
 
     assert shell_scripts == scripts_directory_files

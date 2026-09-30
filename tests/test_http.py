@@ -1,26 +1,33 @@
 """Tests for shared provider HTTP helpers."""
 
+from collections.abc import Callable
+
 import httpx
 import pytest
 
 from energy_optimizer.providers.http import JsonHttpClient, home_assistant_headers
 
 
-def request_home_assistant_json(client: httpx.Client) -> object:
-    return JsonHttpClient(client).get_home_assistant_json(
-        "http://homeassistant.local/api/test",
-        token="test-token",
-        timeout_seconds=5,
-        error_factory=RuntimeError,
-        not_found_message="history was not found",
-        status_message=lambda status: f"Home Assistant returned HTTP {status}",
-        timeout_message="request timed out",
-        transport_message="transport failed",
-        malformed_message="malformed JSON",
-        log_event="home_assistant_test",
-        component="home_assistant",
-        operation="test",
-    )
+def request_home_assistant_json(
+    handler: Callable[[httpx.Request], httpx.Response],
+    authentication_error_factory: Callable[[str], Exception] | None = None,
+) -> object:
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        return JsonHttpClient(client).get_home_assistant_json(
+            "http://homeassistant.local/api/test",
+            token="test-token",
+            timeout_seconds=5,
+            error_factory=RuntimeError,
+            authentication_error_factory=authentication_error_factory,
+            not_found_message="history was not found",
+            status_message=lambda status: f"Home Assistant returned HTTP {status}",
+            timeout_message="request timed out",
+            transport_message="transport failed",
+            malformed_message="malformed JSON",
+            log_event="home_assistant_test",
+            component="home_assistant",
+            operation="test",
+        )
 
 
 def test_home_assistant_request_adds_auth_headers_and_decodes_json() -> None:
@@ -35,11 +42,7 @@ def test_home_assistant_request_adds_auth_headers_and_decodes_json() -> None:
         }
         return httpx.Response(200, json={"state": "ok"})
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
-        assert request_home_assistant_json(client) == {"state": "ok"}
-    finally:
-        client.close()
+    assert request_home_assistant_json(handler) == {"state": "ok"}
 
 
 def test_home_assistant_headers_are_built_consistently() -> None:
@@ -65,28 +68,10 @@ class AuthenticationRejected(RuntimeError):
 def test_authentication_statuses_use_the_authentication_error_factory(
     status: int, error_type: type[RuntimeError]
 ) -> None:
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(status))
-    )
-    try:
-        with pytest.raises(RuntimeError) as failure:
-            JsonHttpClient(client).get_home_assistant_json(
-                "http://homeassistant.local/api/test",
-                token="test-token",
-                timeout_seconds=5,
-                error_factory=RuntimeError,
-                authentication_error_factory=AuthenticationRejected,
-                not_found_message="history was not found",
-                status_message=lambda status: f"Home Assistant returned HTTP {status}",
-                timeout_message="request timed out",
-                transport_message="transport failed",
-                malformed_message="malformed JSON",
-                log_event="home_assistant_test",
-                component="home_assistant",
-                operation="test",
-            )
-    finally:
-        client.close()
+    with pytest.raises(RuntimeError) as failure:
+        request_home_assistant_json(
+            lambda _: httpx.Response(status), AuthenticationRejected
+        )
 
     # Only an authentication rejection may use the distinguishable error type.
     assert type(failure.value) is error_type
@@ -104,11 +89,5 @@ def test_authentication_statuses_use_the_authentication_error_factory(
 def test_home_assistant_request_translates_status_failures(
     status: int, message: str
 ) -> None:
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(status))
-    )
-    try:
-        with pytest.raises(RuntimeError, match=message):
-            request_home_assistant_json(client)
-    finally:
-        client.close()
+    with pytest.raises(RuntimeError, match=message):
+        request_home_assistant_json(lambda _: httpx.Response(status))

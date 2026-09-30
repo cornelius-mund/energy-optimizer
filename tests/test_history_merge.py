@@ -39,20 +39,32 @@ GRID_KEY = ProviderDataKey("grid-flow", "home-assistant", "grid_flow")
 GRID_ADAPTER = TypeAdapter(GridFlowData)
 
 
+@pytest.fixture
+def store(tmp_path: Path) -> ProviderDataStore:
+    return ProviderDataStore(tmp_path)
+
+
+def at(hour: int) -> datetime:
+    return START + timedelta(hours=hour)
+
+
+def grid_primary(directory: Path) -> Path:
+    return directory / f"grid-flow-{GRID_KEY.digest()}.json"
+
+
 def exclusion(
     hour: int,
     reason: ExclusionReason = "counter_decrease",
     entity_id: str = "sensor.grid_import",
 ) -> HourExclusion:
-    hour_start = START + timedelta(hours=hour)
     return HourExclusion(
-        hour_start,
+        at(hour),
         (
             ExclusionCause.of(
                 reason,
                 f"{entity_id} is excluded in hour {hour}",
                 entity_id,
-                [ExcludedDataPoint(hour_start, state="2", unit="kWh")],
+                [ExcludedDataPoint(at(hour), state="2", unit="kWh")],
             ),
         ),
     )
@@ -67,44 +79,21 @@ def grid_flow(
     exclusions: tuple[HourExclusion, ...] = (),
     source: SourceMetadata = GRID_SOURCE,
 ) -> GridFlowData:
-    observed = START + timedelta(hours=observed_hour or start_hour + len(imports))
+    observed = at(observed_hour or start_hour + len(imports))
+    if exports is None:
+        exports = tuple(None if v is None else v / 2 for v in imports)
     return GridFlowData(
         schema_version="1",
-        start_time=START + timedelta(hours=start_hour),
+        start_time=at(start_hour),
         interval_minutes=60,
         import_kw=imports,
-        export_kw=(
-            exports
-            if exports is not None
-            else tuple(None if v is None else v / 2 for v in imports)
-        ),
+        export_kw=exports,
         unit="kW",
         source=source,
         retrieved_at=observed,
         latest_observation_at=observed,
         exclusions=exclusions,
     )
-
-
-def legacy_grid_flow_payload(
-    import_kw: list[float], export_kw: list[float], quality: list[dict[str, object]]
-) -> bytes:
-    """Return a persisted grid-flow file as versions before exclusion wrote it."""
-    return json.dumps(
-        {
-            "schema_version": "1",
-            "start_time": START.isoformat(),
-            "interval_minutes": 60,
-            "import_kw": import_kw,
-            "export_kw": export_kw,
-            "unit": "kW",
-            "source": {"provider": "home-assistant", "entity_id": "grid_flow"},
-            "retrieved_at": START.isoformat(),
-            "latest_observation_at": (START + timedelta(hours=3)).isoformat(),
-            "quality": quality,
-        },
-        indent=2,
-    ).encode()
 
 
 def prices(
@@ -116,16 +105,14 @@ def prices(
 ) -> ElectricityPriceData:
     return ElectricityPriceData(
         schema_version="1",
-        timestamps=tuple(
-            START + timedelta(hours=start_hour + index) for index in range(len(imports))
-        ),
+        timestamps=tuple(at(start_hour + index) for index in range(len(imports))),
         interval_minutes=60,
         import_price_eur_per_kwh=imports,
         export_price_eur_per_kwh=tuple(value - 0.1 for value in imports),
         unit="EUR/kWh",
         source=source,
-        retrieved_at=START + timedelta(hours=retrieved_hour),
-        expires_at=START + timedelta(hours=retrieved_hour + 48),
+        retrieved_at=at(retrieved_hour),
+        expires_at=at(retrieved_hour + 48),
     )
 
 
@@ -137,12 +124,10 @@ def test_grid_flow_merge_extends_history_and_keeps_both_channels() -> None:
     assert merged.start_time == START
     assert merged.import_kw == (1.0, 2.0, 3.0)
     assert merged.export_kw == (0.5, 1.0, 0.7)
-    assert merged.latest_observation_at == START + timedelta(hours=3)
+    assert merged.latest_observation_at == at(3)
 
 
-def test_grid_flow_merge_excludes_a_gap_before_the_fetched_range_as_unavailable() -> (
-    None
-):
+def test_grid_flow_merge_marks_a_gap_before_the_fetched_range_unavailable() -> None:
     existing = grid_flow(0, (1.0, 2.0))
     incoming = grid_flow(5, (3.0, 4.0))
 
@@ -151,9 +136,7 @@ def test_grid_flow_merge_excludes_a_gap_before_the_fetched_range_as_unavailable(
     assert merged.start_time == START
     assert merged.import_kw == (1.0, 2.0, None, None, None, 3.0, 4.0)
     assert merged.export_kw == (0.5, 1.0, None, None, None, 1.5, 2.0)
-    assert [item.hour_start for item in merged.exclusions] == [
-        START + timedelta(hours=hour) for hour in (2, 3, 4)
-    ]
+    assert [item.hour_start for item in merged.exclusions] == [at(2), at(3), at(4)]
     for item in merged.exclusions:
         assert [
             (cause.reason, cause.entity_id, cause.data_points, cause.data_point_count)
@@ -165,16 +148,14 @@ def test_grid_flow_merge_excludes_a_gap_before_the_fetched_range_as_unavailable(
         )
     assert merged.latest_observation_at == incoming.latest_observation_at
     assert grid_flow_points(merged)[START] == (1.0, 0.5, None)
-    assert grid_flow_points(merged)[START + timedelta(hours=6)] == (4.0, 2.0, None)
+    assert grid_flow_points(merged)[at(6)] == (4.0, 2.0, None)
 
 
 def test_grid_flow_merge_excludes_a_single_missing_hour() -> None:
     merged = merge_grid_flow_history(grid_flow(0, (1.0,)), grid_flow(2, (2.0,)))
 
     assert merged.import_kw == (1.0, None, 2.0)
-    assert [item.hour_start for item in merged.exclusions] == [
-        START + timedelta(hours=1)
-    ]
+    assert [item.hour_start for item in merged.exclusions] == [at(1)]
     assert merged.exclusions[0].causes[0].message == (
         "The provider holds no history from 2026-01-01T01:00:00+00:00 until "
         "2026-01-01T02:00:00+00:00 (1 hour), so this hour cannot be imported."
@@ -190,10 +171,7 @@ def test_grid_flow_merge_keeps_earlier_exclusions_next_to_a_gap() -> None:
     assert [
         (item.hour_start, [cause.reason for cause in item.causes])
         for item in merged.exclusions
-    ] == [
-        (START + timedelta(hours=1), ["counter_decrease"]),
-        (START + timedelta(hours=2), ["history_unavailable"]),
-    ]
+    ] == [(at(1), ["counter_decrease"]), (at(2), ["history_unavailable"])]
 
 
 def test_grid_flow_merge_leaves_a_range_that_follows_directly_without_a_gap() -> None:
@@ -219,15 +197,14 @@ def test_grid_flow_merge_bounds_a_gap_with_the_retention_window(
 
     merged = merge_grid_flow_history(grid_flow(0, (1.0, 2.0)), grid_flow(5, (3.0,)))
 
-    assert merged.start_time == START + timedelta(hours=2)
+    assert merged.start_time == at(2)
     assert merged.import_kw == (None, None, None, 3.0)
     assert len(merged.exclusions) == 3
 
 
 def test_store_persists_a_grid_flow_gap_and_continues_incrementally(
-    tmp_path: Path,
+    store: ProviderDataStore, tmp_path: Path
 ) -> None:
-    store = ProviderDataStore(tmp_path)
     store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0, 2.0)))
 
     saved = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(6, (3.0,)))
@@ -270,7 +247,7 @@ def test_grid_flow_merge_bounds_history_to_the_retention_window(
         grid_flow(0, (1.0, 2.0, 3.0)), grid_flow(3, (4.0,))
     )
 
-    assert merged.start_time == START + timedelta(hours=1)
+    assert merged.start_time == at(1)
     assert merged.import_kw == (2.0, 3.0, 4.0)
 
 
@@ -325,7 +302,7 @@ def test_grid_flow_merge_bounds_exclusions_with_the_retention_window(
 
     merged = merge_grid_flow_history(existing, grid_flow(2, (3.0,)))
 
-    assert merged.start_time == START + timedelta(hours=1)
+    assert merged.start_time == at(1)
     assert merged.import_kw == (None, 3.0)
     assert merged.exclusions == (exclusion(1),)
 
@@ -335,7 +312,7 @@ def test_grid_flow_points_index_excluded_hours_with_their_exclusion() -> None:
 
     assert grid_flow_points(data) == {
         START: (1.0, 0.5, None),
-        START + timedelta(hours=1): (None, None, exclusion(1)),
+        at(1): (None, None, exclusion(1)),
     }
 
 
@@ -353,16 +330,11 @@ def test_grid_flow_points_index_excluded_hours_with_their_exclusion() -> None:
         (None, grid_flow(0, (float("nan"),), exports=(0.0,)), "finite"),
         (
             None,
-            GridFlowData(
-                "1",
-                START + timedelta(minutes=30),
-                60,
-                (1.0,),
-                (0.0,),
-                "kW",
-                GRID_SOURCE,
-                START,
-                START,
+            replace(
+                grid_flow(0, (1.0,), exports=(0.0,)),
+                start_time=START + timedelta(minutes=30),
+                retrieved_at=START,
+                latest_observation_at=START,
             ),
             "aligned to the hour",
         ),
@@ -412,11 +384,11 @@ def test_price_merge_lets_the_newest_retrieval_win_and_keeps_gaps() -> None:
 
     merged = merge_price_history(merge_price_history(older, newer), revised)
 
-    assert merged.timestamps == tuple(START + timedelta(hours=h) for h in (0, 1, 3, 4))
+    assert merged.timestamps == tuple(at(hour) for hour in (0, 1, 3, 4))
     assert merged.import_price_eur_per_kwh == (0.30, 0.99, 0.40, 0.41)
     assert merged.export_price_eur_per_kwh == pytest.approx((0.20, 0.89, 0.30, 0.31))
-    assert merged.retrieved_at == START + timedelta(hours=4)
-    assert merged.expires_at == START + timedelta(hours=52)
+    assert merged.retrieved_at == at(4)
+    assert merged.expires_at == at(52)
 
 
 def test_price_merge_bounds_history_to_the_retention_window(
@@ -439,46 +411,26 @@ def test_price_merge_bounds_history_to_the_retention_window(
         ),
         (
             None,
-            ElectricityPriceData(
-                "1",
-                (START,),
-                60,
-                (0.1,),
-                (),
-                "EUR/kWh",
-                PRICE_SOURCE,
-                START,
-                START,
-            ),
+            replace(prices(0, (0.1,)), export_price_eur_per_kwh=(), expires_at=START),
             "aligned",
         ),
         (
             None,
-            ElectricityPriceData(
-                "1",
-                (START + timedelta(minutes=30),),
-                60,
-                (0.1,),
-                (0.1,),
-                "EUR/kWh",
-                PRICE_SOURCE,
-                START,
-                START,
+            replace(
+                prices(0, (0.1,)),
+                timestamps=(START + timedelta(minutes=30),),
+                export_price_eur_per_kwh=(0.1,),
+                expires_at=START,
             ),
             "aligned to the hour",
         ),
         (
             None,
-            ElectricityPriceData(
-                "1",
-                (START,),
-                60,
-                (float("inf"),),
-                (0.1,),
-                "EUR/kWh",
-                PRICE_SOURCE,
-                START,
-                START,
+            replace(
+                prices(0, (0.1,)),
+                import_price_eur_per_kwh=(float("inf"),),
+                export_price_eur_per_kwh=(0.1,),
+                expires_at=START,
             ),
             "finite",
         ),
@@ -497,10 +449,8 @@ def test_price_merge_rejects_data_that_would_corrupt_history(
 
 
 def test_store_merges_grid_flow_saves_into_one_retained_history(
-    tmp_path: Path,
+    store: ProviderDataStore, tmp_path: Path
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-
     store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0, 2.0)))
     saved = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(2, (3.0,)))
     restarted = ProviderDataStore(tmp_path).load(GRID_KEY, GRID_ADAPTER)
@@ -510,9 +460,8 @@ def test_store_merges_grid_flow_saves_into_one_retained_history(
 
 
 def test_store_keeps_existing_grid_flow_history_when_a_merge_is_rejected(
-    tmp_path: Path,
+    store: ProviderDataStore,
 ) -> None:
-    store = ProviderDataStore(tmp_path)
     original = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(3, (1.0, 2.0)))
 
     with pytest.raises(ProviderDataStoreError, match="contiguous"):
@@ -521,28 +470,24 @@ def test_store_keeps_existing_grid_flow_history_when_a_merge_is_rejected(
     assert store.load(GRID_KEY, GRID_ADAPTER) == original
 
 
-def test_store_recovers_grid_flow_history_from_its_backup(tmp_path: Path) -> None:
-    store = ProviderDataStore(tmp_path)
+def test_store_recovers_grid_flow_history_from_its_backup(
+    store: ProviderDataStore, tmp_path: Path
+) -> None:
     store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0, 2.0)))
     saved = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(2, (3.0,)))
-    primary = tmp_path / f"grid-flow-{GRID_KEY.digest()}.json"
+    primary = grid_primary(tmp_path)
     backup = primary.with_name(primary.name + ".bak")
     backup.write_bytes(primary.read_bytes())
     primary.write_text("{corrupt", encoding="utf-8")
 
     assert store.load(GRID_KEY, GRID_ADAPTER) == saved
-    assert store.save(GRID_KEY, GRID_ADAPTER, grid_flow(3, (4.0,))).import_kw == (
-        1.0,
-        2.0,
-        3.0,
-        4.0,
-    )
+    continued = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(3, (4.0,)))
+    assert continued.import_kw == (1.0, 2.0, 3.0, 4.0)
 
 
 def test_store_refuses_to_merge_into_unrecoverable_grid_flow_history(
-    tmp_path: Path,
+    store: ProviderDataStore, tmp_path: Path
 ) -> None:
-    store = ProviderDataStore(tmp_path)
     store.save(GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0,)))
     for path in tmp_path.iterdir():
         path.write_text("{corrupt", encoding="utf-8")
@@ -552,12 +497,10 @@ def test_store_refuses_to_merge_into_unrecoverable_grid_flow_history(
 
 
 def test_store_round_trips_excluded_grid_flow_hours_after_restart(
-    tmp_path: Path,
+    store: ProviderDataStore, tmp_path: Path
 ) -> None:
-    store = ProviderDataStore(tmp_path)
-    store.save(
-        GRID_KEY, GRID_ADAPTER, grid_flow(0, (1.0, None), exclusions=(exclusion(1),))
-    )
+    data = grid_flow(0, (1.0, None), exclusions=(exclusion(1),))
+    store.save(GRID_KEY, GRID_ADAPTER, data)
 
     saved = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(2, (3.0,)))
     restarted = ProviderDataStore(tmp_path).load(GRID_KEY, GRID_ADAPTER)
@@ -575,24 +518,27 @@ def test_store_round_trips_excluded_grid_flow_hours_after_restart(
     assert payload["exclusions"][0]["causes"][0]["reason"] == "counter_decrease"
 
 
-def grid_primary(directory: Path) -> Path:
-    return directory / f"grid-flow-{GRID_KEY.digest()}.json"
-
-
 def write_legacy_grid_flow(directory: Path) -> None:
     """Persist a history in which an earlier version flagged hour 1 as suspect."""
-    quality: list[dict[str, object]] = [
-        {"status": "valid", "reason": None, "entity_id": None},
-        {
-            "status": "suspect",
-            "reason": "counter_reset",
-            "entity_id": "sensor.grid_import",
-        },
-        {"status": "valid", "reason": None, "entity_id": None},
-    ]
-    directory.mkdir(exist_ok=True)
-    payload = legacy_grid_flow_payload([1.0, 2.0, 3.0], [0.5, 1.0, 1.5], quality)
-    grid_primary(directory).write_bytes(payload)
+    valid = {"status": "valid", "reason": None, "entity_id": None}
+    suspect = {
+        "status": "suspect",
+        "reason": "counter_reset",
+        "entity_id": "sensor.grid_import",
+    }
+    payload = {
+        "schema_version": "1",
+        "start_time": START.isoformat(),
+        "interval_minutes": 60,
+        "import_kw": [1.0, 2.0, 3.0],
+        "export_kw": [0.5, 1.0, 1.5],
+        "unit": "kW",
+        "source": {"provider": "home-assistant", "entity_id": "grid_flow"},
+        "retrieved_at": START.isoformat(),
+        "latest_observation_at": at(3).isoformat(),
+        "quality": [valid, suspect, valid],
+    }
+    grid_primary(directory).write_bytes(json.dumps(payload, indent=2).encode())
 
 
 def test_store_converts_suspect_hours_of_legacy_grid_flow_history(
@@ -606,9 +552,7 @@ def test_store_converts_suspect_hours_of_legacy_grid_flow_history(
     assert loaded.import_kw == (1.0, None, 3.0)
     assert loaded.export_kw == (0.5, None, 1.5)
     assert loaded.quality == ()
-    assert [item.hour_start for item in loaded.exclusions] == [
-        START + timedelta(hours=1)
-    ]
+    assert [item.hour_start for item in loaded.exclusions] == [at(1)]
     (cause,) = loaded.exclusions[0].causes
     assert cause.reason == "flagged_by_earlier_version"
     assert cause.entity_id == "sensor.grid_import"
@@ -617,10 +561,9 @@ def test_store_converts_suspect_hours_of_legacy_grid_flow_history(
 
 
 def test_store_persists_converted_grid_flow_history_without_quality(
-    tmp_path: Path,
+    store: ProviderDataStore, tmp_path: Path
 ) -> None:
     write_legacy_grid_flow(tmp_path)
-    store = ProviderDataStore(tmp_path)
 
     saved = store.save(GRID_KEY, GRID_ADAPTER, grid_flow(3, (4.0,)))
 
@@ -639,10 +582,9 @@ def test_store_persists_converted_grid_flow_history_without_quality(
 
 
 def test_store_converts_a_legacy_grid_flow_backup_when_it_recovers_from_it(
-    tmp_path: Path,
+    store: ProviderDataStore, tmp_path: Path
 ) -> None:
     write_legacy_grid_flow(tmp_path)
-    store = ProviderDataStore(tmp_path)
     store.save(GRID_KEY, GRID_ADAPTER, grid_flow(3, (4.0,)))
     grid_primary(tmp_path).write_text("{corrupt", encoding="utf-8")
 

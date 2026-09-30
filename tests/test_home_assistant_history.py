@@ -10,7 +10,10 @@ import pytest
 
 from energy_optimizer.exclusions import ExcludedDataPoint
 from energy_optimizer.providers import home_assistant_history
-from energy_optimizer.providers.home_assistant_energy import EnergyAggregate
+from energy_optimizer.providers.home_assistant_energy import (
+    EnergyAggregate,
+    HomeAssistantEnergySeries,
+)
 from energy_optimizer.providers.home_assistant_history import (
     HistoryNeed,
     HistoryPlanError,
@@ -34,6 +37,9 @@ AGGREGATION = aggregate_configuration(
     add=[{"entity_id": FIRST, "state_class": "total_increasing", "unit": "kWh"}]
 )
 
+Handler = Callable[[httpx.Request], httpx.Response]
+SampleView = tuple[datetime, float | None, str | None, str | None]
+
 configuration = home_assistant_configuration_factory()
 
 
@@ -51,20 +57,117 @@ def counter_need(
     return HistoryNeed(entity_id, "counter", start_time, end_time)
 
 
-def import_history(
-    home_assistant: FakeHomeAssistant, *needs: HistoryNeed
-) -> HomeAssistantHistory:
-    client = home_assistant.client()
-    try:
+def first_two_hours(*entity_ids: str) -> list[HistoryNeed]:
+    return [counter_need(entity_id, hour(0), hour(2)) for entity_id in entity_ids]
+
+
+def import_history(source: Handler, *needs: HistoryNeed) -> HomeAssistantHistory:
+    """Import ``needs`` from ``source``, a fake endpoint or a plain handler."""
+    with httpx.Client(transport=httpx.MockTransport(source)) as client:
         return HomeAssistantHistoryImporter(configuration(), client).import_history(
             needs
         )
-    finally:
-        client.close()
+
+
+def history_of(
+    states: list[tuple[datetime, str]],
+    kind: home_assistant_history.HistoryKind = "counter",
+    start_time: datetime = hour(0),
+    end_time: datetime = hour(2),
+) -> HomeAssistantHistory:
+    """Import the ``states`` of the first entity, for hours 0 to 2 by default."""
+    need = HistoryNeed(FIRST, kind, start_time, end_time)
+    return import_history(FakeHomeAssistant({FIRST: states}), need)
+
+
+def responding(status: int, **content: Any) -> Handler:
+    return lambda _: httpx.Response(status, **content)
+
+
+def returning(payload: object) -> Handler:
+    return responding(200, json=payload)
+
+
+def raising(error: Exception) -> Handler:
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise error
+
+    return handler
+
+
+def failing_from_second_chunk(
+    healthy: FakeHomeAssistant, status: int, entity_id: str | None = None
+) -> Handler:
+    """Answer like ``healthy`` until the second seven-day chunk, then fail."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = healthy(request)
+        last = healthy.requests[-1]
+        if last.start_time >= day(7) and entity_id in (None, last.entity_id):
+            return httpx.Response(status)
+        return response
+
+    return handler
+
+
+def logged(caplog: pytest.LogCaptureFixture, prefix: str) -> list[logging.LogRecord]:
+    return [
+        record for record in caplog.records if record.getMessage().startswith(prefix)
+    ]
 
 
 def hourly_states(hours: int, rate: float = 1.0) -> list[tuple[datetime, str]]:
     return [(hour(offset), str(offset * rate)) for offset in range(hours + 1)]
+
+
+def hourly(*states: str) -> list[tuple[datetime, str]]:
+    return [(hour(offset), state) for offset, state in enumerate(states)]
+
+
+def record(
+    state: object, timestamp: datetime, unit: str | None = "kWh", **attrs: object
+) -> dict[str, object]:
+    """Build one history record; ``unit=None`` leaves the unit attribute out."""
+    if unit is not None:
+        attrs["unit_of_measurement"] = unit
+    return {"state": state, "last_updated": timestamp.isoformat(), "attributes": attrs}
+
+
+def history_from_payload(
+    payload: object, kind: home_assistant_history.HistoryKind = "counter"
+) -> HomeAssistantHistory:
+    return import_history(
+        returning(payload), HistoryNeed(FIRST, kind, hour(0), hour(2))
+    )
+
+
+def window_view(samples: tuple[HistorySample, ...]) -> list[SampleView]:
+    return [
+        (sample.timestamp, sample.value, sample.state, sample.invalid)
+        for sample in samples
+    ]
+
+
+def build_early_and_late(
+    states: list[tuple[datetime, str]],
+) -> tuple[HomeAssistantEnergySeries, HomeAssistantEnergySeries]:
+    """Serve a consumer of hours 0 to 4 and one of hours 2 to 4 from one import."""
+    home_assistant = FakeHomeAssistant({FIRST: states})
+    early = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="early")
+    late = EnergyAggregate(AGGREGATION, hour(2), hour(4), label="late")
+
+    history = import_history(home_assistant, *early.needs(), *late.needs())
+
+    assert len(home_assistant.requests) == 1
+    return early.build(history), late.build(history)
+
+
+def assert_import_failure_names_entity(source: Handler, message: str) -> None:
+    history = import_history(source, counter_need(FIRST, hour(0), hour(2)))
+
+    with pytest.raises(HomeAssistantError, match=message) as failure:
+        history.window(FIRST, "counter", hour(0), hour(2))
+    assert FIRST in str(failure.value)
 
 
 def test_needs_of_one_entity_merge_into_one_request_sequence() -> None:
@@ -91,16 +194,9 @@ def test_needs_of_one_entity_merge_into_one_request_sequence() -> None:
 
 
 def test_importing_no_needs_makes_no_request() -> None:
-    def handler(_: httpx.Request) -> httpx.Response:
-        raise AssertionError("no request may be made without needs")
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            []
-        )
-    finally:
-        client.close()
+    history = import_history(
+        raising(AssertionError("no request may be made without needs"))
+    )
 
     with pytest.raises(HistoryPlanError, match="not planned"):
         history.window(FIRST, "counter", hour(0), hour(1))
@@ -135,10 +231,7 @@ def test_reading_history_that_was_not_planned_is_an_explicit_error(
     end_time: datetime,
     message: str,
 ) -> None:
-    history = import_history(
-        FakeHomeAssistant({FIRST: hourly_states(2)}),
-        counter_need(FIRST, hour(0), hour(2)),
-    )
+    history = history_of(hourly_states(2))
 
     with pytest.raises(HistoryPlanError, match=message):
         history.window(entity_id, kind, start_time, end_time)
@@ -149,24 +242,15 @@ def test_a_failed_entity_reaches_only_the_consumers_that_read_it() -> None:
         {FIRST: hourly_states(2), SECOND: hourly_states(2)}, failures={FIRST: 503}
     )
 
-    history = import_history(
-        home_assistant,
-        counter_need(FIRST, hour(0), hour(2)),
-        counter_need(SECOND, hour(0), hour(2)),
-    )
+    history = import_history(home_assistant, *first_two_hours(FIRST, SECOND))
 
     # Every entity is still attempted, and a failure is re-raised on every read.
     assert home_assistant.requested_entities() == [FIRST, SECOND]
     for _ in range(2):
         with pytest.raises(HomeAssistantError, match="HTTP 503.*sensor.first"):
             history.window(FIRST, "counter", hour(0), hour(2))
-    assert [
-        sample.value for sample in history.window(SECOND, "counter", hour(0), hour(2))
-    ] == [
-        0.0,
-        1.0,
-        2.0,
-    ]
+    samples = history.window(SECOND, "counter", hour(0), hour(2))
+    assert [sample.value for sample in samples] == [0.0, 1.0, 2.0]
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -206,17 +290,11 @@ def test_entities_imported_before_an_authentication_rejection_stay_readable() ->
         failures={SECOND: 401},
     )
 
-    history = import_history(
-        home_assistant,
-        counter_need(FIRST, hour(0), hour(2)),
-        counter_need(SECOND, hour(0), hour(2)),
-        counter_need(THIRD, hour(0), hour(2)),
-    )
+    history = import_history(home_assistant, *first_two_hours(FIRST, SECOND, THIRD))
 
     assert home_assistant.requested_entities() == [FIRST, SECOND]
-    assert [
-        sample.value for sample in history.window(FIRST, "counter", hour(0), hour(2))
-    ] == [0.0, 1.0, 2.0]
+    samples = history.window(FIRST, "counter", hour(0), hour(2))
+    assert [sample.value for sample in samples] == [0.0, 1.0, 2.0]
     for entity_id in (SECOND, THIRD):
         with pytest.raises(
             HomeAssistantError, match="authentication failed"
@@ -229,66 +307,45 @@ def test_an_authentication_rejection_after_the_first_chunk_ends_the_import() -> 
     healthy = FakeHomeAssistant(
         {FIRST: hourly_states(24 * 20), SECOND: hourly_states(24)}
     )
-    requested: list[tuple[str, datetime]] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
-        requested.append((request.url.params["filter_entity_id"], start))
-        if start >= day(7):
-            return httpx.Response(401)
-        return healthy(request)
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [counter_need(FIRST, day(0), day(20)), counter_need(SECOND, day(0), day(1))]
-        )
-    finally:
-        client.close()
+    history = import_history(
+        failing_from_second_chunk(healthy, 401),
+        counter_need(FIRST, day(0), day(20)),
+        counter_need(SECOND, day(0), day(1)),
+    )
 
     # The second chunk of the first entity is rejected; the third chunk and the
     # second entity are never requested.
-    assert requested == [(FIRST, day(0)), (FIRST, day(7))]
+    assert [(item.entity_id, item.start_time) for item in healthy.requests] == [
+        (FIRST, day(0)),
+        (FIRST, day(7)),
+    ]
     for entity_id in (FIRST, SECOND):
         with pytest.raises(HomeAssistantError, match="authentication failed"):
             history.window(entity_id, "counter", day(0), day(1))
 
 
 @pytest.mark.parametrize(
-    "first_entity_response",
+    "first_entity_handler",
     [
-        pytest.param(lambda _: httpx.Response(404), id="not-found"),
-        pytest.param(lambda _: httpx.Response(503), id="server-error"),
-        pytest.param(
-            lambda _: httpx.Response(200, content=b"not-json"), id="malformed-json"
-        ),
-        pytest.param(httpx.ReadTimeout("timed out"), id="timeout"),
-        pytest.param(httpx.ConnectError("refused"), id="transport-error"),
+        pytest.param(responding(404), id="not-found"),
+        pytest.param(responding(503), id="server-error"),
+        pytest.param(responding(200, content=b"not-json"), id="malformed-json"),
+        pytest.param(raising(httpx.ReadTimeout("timed out")), id="timeout"),
+        pytest.param(raising(httpx.ConnectError("refused")), id="transport-error"),
     ],
 )
 def test_other_failures_of_one_entity_never_stop_the_import(
-    first_entity_response: Callable[[httpx.Request], httpx.Response] | httpx.HTTPError,
+    first_entity_handler: Handler,
 ) -> None:
     healthy = FakeHomeAssistant({SECOND: hourly_states(2), THIRD: hourly_states(2)})
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.params["filter_entity_id"] == FIRST:
-            if isinstance(first_entity_response, httpx.HTTPError):
-                raise first_entity_response
-            return first_entity_response(request)
+            return first_entity_handler(request)
         return healthy(request)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [
-                counter_need(FIRST, hour(0), hour(2)),
-                counter_need(SECOND, hour(0), hour(2)),
-                counter_need(THIRD, hour(0), hour(2)),
-            ]
-        )
-    finally:
-        client.close()
+    history = import_history(handler, *first_two_hours(FIRST, SECOND, THIRD))
 
     assert healthy.requested_entities() == [SECOND, THIRD]
     with pytest.raises(HomeAssistantError):
@@ -305,12 +362,7 @@ def test_an_authentication_rejection_is_logged_once_without_the_token(
         {FIRST: hourly_states(2)}, failures={FIRST: 401, SECOND: 401, THIRD: 401}
     )
 
-    import_history(
-        home_assistant,
-        counter_need(FIRST, hour(0), hour(2)),
-        counter_need(SECOND, hour(0), hour(2)),
-        counter_need(THIRD, hour(0), hour(2)),
-    )
+    import_history(home_assistant, *first_two_hours(FIRST, SECOND, THIRD))
 
     messages = [record.getMessage() for record in caplog.records]
     (rejection,) = [
@@ -331,29 +383,32 @@ def test_an_authentication_rejection_is_logged_once_without_the_token(
 
 
 @pytest.mark.parametrize(
-    ("handler", "message"),
+    ("source", "message"),
     [
-        (lambda _: httpx.Response(401), "authentication failed"),
-        (lambda _: httpx.Response(404), "was not found"),
-        (lambda _: httpx.Response(503), "HTTP 503"),
-        (lambda _: httpx.Response(200, content=b"not-json"), "malformed JSON"),
-        (lambda _: httpx.Response(200, json={"not": "a list"}), "one entity series"),
+        (responding(401), "authentication failed"),
+        (responding(404), "was not found"),
+        (responding(503), "HTTP 503"),
+        (responding(200, content=b"not-json"), "malformed JSON"),
+        (returning({"not": "a list"}), "one entity series"),
+        (
+            returning([[record("1", hour(0))], [record("1", hour(0))]]),
+            "one entity series",
+        ),
+        (returning([{"not": "a list"}]), "a list of records"),
+        (returning([["not-a-record"]]), "contains an invalid record"),
+        (returning([[{"state": "1", "attributes": {}}]]), "has a missing timestamp"),
+        (
+            returning([[{"state": "1", "last_updated": "yesterday"}]]),
+            "invalid timestamp",
+        ),
+        (
+            returning([[{"state": "1", "last_updated": "2026-01-01T00:00:00"}]]),
+            "must include a timezone",
+        ),
     ],
 )
-def test_every_import_failure_names_its_entity(
-    handler: Callable[[httpx.Request], httpx.Response], message: str
-) -> None:
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [counter_need(FIRST, hour(0), hour(2))]
-        )
-    finally:
-        client.close()
-
-    with pytest.raises(HomeAssistantError, match=message) as failure:
-        history.window(FIRST, "counter", hour(0), hour(2))
-    assert FIRST in str(failure.value)
+def test_every_import_failure_names_its_entity(source: Handler, message: str) -> None:
+    assert_import_failure_names_entity(source, message)
 
 
 def test_timeouts_and_transport_errors_name_their_entity() -> None:
@@ -361,21 +416,7 @@ def test_timeouts_and_transport_errors_name_their_entity() -> None:
         (httpx.ReadTimeout("timed out"), "timed out"),
         (httpx.ConnectError("refused"), "transport error"),
     ):
-
-        def handler(_: httpx.Request, error: httpx.HTTPError = error) -> httpx.Response:
-            raise error
-
-        client = httpx.Client(transport=httpx.MockTransport(handler))
-        try:
-            history = HomeAssistantHistoryImporter(
-                configuration(), client
-            ).import_history([counter_need(FIRST, hour(0), hour(2))])
-        finally:
-            client.close()
-
-        with pytest.raises(HomeAssistantError, match=message) as failure:
-            history.window(FIRST, "counter", hour(0), hour(2))
-        assert FIRST in str(failure.value)
+        assert_import_failure_names_entity(raising(error), message)
 
 
 def test_the_whole_import_reuses_one_http_client(
@@ -395,10 +436,7 @@ def test_the_whole_import_reuses_one_http_client(
     monkeypatch.setattr(httpx, "Client", create_client)
 
     HomeAssistantHistoryImporter(configuration()).import_history(
-        [
-            counter_need(FIRST, day(0), day(15)),
-            counter_need(SECOND, day(0), day(15)),
-        ]
+        [counter_need(FIRST, day(0), day(15)), counter_need(SECOND, day(0), day(15))]
     )
 
     # Six requests (three chunks for each of two entities) share one client,
@@ -416,57 +454,28 @@ def test_the_import_summary_counts_every_attempted_request(
         {FIRST: hourly_states(24 * 20), SECOND: hourly_states(24)}
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        start = datetime.fromisoformat(request.url.path.rsplit("/", 1)[-1])
-        if request.url.params["filter_entity_id"] == FIRST and start >= day(7):
-            return httpx.Response(503)
-        return healthy(request)
+    import_history(
+        failing_from_second_chunk(healthy, 503, FIRST),
+        counter_need(FIRST, day(0), day(20)),
+        counter_need(SECOND, day(0), day(1)),
+    )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
-        HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [counter_need(FIRST, day(0), day(20)), counter_need(SECOND, day(0), day(1))]
-        )
-    finally:
-        client.close()
-
-    (summary,) = [
-        record.getMessage()
-        for record in caplog.records
-        if record.getMessage().startswith("event=home_assistant_history_import")
-    ]
+    (summary,) = logged(caplog, "event=home_assistant_history_import")
     # The failed entity made two requests before failing on its second chunk.
-    assert "status=partial" in summary
-    assert "entity_count=2 failed_entity_count=1 request_count=3" in summary
-    failures = [
-        record
-        for record in caplog.records
-        if record.getMessage().startswith("event=home_assistant_history_entity_failed")
-    ]
-    assert len(failures) == 1
-    assert failures[0].levelno == logging.WARNING
-    assert f"entity_id={FIRST}" in failures[0].getMessage()
+    assert "status=partial" in summary.getMessage()
+    assert (
+        "entity_count=2 failed_entity_count=1 request_count=3" in summary.getMessage()
+    )
+    (failure,) = logged(caplog, "event=home_assistant_history_entity_failed")
+    assert failure.levelno == logging.WARNING
+    assert f"entity_id={FIRST}" in failure.getMessage()
 
 
 def test_unavailable_samples_stay_in_the_series_as_invalid_samples() -> None:
-    home_assistant = FakeHomeAssistant(
-        {
-            FIRST: [
-                (hour(0), "0"),
-                (hour(1), "unavailable"),
-                (hour(2), "unknown"),
-                (hour(3), "3"),
-            ]
-        }
-    )
-
-    history = import_history(home_assistant, counter_need(FIRST, hour(0), hour(3)))
+    history = history_of(hourly("0", "unavailable", "unknown", "3"), end_time=hour(3))
 
     samples = history.window(FIRST, "counter", hour(0), hour(3))
-    assert [
-        (sample.timestamp, sample.value, sample.state, sample.invalid)
-        for sample in samples
-    ] == [
+    assert window_view(samples) == [
         (hour(0), 0.0, "0", None),
         (hour(1), None, "unavailable", "unavailable"),
         (hour(2), None, "unknown", "unavailable"),
@@ -482,13 +491,8 @@ def test_the_import_summary_counts_invalid_samples_instead_of_warning_per_sample
     caplog.set_level(logging.INFO)
     home_assistant = FakeHomeAssistant(
         {
-            FIRST: [
-                (hour(0), "0"),
-                (hour(1), "unavailable"),
-                (hour(2), "nan"),
-                (hour(3), "3"),
-            ],
-            SECOND: [(hour(0), "0"), (hour(1), "not-a-number"), (hour(2), "2")],
+            FIRST: hourly("0", "unavailable", "nan", "3"),
+            SECOND: hourly("0", "not-a-number", "2"),
         }
     )
 
@@ -498,13 +502,9 @@ def test_the_import_summary_counts_invalid_samples_instead_of_warning_per_sample
         counter_need(SECOND, hour(0), hour(2)),
     )
 
-    (summary,) = [
-        record.getMessage()
-        for record in caplog.records
-        if record.getMessage().startswith("event=home_assistant_history_import")
-    ]
-    assert "status=success" in summary
-    assert "invalid_sample_count=3" in summary
+    (summary,) = logged(caplog, "event=home_assistant_history_import")
+    assert "status=success" in summary.getMessage()
+    assert "invalid_sample_count=3" in summary.getMessage()
     assert [
         record.getMessage()
         for record in caplog.records
@@ -522,9 +522,7 @@ def test_the_import_summary_counts_invalid_samples_instead_of_warning_per_sample
 def test_an_entity_without_any_history_fails(
     kind: home_assistant_history.HistoryKind, message: str
 ) -> None:
-    history = import_history(
-        FakeHomeAssistant({FIRST: []}), HistoryNeed(FIRST, kind, hour(0), hour(2))
-    )
+    history = history_of([], kind)
 
     with pytest.raises(HomeAssistantError, match=message):
         history.window(FIRST, kind, hour(0), hour(2))
@@ -534,10 +532,7 @@ def test_an_entity_without_any_history_fails(
 def test_an_entity_with_only_unavailable_samples_is_imported_not_failed(
     kind: home_assistant_history.HistoryKind,
 ) -> None:
-    history = import_history(
-        FakeHomeAssistant({FIRST: [(hour(0), "unavailable")]}),
-        HistoryNeed(FIRST, kind, hour(0), hour(2)),
-    )
+    history = history_of([(hour(0), "unavailable")], kind)
 
     (only,) = history.window(FIRST, kind, hour(0), hour(2))
 
@@ -582,11 +577,10 @@ def test_empty_chunks_are_tolerated_when_a_later_chunk_has_history() -> None:
 def test_window_returns_the_state_in_force_at_its_start_stamped_with_the_start() -> (
     None
 ):
-    history = import_history(
-        FakeHomeAssistant(
-            {FIRST: [(hour(0), "0"), (hour(2), "2"), (hour(5), "5")]},
-        ),
-        counter_need(FIRST, hour(-2), hour(8)),
+    history = history_of(
+        [(hour(0), "0"), (hour(2), "2"), (hour(5), "5")],
+        start_time=hour(-2),
+        end_time=hour(8),
     )
 
     def window(start: int, end: int) -> list[tuple[datetime, float | None]]:
@@ -607,25 +601,14 @@ def test_window_returns_the_state_in_force_at_its_start_stamped_with_the_start()
     assert window(-2, -1) == []
 
 
-def window_view(
-    samples: tuple[HistorySample, ...],
-) -> list[tuple[datetime, float | None, str | None, str | None]]:
-    return [
-        (sample.timestamp, sample.value, sample.state, sample.invalid)
-        for sample in samples
-    ]
-
-
 def test_window_carries_an_invalid_state_in_force_and_never_a_valid_one_across_it() -> (
     None
 ):
     states = [(hour(0), "5"), (hour(1), "unavailable"), (hour(3), "7")]
-    history = import_history(
-        FakeHomeAssistant({FIRST: states}), counter_need(FIRST, hour(0), hour(4))
-    )
+    history = history_of(states, end_time=hour(4))
     valid_seven = (hour(3), 7.0, "7", None)
 
-    def window(start: datetime, end: datetime) -> list[tuple[Any, ...]]:
+    def window(start: datetime, end: datetime) -> list[SampleView]:
         return window_view(history.window(FIRST, "counter", start, end))
 
     # Before the sample became unavailable, the earlier value is in force.
@@ -647,19 +630,14 @@ def test_window_carries_an_invalid_state_in_force_and_never_a_valid_one_across_i
     ]
     # Every window equals what an independent request for it would see.
     for start in (hour(0) + HALF_HOUR, hour(1) + HALF_HOUR, hour(1)):
-        independent = import_history(
-            FakeHomeAssistant({FIRST: states}), counter_need(FIRST, start, hour(4))
-        )
+        independent = history_of(states, start_time=start, end_time=hour(4))
         assert window_view(independent.window(FIRST, "counter", start, hour(4))) == (
             window(start, hour(4))
         )
 
 
 def test_a_window_keeps_when_the_state_in_force_was_recorded() -> None:
-    history = import_history(
-        FakeHomeAssistant({FIRST: [(hour(0), "5"), (hour(1), "unavailable")]}),
-        counter_need(FIRST, hour(0), hour(4)),
-    )
+    history = history_of(hourly("5", "unavailable"), end_time=hour(4))
 
     (carried,) = history.window(FIRST, "counter", hour(2), hour(4))
     (recorded,) = history.window(FIRST, "counter", hour(1), hour(4))
@@ -673,34 +651,21 @@ def test_a_window_keeps_when_the_state_in_force_was_recorded() -> None:
 
 
 def test_unit_state_class_and_reset_are_carried_to_samples_without_attributes() -> None:
-    payload = [
+    history = history_from_payload(
         [
-            {
-                "state": "1",
-                "last_updated": hour(0).isoformat(),
-                "attributes": {
-                    "unit_of_measurement": " kWh ",
-                    "state_class": "total",
-                    "last_reset": hour(-5).isoformat(),
-                },
-            },
-            {"state": "2", "last_updated": hour(1).isoformat(), "attributes": {}},
-            {
-                "state": "3",
-                "last_updated": hour(2).isoformat(),
-                "attributes": {"last_reset": None},
-            },
+            [
+                record(
+                    "1",
+                    hour(0),
+                    unit=" kWh ",
+                    state_class="total",
+                    last_reset=hour(-5).isoformat(),
+                ),
+                record("2", hour(1), unit=None),
+                record("3", hour(2), unit=None, last_reset=None),
+            ]
         ]
-    ]
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
     )
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [counter_need(FIRST, hour(0), hour(2))]
-        )
-    finally:
-        client.close()
 
     samples = history.window(FIRST, "counter", hour(0), hour(2))
 
@@ -711,17 +676,14 @@ def test_unit_state_class_and_reset_are_carried_to_samples_without_attributes() 
 
 def test_state_history_keeps_the_reported_unit_of_every_sample() -> None:
     home_assistant = FakeHomeAssistant(
-        {FIRST: [(hour(0), "50"), (hour(1), "60")]},
+        {FIRST: hourly("50", "60")},
         units={FIRST: "%"},
         state_classes={FIRST: "measurement"},
     )
-    client = home_assistant.client()
-    try:
-        history = HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [HistoryNeed(FIRST, "state", hour(0), hour(1))]
-        )
-    finally:
-        client.close()
+
+    history = import_history(
+        home_assistant, HistoryNeed(FIRST, "state", hour(0), hour(1))
+    )
 
     samples = history.window(FIRST, "state", hour(0), hour(1))
 
@@ -729,30 +691,6 @@ def test_state_history_keeps_the_reported_unit_of_every_sample() -> None:
         (50.0, "%"),
         (60.0, "%"),
     ]
-
-
-def history_from_payload(
-    payload: object, kind: home_assistant_history.HistoryKind = "counter"
-) -> HomeAssistantHistory:
-    client = httpx.Client(
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
-    )
-    try:
-        return HomeAssistantHistoryImporter(configuration(), client).import_history(
-            [HistoryNeed(FIRST, kind, hour(0), hour(2))]
-        )
-    finally:
-        client.close()
-
-
-def record(
-    state: object, timestamp: datetime, **attributes: object
-) -> dict[str, object]:
-    return {
-        "state": state,
-        "last_updated": timestamp.isoformat(),
-        "attributes": {"unit_of_measurement": "kWh", **attributes},
-    }
 
 
 @pytest.mark.parametrize(
@@ -805,40 +743,26 @@ def test_every_state_is_classified_and_keeps_its_raw_text(
 def test_an_invalid_sample_only_excludes_hours_of_the_windows_that_contain_it(
     state: str, reason: str
 ) -> None:
-    home_assistant = FakeHomeAssistant(
-        {
-            FIRST: [
-                (hour(0), "0"),
-                (hour(1) + HALF_HOUR, state),
-                (hour(2), "2"),
-                (hour(3), "3"),
-                (hour(4), "4"),
-            ]
-        }
+    early_series, late_series = build_early_and_late(
+        [
+            (hour(0), "0"),
+            (hour(1) + HALF_HOUR, state),
+            (hour(2), "2"),
+            (hour(3), "3"),
+            (hour(4), "4"),
+        ]
     )
-    early = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="early")
-    late = EnergyAggregate(AGGREGATION, hour(2), hour(4), label="late")
 
-    # One shared import serves both consumers.
-    history = import_history(home_assistant, *early.needs(), *late.needs())
-
-    assert len(home_assistant.requests) == 1
     # The sample is in force from 01:30 until the counter returns at 02:00, so
     # only the hour from 01:00 to 02:00 has no trustworthy value. Nothing is
     # counted for the hour before it: the counter did not change.
-    early_series = early.build(history)
     assert early_series.values_kw == (0.0, None, 1.0, 1.0)
     (excluded,) = early_series.exclusions
     assert excluded.hour_start == hour(1)
     (cause,) = excluded.causes
-    assert (cause.reason, cause.entity_id, cause.data_point_count) == (
-        reason,
-        FIRST,
-        1,
-    )
+    assert (cause.reason, cause.entity_id, cause.data_point_count) == (reason, FIRST, 1)
     assert cause.data_points == (ExcludedDataPoint(hour(1) + HALF_HOUR, state, "kWh"),)
     # The invalid sample lies before the late consumer's window.
-    late_series = late.build(history)
     assert late_series.values_kw == (1.0, 1.0)
     assert late_series.exclusions == ()
 
@@ -846,17 +770,7 @@ def test_an_invalid_sample_only_excludes_hours_of_the_windows_that_contain_it(
 def test_an_invalid_sample_on_an_hour_boundary_excludes_the_hour_it_closes() -> None:
     aggregate = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="boundary")
     history = import_history(
-        FakeHomeAssistant(
-            {
-                FIRST: [
-                    (hour(0), "0"),
-                    (hour(1), "unavailable"),
-                    (hour(2), "2"),
-                    (hour(3), "3"),
-                    (hour(4), "4"),
-                ]
-            }
-        ),
+        FakeHomeAssistant({FIRST: hourly("0", "unavailable", "2", "3", "4")}),
         *aggregate.needs(),
     )
 
@@ -871,28 +785,19 @@ def test_an_invalid_sample_on_an_hour_boundary_excludes_the_hour_it_closes() -> 
 
 
 def test_an_invalid_state_in_force_at_the_window_start_excludes_until_it_ends() -> None:
-    home_assistant = FakeHomeAssistant(
-        {
-            FIRST: [
-                (hour(0), "0"),
-                (hour(1) + HALF_HOUR, "unavailable"),
-                (hour(3), "3"),
-                (hour(4), "4"),
-            ]
-        }
+    early_series, late_series = build_early_and_late(
+        [
+            (hour(0), "0"),
+            (hour(1) + HALF_HOUR, "unavailable"),
+            (hour(3), "3"),
+            (hour(4), "4"),
+        ]
     )
-    early = EnergyAggregate(AGGREGATION, hour(0), hour(4), label="early")
-    late = EnergyAggregate(AGGREGATION, hour(2), hour(4), label="late")
 
-    history = import_history(home_assistant, *early.needs(), *late.needs())
-
-    assert len(home_assistant.requests) == 1
     # Both consumers see the outage from 01:30 to 03:00; the counter's steps
     # after it are attributed to the hour that ends at 04:00.
-    early_series = early.build(history)
     assert early_series.values_kw == (0.0, None, None, 1.0)
     assert [item.hour_start for item in early_series.exclusions] == [hour(1), hour(2)]
-    late_series = late.build(history)
     assert late_series.values_kw == (None, 1.0)
     (excluded,) = late_series.exclusions
     assert excluded.hour_start == hour(2)
@@ -910,9 +815,9 @@ def test_a_sample_without_a_unit_is_only_excluded_where_the_unit_is_unknown() ->
     history = history_from_payload(
         [
             [
-                {"state": "1", "last_updated": hour(0).isoformat(), "attributes": {}},
+                record("1", hour(0), unit=None),
                 record("2", hour(1)),
-                {"state": "3", "last_updated": hour(2).isoformat(), "attributes": {}},
+                record("3", hour(2), unit=None),
             ]
         ]
     )
@@ -930,30 +835,6 @@ def test_a_sample_without_a_unit_is_only_excluded_where_the_unit_is_unknown() ->
     (cause,) = excluded.causes
     assert (cause.reason, cause.entity_id) == ("unit_missing", FIRST)
     assert cause.data_points == (ExcludedDataPoint(hour(0), "1", None),)
-
-
-@pytest.mark.parametrize(
-    ("payload", "message"),
-    [
-        ([[record("1", hour(0))], [record("1", hour(0))]], "one entity series"),
-        ([{"not": "a list"}], "a list of records"),
-        ([["not-a-record"]], "contains an invalid record"),
-        ([[{"state": "1", "attributes": {}}]], "has a missing timestamp"),
-        ([[{"state": "1", "last_updated": "yesterday"}]], "invalid timestamp"),
-        (
-            [[{"state": "1", "last_updated": "2026-01-01T00:00:00"}]],
-            "must include a timezone",
-        ),
-    ],
-)
-def test_malformed_history_payloads_fail_the_entity_naming_it(
-    payload: object, message: str
-) -> None:
-    history = history_from_payload(payload)
-
-    with pytest.raises(HomeAssistantError, match=message) as failure:
-        history.window(FIRST, "counter", hour(0), hour(2))
-    assert FIRST in str(failure.value)
 
 
 @pytest.mark.parametrize(
@@ -983,8 +864,8 @@ def test_attributes_of_a_sample_with_an_invalid_attribute_are_not_carried_on() -
         [
             [
                 record("1", hour(0), state_class="total"),
-                record("2", hour(1), unit_of_measurement="Wh", state_class=5),
-                {"state": "3", "last_updated": hour(2).isoformat(), "attributes": {}},
+                record("2", hour(1), unit="Wh", state_class=5),
+                record("3", hour(2), unit=None),
             ]
         ]
     )
@@ -1040,10 +921,7 @@ def test_an_unexpected_error_is_recorded_against_its_entity(
 
     monkeypatch.setattr(home_assistant_history, "_clean_counter_records", fail)
 
-    history = import_history(
-        FakeHomeAssistant({FIRST: hourly_states(2)}),
-        counter_need(FIRST, hour(0), hour(2)),
-    )
+    history = history_of(hourly_states(2))
 
     with pytest.raises(
         HomeAssistantError, match="sensor.first.*unexpectedly.*boom"

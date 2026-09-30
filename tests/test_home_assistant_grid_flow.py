@@ -1,5 +1,6 @@
 """Tests for the Home Assistant grid-flow importer."""
 
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -15,78 +16,106 @@ from energy_optimizer.providers.home_assistant_history import (
     HomeAssistantError,
     HomeAssistantHistoryImporter,
 )
+from energy_optimizer.providers.interfaces import GridFlowData
 from home_assistant_fixtures import (
+    Readings,
     aggregate_settings,
     home_assistant_configuration_factory,
-    home_assistant_history_payload,
     home_assistant_planning_importer_factory,
     import_and_build,
 )
+from home_assistant_fixtures import home_assistant_history_payload as history_payload
 
 ENTITY_ID = "sensor.grid_import"
 EXPORT_ENTITY_ID = "sensor.grid_export"
+SUBMETER_ID = "sensor.grid_import_submeter"
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 END = datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
 NOW = datetime(2026, 1, 1, 5, 30, tzinfo=timezone.utc)
 
-
-def entity_settings(
-    entity_id: str, state_class: str = "total_increasing", unit: str = "kWh"
-) -> dict[str, str]:
-    return {"entity_id": entity_id, "state_class": state_class, "unit": unit}
+Handler = Callable[[httpx.Request], httpx.Response]
 
 
-configuration = home_assistant_configuration_factory(
-    grid_import=aggregate_settings(add=[entity_settings(ENTITY_ID)]),
-    grid_export=aggregate_settings(add=[entity_settings(EXPORT_ENTITY_ID)]),
-)
-
-
-history_payload = home_assistant_history_payload
-
-
-def standard_payload(entity_id: str) -> list[list[dict[str, Any]]]:
-    return history_payload(
-        entity_id,
-        [
-            ("2026-01-01T00:00:00+00:00", "0"),
-            ("2026-01-01T01:00:00+00:00", "1"),
-            ("2026-01-01T02:00:00+00:00", "3"),
-            ("2026-01-01T03:00:00+00:00", "6"),
-            ("2026-01-01T04:00:00+00:00", "10"),
+def channel(
+    add: str, subtract: Sequence[str] = (), state_class: str = "total_increasing"
+) -> dict[str, Any]:
+    """Return the settings of one grid channel that adds and subtracts entities."""
+    return aggregate_settings(
+        add=[{"entity_id": add, "state_class": state_class, "unit": "kWh"}],
+        subtract=[
+            {"entity_id": entity_id, "state_class": state_class, "unit": "kWh"}
+            for entity_id in subtract
         ],
     )
 
+
+configuration = home_assistant_configuration_factory(
+    grid_import=channel(ENTITY_ID), grid_export=channel(EXPORT_ENTITY_ID)
+)
 
 importer = home_assistant_planning_importer_factory(
     HomeAssistantGridFlowImporter, configuration
 )
 
 
-def test_fetch_normalizes_import_and_export_entities() -> None:
-    responses = {
-        ENTITY_ID: standard_payload(ENTITY_ID),
-        EXPORT_ENTITY_ID: history_payload(
-            EXPORT_ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "0.5"),
-                ("2026-01-01T02:00:00+00:00", "1.5"),
-                ("2026-01-01T03:00:00+00:00", "3"),
-                ("2026-01-01T04:00:00+00:00", "5"),
-            ],
-        ),
-    }
+def hour(index: int) -> datetime:
+    return START + timedelta(hours=index)
 
+
+def readings(*points: tuple[str, str]) -> Readings:
+    """Return ``(time, state)`` points as readings stamped on the start day."""
+    return [
+        (datetime.fromisoformat(f"2026-01-01T{time}+00:00").isoformat(), state)
+        for time, state in points
+    ]
+
+
+def hourly(*states: str, minutes: int = 0) -> Readings:
+    """Return one reading per hour from 00:00, all shifted by ``minutes``."""
+    return [
+        ((hour(index) + timedelta(minutes=minutes)).isoformat(), state)
+        for index, state in enumerate(states)
+    ]
+
+
+def standard_readings() -> Readings:
+    """Return the hourly readings of a counter that yields 1, 2, 3, then 4 kWh."""
+    return hourly("0", "1", "3", "6", "10")
+
+
+def respond_by_entity(
+    readings_by_entity: Mapping[str, Readings], **payload_options: Any
+) -> Handler:
     def handler(request: httpx.Request) -> httpx.Response:
         entity_id = request.url.params["filter_entity_id"]
-        return httpx.Response(200, json=responses[entity_id])
+        payload = history_payload(
+            entity_id, readings_by_entity[entity_id], **payload_options
+        )
+        return httpx.Response(200, json=payload)
 
-    provider, client = importer(httpx.MockTransport(handler))
+    return handler
+
+
+def build_grid_flow(
+    handler: Handler, end_time: datetime = END, **settings: Any
+) -> GridFlowData:
+    """Import and build the grid flow, closing the client afterwards."""
+    provider, client = importer(httpx.MockTransport(handler), **settings)
     try:
-        data = import_and_build(provider, client, START, END, now=NOW)
+        return import_and_build(provider, client, START, end_time, now=NOW)
     finally:
         client.close()
+
+
+def test_fetch_normalizes_import_and_export_entities() -> None:
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: standard_readings(),
+                EXPORT_ENTITY_ID: hourly("0", "0.5", "1.5", "3", "5"),
+            }
+        )
+    )
 
     assert data.start_time == START
     assert data.import_kw == (1.0, 2.0, 3.0, 4.0)
@@ -95,7 +124,7 @@ def test_fetch_normalizes_import_and_export_entities() -> None:
     assert data.source.provider == "home-assistant"
     assert data.source.entity_id == "grid_flow"
     assert data.retrieved_at == NOW
-    assert data.latest_observation_at == datetime(2026, 1, 1, 4, tzinfo=timezone.utc)
+    assert data.latest_observation_at == END
     assert data.exclusions == ()
 
 
@@ -103,22 +132,18 @@ def test_household_load_and_grid_flow_share_one_import_of_a_reused_entity() -> N
     shared_entity = "sensor.main_grid_total_in"
     export_entity = "sensor.main_grid_total_out"
     shared_configuration = home_assistant_configuration_factory(
-        household_load=aggregate_settings(add=[entity_settings(shared_entity)]),
-        grid_import=aggregate_settings(add=[entity_settings(shared_entity)]),
-        grid_export=aggregate_settings(add=[entity_settings(export_entity)]),
+        household_load=channel(shared_entity),
+        grid_import=channel(shared_entity),
+        grid_export=channel(export_entity),
     )()
-    responses = {
-        shared_entity: standard_payload(shared_entity),
-        export_entity: standard_payload(export_entity),
-    }
-
+    answer = respond_by_entity(
+        {shared_entity: standard_readings(), export_entity: standard_readings()}
+    )
     requested: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested.append(request.url.params["filter_entity_id"])
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
-        )
+        return answer(request)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     try:
@@ -144,96 +169,40 @@ def test_household_load_and_grid_flow_share_one_import_of_a_reused_entity() -> N
 
 
 def test_fetch_supports_multiple_signed_entities_per_channel() -> None:
-    second_import = "sensor.grid_import_submeter"
-    responses = {
-        ENTITY_ID: standard_payload(ENTITY_ID),
-        second_import: history_payload(
-            second_import,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "0.25"),
-                ("2026-01-01T02:00:00+00:00", "0.75"),
-                ("2026-01-01T03:00:00+00:00", "1.5"),
-                ("2026-01-01T04:00:00+00:00", "2.5"),
-            ],
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: standard_readings(),
+                SUBMETER_ID: hourly("0", "0.25", "0.75", "1.5", "2.5"),
+                EXPORT_ENTITY_ID: standard_readings(),
+            }
         ),
-        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
-    }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
-        )
-
-    provider, client = importer(
-        httpx.MockTransport(handler),
-        grid_import=aggregate_settings(
-            add=[entity_settings(ENTITY_ID)],
-            subtract=[entity_settings(second_import)],
-        ),
+        grid_import=channel(ENTITY_ID, [SUBMETER_ID]),
     )
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
 
     assert data.import_kw == (0.75, 1.5, 2.25, 3.0)
     assert data.export_kw == (1.0, 2.0, 3.0, 4.0)
 
 
 def test_fetch_excludes_negative_combined_hours_in_both_channels() -> None:
-    second_import = "sensor.grid_import_submeter"
-    responses = {
-        # Steps of 0.5, 2.5, 0.5, and 2.5 kWh.
-        ENTITY_ID: history_payload(
-            ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "0.5"),
-                ("2026-01-01T02:00:00+00:00", "3"),
-                ("2026-01-01T03:00:00+00:00", "3.5"),
-                ("2026-01-01T04:00:00+00:00", "6"),
-            ],
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                # Steps of 0.5, 2.5, 0.5, and 2.5 kWh.
+                ENTITY_ID: hourly("0", "0.5", "3", "3.5", "6"),
+                # Steps of 1 kWh, subtracted.
+                SUBMETER_ID: hourly("0", "1", "2", "3", "4"),
+                EXPORT_ENTITY_ID: standard_readings(),
+            }
         ),
-        # Steps of 1 kWh, subtracted.
-        second_import: history_payload(
-            second_import,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "1"),
-                ("2026-01-01T02:00:00+00:00", "2"),
-                ("2026-01-01T03:00:00+00:00", "3"),
-                ("2026-01-01T04:00:00+00:00", "4"),
-            ],
-        ),
-        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
-    }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
-        )
-
-    provider, client = importer(
-        httpx.MockTransport(handler),
-        grid_import=aggregate_settings(
-            add=[entity_settings(ENTITY_ID)],
-            subtract=[entity_settings(second_import)],
-        ),
+        grid_import=channel(ENTITY_ID, [SUBMETER_ID]),
     )
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
 
     # The combined hours 0 and 2 would be -0.5 kWh. They are excluded, not
     # clamped to zero, and the intact export of those hours is excluded with them.
     assert data.import_kw == (None, 1.5, None, 1.5)
     assert data.export_kw == (None, 2.0, None, 4.0)
-    assert [item.hour_start for item in data.exclusions] == [
-        START,
-        START + timedelta(hours=2),
-    ]
+    assert [item.hour_start for item in data.exclusions] == [START, hour(2)]
     for item in data.exclusions:
         (cause,) = item.causes
         assert cause.reason == "combined_negative"
@@ -244,7 +213,7 @@ def test_fetch_excludes_negative_combined_hours_in_both_channels() -> None:
         )
         assert cause.data_points == (
             ExcludedDataPoint(item.hour_start, entity_id=ENTITY_ID, step_kwh=0.5),
-            ExcludedDataPoint(item.hour_start, entity_id=second_import, step_kwh=-1.0),
+            ExcludedDataPoint(item.hour_start, entity_id=SUBMETER_ID, step_kwh=-1.0),
         )
         assert cause.data_point_count == 2
 
@@ -256,61 +225,25 @@ def test_an_hour_excluded_in_one_channel_is_excluded_in_both(
     submeter_id = "sensor.grid_submeter"
     flagged_id = ENTITY_ID if flagged_channel == "import" else EXPORT_ENTITY_ID
     ordinary_id = EXPORT_ENTITY_ID if flagged_channel == "import" else ENTITY_ID
-    responses = {
-        # The counter falls at 02:00, so the hours of both observations of that
-        # step and of the step after it are excluded. Only 03:00 to 04:00 counts.
-        flagged_id: history_payload(
-            flagged_id,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "1"),
-                ("2026-01-01T02:00:00+00:00", "0.5"),
-                ("2026-01-01T03:00:00+00:00", "3.5"),
-                ("2026-01-01T04:00:00+00:00", "4.5"),
-            ],
-        ),
-        # Subtracting it from the flagged entity would make hour 0 negative if
-        # the flagged entity contributed to it.
-        submeter_id: history_payload(
-            submeter_id,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "0.25"),
-                ("2026-01-01T02:00:00+00:00", "0.5"),
-                ("2026-01-01T03:00:00+00:00", "0.75"),
-                ("2026-01-01T04:00:00+00:00", "1"),
-            ],
-        ),
-        ordinary_id: history_payload(
-            ordinary_id,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "1"),
-                ("2026-01-01T02:00:00+00:00", "2"),
-                ("2026-01-01T03:00:00+00:00", "4"),
-                ("2026-01-01T04:00:00+00:00", "6"),
-            ],
-        ),
+    settings: dict[str, Any] = {
+        f"grid_{flagged_channel}": channel(flagged_id, [submeter_id])
     }
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
-        )
-
-    provider, client = importer(
-        httpx.MockTransport(handler),
-        **{
-            f"grid_{flagged_channel}": aggregate_settings(
-                add=[entity_settings(flagged_id)],
-                subtract=[entity_settings(submeter_id)],
-            )
-        },
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                # The counter falls at 02:00, so the hours of both observations of
+                # that step and of the step after it are excluded. Only 03:00 to
+                # 04:00 counts.
+                flagged_id: hourly("0", "1", "0.5", "3.5", "4.5"),
+                # Subtracting it from the flagged entity would make hour 0 negative
+                # if the flagged entity contributed to it.
+                submeter_id: hourly("0", "0.25", "0.5", "0.75", "1"),
+                ordinary_id: hourly("0", "1", "2", "4", "6"),
+            }
+        ),
+        **settings,
     )
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
 
     flagged, ordinary = (
         (data.import_kw, data.export_kw)
@@ -324,8 +257,8 @@ def test_an_hour_excluded_in_one_channel_is_excluded_in_both(
         for item in data.exclusions
     ] == [
         (START, ["counter_decrease"]),
-        (START + timedelta(hours=1), ["counter_decrease", "step_after_decrease"]),
-        (START + timedelta(hours=2), ["step_after_decrease"]),
+        (hour(1), ["counter_decrease", "step_after_decrease"]),
+        (hour(2), ["step_after_decrease"]),
     ]
     # Only the entity that was excluded is blamed, never a combined hour.
     assert {cause.entity_id for item in data.exclusions for cause in item.causes} == {
@@ -334,10 +267,10 @@ def test_an_hour_excluded_in_one_channel_is_excluded_in_both(
     (decrease,) = data.exclusions[0].causes
     assert decrease.data_points == (
         ExcludedDataPoint(
-            START + timedelta(hours=2),
+            hour(2),
             state="0.5",
             unit="kWh",
-            previous_timestamp=START + timedelta(hours=1),
+            previous_timestamp=hour(1),
             previous_value=1.0,
             value=0.5,
             step_kwh=-0.5,
@@ -347,38 +280,28 @@ def test_an_hour_excluded_in_one_channel_is_excluded_in_both(
 
 
 def test_an_unavailable_sample_excludes_its_hour_in_both_channels() -> None:
-    responses = {
-        ENTITY_ID: history_payload(
-            ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "1"),
-                ("2026-01-01T01:30:00+00:00", "unavailable"),
-                ("2026-01-01T02:00:00+00:00", "3"),
-                ("2026-01-01T03:00:00+00:00", "6"),
-                ("2026-01-01T04:00:00+00:00", "10"),
-            ],
-        ),
-        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
-    }
-    provider, client = importer(
-        httpx.MockTransport(
-            lambda request: httpx.Response(
-                200, json=responses[request.url.params["filter_entity_id"]]
-            )
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: readings(
+                    ("00:00", "0"),
+                    ("01:00", "1"),
+                    ("01:30", "unavailable"),
+                    ("02:00", "3"),
+                    ("03:00", "6"),
+                    ("04:00", "10"),
+                ),
+                EXPORT_ENTITY_ID: standard_readings(),
+            }
         )
     )
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
 
     # The counter is unknown from 01:30 until it is read again at 02:00, so the
     # 3 kWh of the gap is never attributed to a single hour.
     assert data.import_kw == (1.0, None, 3.0, 4.0)
     assert data.export_kw == (1.0, None, 3.0, 4.0)
     (excluded,) = data.exclusions
-    assert excluded.hour_start == START + timedelta(hours=1)
+    assert excluded.hour_start == hour(1)
     (cause,) = excluded.causes
     assert (cause.reason, cause.entity_id) == ("unavailable", ENTITY_ID)
     assert cause.data_points == (
@@ -388,70 +311,42 @@ def test_an_unavailable_sample_excludes_its_hour_in_both_channels() -> None:
 
 
 def test_a_trailing_outage_excludes_every_hour_to_the_end_and_ages_the_data() -> None:
-    responses = {
-        ENTITY_ID: history_payload(
-            ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "1"),
-                ("2026-01-01T02:00:00+00:00", "3"),
-                ("2026-01-01T02:30:00+00:00", "unavailable"),
-            ],
-        ),
-        EXPORT_ENTITY_ID: standard_payload(EXPORT_ENTITY_ID),
-    }
-    provider, client = importer(
-        httpx.MockTransport(
-            lambda request: httpx.Response(
-                200, json=responses[request.url.params["filter_entity_id"]]
-            )
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: readings(
+                    ("00:00", "0"),
+                    ("01:00", "1"),
+                    ("02:00", "3"),
+                    ("02:30", "unavailable"),
+                ),
+                EXPORT_ENTITY_ID: standard_readings(),
+            }
         )
     )
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
 
     assert data.import_kw == (1.0, 2.0, None, None)
     assert data.export_kw == (1.0, 2.0, None, None)
-    assert [item.hour_start for item in data.exclusions] == [
-        START + timedelta(hours=2),
-        START + timedelta(hours=3),
-    ]
+    assert [item.hour_start for item in data.exclusions] == [hour(2), hour(3)]
     assert all(
         [cause.reason for cause in item.causes] == ["unavailable"]
         for item in data.exclusions
     )
     # The freshest usable observation is the last valid one, not the outage.
-    assert data.latest_observation_at == START + timedelta(hours=2)
+    assert data.latest_observation_at == hour(2)
 
 
 def test_fetch_aligns_channels_to_the_latest_available_start() -> None:
-    responses = {
-        ENTITY_ID: standard_payload(ENTITY_ID),
-        EXPORT_ENTITY_ID: history_payload(
-            EXPORT_ENTITY_ID,
-            [
-                ("2026-01-01T00:30:00+00:00", "0"),
-                ("2026-01-01T01:30:00+00:00", "1"),
-                ("2026-01-01T02:30:00+00:00", "3"),
-                ("2026-01-01T03:30:00+00:00", "6"),
-            ],
-        ),
-    }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: standard_readings(),
+                EXPORT_ENTITY_ID: hourly("0", "1", "3", "6", minutes=30),
+            }
         )
+    )
 
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
-
-    assert data.start_time == datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+    assert data.start_time == hour(1)
     assert data.import_kw == (2.0, 3.0, 4.0)
     assert data.export_kw == (1.0, 2.0, 3.0)
 
@@ -463,69 +358,43 @@ def test_fetch_fails_without_returning_partial_data_when_one_channel_fails() -> 
         nonlocal calls
         calls += 1
         if calls == 1:
-            return httpx.Response(200, json=standard_payload(ENTITY_ID))
+            return httpx.Response(200, json=history_payload(ENTITY_ID))
         return httpx.Response(503)
 
-    provider, client = importer(httpx.MockTransport(handler))
-    try:
-        with pytest.raises(HomeAssistantError, match="HTTP 503"):
-            import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
+    with pytest.raises(HomeAssistantError, match="HTTP 503"):
+        build_grid_flow(handler)
 
     assert calls == 2
 
 
 def test_freshness_uses_the_oldest_channel_observation() -> None:
-    responses = {
-        ENTITY_ID: standard_payload(ENTITY_ID),
-        EXPORT_ENTITY_ID: history_payload(
-            EXPORT_ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "0"),
-                ("2026-01-01T01:00:00+00:00", "0.5"),
-                ("2026-01-01T02:00:00+00:00", "1"),
-                ("2026-01-01T03:00:00+00:00", "1.5"),
-                ("2026-01-01T03:30:00+00:00", "2"),
-            ],
-        ),
-    }
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json=responses[request.url.params["filter_entity_id"]]
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: standard_readings(),
+                EXPORT_ENTITY_ID: readings(
+                    ("00:00", "0"),
+                    ("01:00", "0.5"),
+                    ("02:00", "1"),
+                    ("03:00", "1.5"),
+                    ("03:30", "2"),
+                ),
+            }
         )
-
-    provider, client = importer(httpx.MockTransport(handler), max_data_age_seconds=90)
-    try:
-        data = import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
-
-    assert data.latest_observation_at == datetime(
-        2026, 1, 1, 3, 30, tzinfo=timezone.utc
     )
+
+    assert data.latest_observation_at == hour(3) + timedelta(minutes=30)
+    provider = HomeAssistantGridFlowImporter(configuration(max_data_age_seconds=90))
     assert not provider.is_fresh(data, now=NOW)
 
 
 def test_fetch_rejects_instantaneous_power_channel() -> None:
-    provider, client = importer(
-        httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                json=history_payload(
-                    request.url.params["filter_entity_id"],
-                    [("2026-01-01T00:00:00+00:00", "500")],
-                    unit="W",
-                ),
-            )
-        )
+    handler = respond_by_entity(
+        {ENTITY_ID: hourly("500"), EXPORT_ENTITY_ID: hourly("500")}, unit="W"
     )
-    try:
-        with pytest.raises(HomeAssistantError, match="instantaneous power"):
-            import_and_build(provider, client, START, END, now=NOW)
-    finally:
-        client.close()
+
+    with pytest.raises(HomeAssistantError, match="instantaneous power"):
+        build_grid_flow(handler)
 
 
 def test_grid_flow_excludes_the_hour_of_a_total_counter_dip_without_last_reset() -> (
@@ -535,49 +404,23 @@ def test_grid_flow_excludes_the_hour_of_a_total_counter_dip_without_last_reset()
 
     A dip of 1 Wh is a decrease like any other: nothing is tolerated or repaired.
     """
-    responses = {
-        ENTITY_ID: history_payload(
-            ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "100.000"),
-                ("2026-01-01T00:30:00+00:00", "100.500"),
-                ("2026-01-01T00:30:12+00:00", "100.499"),
-                ("2026-01-01T00:30:24+00:00", "100.500"),
-                ("2026-01-01T01:00:00+00:00", "101.000"),
-            ],
+    times = ("00:00", "00:30", "00:30:12", "00:30:24", "01:00")
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: readings(
+                    *zip(times, ("100.000", "100.500", "100.499", "100.500", "101.000"))
+                ),
+                EXPORT_ENTITY_ID: readings(
+                    *zip(times, ("50.000", "50.250", "50.249", "50.250", "50.500"))
+                ),
+            },
             state_class="total",
         ),
-        EXPORT_ENTITY_ID: history_payload(
-            EXPORT_ENTITY_ID,
-            [
-                ("2026-01-01T00:00:00+00:00", "50.000"),
-                ("2026-01-01T00:30:00+00:00", "50.250"),
-                ("2026-01-01T00:30:12+00:00", "50.249"),
-                ("2026-01-01T00:30:24+00:00", "50.250"),
-                ("2026-01-01T01:00:00+00:00", "50.500"),
-            ],
-            state_class="total",
-        ),
-    }
-    provider, client = importer(
-        httpx.MockTransport(
-            lambda request: httpx.Response(
-                200, json=responses[request.url.params["filter_entity_id"]]
-            )
-        ),
-        grid_import=aggregate_settings(
-            add=[entity_settings(ENTITY_ID, state_class="total")]
-        ),
-        grid_export=aggregate_settings(
-            add=[entity_settings(EXPORT_ENTITY_ID, state_class="total")]
-        ),
+        hour(1),
+        grid_import=channel(ENTITY_ID, state_class="total"),
+        grid_export=channel(EXPORT_ENTITY_ID, state_class="total"),
     )
-    try:
-        data = import_and_build(
-            provider, client, START, START + timedelta(hours=1), now=NOW
-        )
-    finally:
-        client.close()
 
     assert data.import_kw == (None,)
     assert data.export_kw == (None,)

@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
 
@@ -55,36 +58,58 @@ PRICE_FORECAST_KEY = ProviderDataKey("electricity-prices", "awattar.de", "de")
 BATTERY_HISTORY_KEY = ProviderDataKey(
     "battery-efficiency-history", "home-assistant", "battery_efficiency_history"
 )
-ENERGY_ENTITY = "{entity_id: %s, state_class: total_increasing, unit: kWh}"
-# An aggregation that adds up one entity.
-ENERGY_AGGREGATE = "{terms: [{operation: add, entities: [" + ENERGY_ENTITY + "]}]}"
+LEGS = ("battery", "inverter_charge", "inverter_discharge")
 
 
 def hours(*offsets: int) -> list[datetime]:
     return [START + timedelta(hours=offset) for offset in offsets]
 
 
+def zulu(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
+
+
 def iso(*offsets: int) -> list[str]:
-    return [value.isoformat().replace("+00:00", "Z") for value in hours(*offsets)]
+    return [zulu(value) for value in hours(*offsets)]
 
 
-@dataclass
-class Environment:
-    """A running application with an isolated provider-data directory."""
+def energy(entity_id: str, state_class: str = "total_increasing") -> dict[str, Any]:
+    """Configure the sum of one cumulative kWh counter."""
+    counter = {"entity_id": entity_id, "state_class": state_class, "unit": "kWh"}
+    return aggregate_settings(add=[counter])
 
-    client: TestClient
-    store: ProviderDataStore
-    directory: Path
 
-    def get_actual(
-        self, start: str = "2026-01-01T00:00:00Z", end: str = "2026-01-01T04:00:00Z"
-    ) -> Any:
-        response = self.client.get(
-            "/api/v1/dashboard/data",
-            params={"scenario_kind": "actual", "start_time": start, "end_time": end},
-        )
-        assert response.status_code == 200, response.text
-        return response.json()
+def home_assistant_settings(**settings: Any) -> dict[str, Any]:
+    return {
+        "base_url": "http://homeassistant.test:8123",
+        "token": "test-token",
+        "timeout_seconds": 5,
+        **settings,
+    }
+
+
+def battery_settings(legs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Configure a battery with a live efficiency, or one calculated from ``legs``."""
+    state_of_charge = {"entity_id": "sensor.battery_soc", "unit": "%"}
+    efficiency: dict[str, Any] = (
+        {"battery_efficiency": 0.9}
+        if legs is None
+        else {
+            "efficiency_calculation": {
+                "state_of_charge": state_of_charge.copy(),
+                **legs,
+            }
+        }
+    )
+    return {
+        "state_of_charge": state_of_charge,
+        "capacity": 10,
+        "minimum_soc": 5,
+        "maximum_soc": 100,
+        "maximum_charge": 4,
+        "maximum_discharge": 4,
+        **efficiency,
+    }
 
 
 def write_configuration(
@@ -100,71 +125,95 @@ def write_configuration(
     price_max_age: float | None = None,
     battery_interval_seconds: int | None = None,
 ) -> Path:
-    lines = [
-        "time_resolution_minutes: 60",
-        "grid: {maximum_import_kw: 10, maximum_export_kw: 10}",
-        "solver: {name: highs, time_limit_seconds: 60}",
-    ]
-    if persistence:
-        lines.append(f"persistence: {{directory: {tmp_path / 'provider-data'}}}")
-    if prices:
-        lines += [
-            "awattar:",
-            "  max_data_age_seconds: "
-            + ("null" if price_max_age is None else str(price_max_age)),
-        ]
-    if household or grid or battery:
-        lines += [
-            "home_assistant:",
-            "  base_url: http://homeassistant.test:8123",
-            "  token: test-token",
-            "  timeout_seconds: 5",
-        ]
-        if home_assistant_max_age is not None:
-            lines.append(f"  max_data_age_seconds: {home_assistant_max_age}")
+    home_assistant = home_assistant_settings()
+    if home_assistant_max_age is not None:
+        home_assistant["max_data_age_seconds"] = home_assistant_max_age
     if household:
-        lines += [
-            f"  household_load: {ENERGY_AGGREGATE % 'sensor.household_energy'}",
-        ]
+        home_assistant["household_load"] = energy("sensor.household_energy")
     if grid:
-        lines += [
-            f"  grid_import: {ENERGY_AGGREGATE % 'sensor.grid_import'}",
-            f"  grid_export: {ENERGY_AGGREGATE % 'sensor.grid_export'}",
-        ]
-    if battery:
-        lines += [
-            "  battery:",
-            "    state_of_charge: {entity_id: sensor.battery_soc, unit: '%'}",
-            "    capacity: 10",
-            "    minimum_soc: 5",
-            "    maximum_soc: 100",
-            "    maximum_charge: 4",
-            "    maximum_discharge: 4",
-        ]
-        if battery == "live":
-            lines.append("    battery_efficiency: 0.9")
-        if battery == "calculated":
-            lines += [
-                "    efficiency_calculation:",
-                "      state_of_charge: {entity_id: sensor.battery_soc, unit: '%'}",
-            ]
-            for leg in ("battery", "inverter_charge", "inverter_discharge"):
-                lines += [
-                    f"      {leg}:",
-                    f"        energy_in: {ENERGY_AGGREGATE % f'sensor.{leg}_in'}",
-                    f"        energy_out: {ENERGY_AGGREGATE % f'sensor.{leg}_out'}",
-                ]
+        home_assistant["grid_import"] = energy("sensor.grid_import")
+        home_assistant["grid_export"] = energy("sensor.grid_export")
+    if battery == "live":
+        home_assistant["battery"] = battery_settings()
+    elif battery:
+        home_assistant["battery"] = battery_settings(
+            {
+                leg: {
+                    "energy_in": energy(f"sensor.{leg}_in"),
+                    "energy_out": energy(f"sensor.{leg}_out"),
+                }
+                for leg in LEGS
+            }
+        )
+    configuration: dict[str, Any] = {
+        "time_resolution_minutes": 60,
+        "grid": {"maximum_import_kw": 10, "maximum_export_kw": 10},
+        "solver": {"name": "highs", "time_limit_seconds": 60},
+    }
+    if persistence:
+        configuration["persistence"] = {"directory": str(tmp_path / "provider-data")}
+    if prices:
+        configuration["awattar"] = {"max_data_age_seconds": price_max_age}
+    if household or grid or battery:
+        configuration["home_assistant"] = home_assistant
     if battery_interval_seconds is not None:
-        lines += [
-            "orchestration:",
-            "  enabled: false",
-            "  sources:",
-            f"    battery_efficiency: {{interval_seconds: {battery_interval_seconds}}}",
-        ]
+        configuration["orchestration"] = {
+            "enabled": False,
+            "sources": {
+                "battery_efficiency": {"interval_seconds": battery_interval_seconds}
+            },
+        }
     path = tmp_path / "config.yaml"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text(yaml.safe_dump(configuration), encoding="utf-8")
     monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(path))
     return path
+
+
+@dataclass
+class Environment:
+    """A running application with an isolated provider-data directory."""
+
+    client: TestClient
+    directory: Path
+
+    @property
+    def store(self) -> ProviderDataStore:
+        return ProviderDataStore(self.directory)
+
+    def record_file(self, key: ProviderDataKey) -> Path:
+        return self.directory / f"{key.data_type}-{key.digest()}.json"
+
+    def corrupt(self, key: ProviderDataKey, text: str = "{corrupt\n") -> None:
+        """Damage both the primary and backup file of one persisted record."""
+        for path in self.directory.glob(f"{key.data_type}-{key.digest()}*"):
+            path.write_text(text, encoding="utf-8")
+
+    def get(self, endpoint: str, **params: str) -> Any:
+        response = self.client.get(f"/api/v1/dashboard/{endpoint}", params=params)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def get_actual(
+        self, start: str = "2026-01-01T00:00:00Z", end: str = "2026-01-01T04:00:00Z"
+    ) -> Any:
+        return self.get("data", scenario_kind="actual", start_time=start, end_time=end)
+
+    def get_excluded_hours(self) -> Any:
+        return self.get(
+            "excluded-hours",
+            start_time="2026-01-01T00:00:00Z",
+            end_time="2026-01-01T04:00:00Z",
+        )
+
+
+@contextmanager
+def application(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **options: Any
+) -> Iterator[Environment]:
+    """Run the application on a configuration made from ``options``."""
+    write_configuration(tmp_path, monkeypatch, **options)
+    with TestClient(app) as client:
+        yield Environment(client, tmp_path / "provider-data")
 
 
 def exclusion(
@@ -186,36 +235,36 @@ def exclusion(
     )
 
 
-def seed_household(
-    store: ProviderDataStore,
+def household_load(
     values: tuple[float | None, ...] = (1.0, 2.0, 3.0, 4.0),
     *,
     start: datetime = START,
     observed: datetime = START,
     excluded: tuple[int, ...] = (),
-) -> None:
-    """Persist household load; the ``excluded`` offsets are hours without value."""
-    store.save(
-        HOUSEHOLD_KEY,
-        TypeAdapter(HouseholdLoadData),
-        HouseholdLoadData(
-            schema_version="1",
-            start_time=start,
-            interval_minutes=60,
-            load_kw=tuple(
-                None if index in excluded else value
-                for index, value in enumerate(values)
-            ),
-            unit="kW",
-            source=ProviderSourceMetadata("home-assistant", "household_load"),
-            retrieved_at=observed,
-            latest_observation_at=observed,
-            exclusions=tuple(
-                exclusion(offset, entity_id="sensor.household_energy")
-                for offset in excluded
-            ),
+) -> HouseholdLoadData:
+    """Build household load; the ``excluded`` offsets are hours without value."""
+    return HouseholdLoadData(
+        schema_version="1",
+        start_time=start,
+        interval_minutes=60,
+        load_kw=tuple(
+            None if index in excluded else value for index, value in enumerate(values)
+        ),
+        unit="kW",
+        source=ProviderSourceMetadata("home-assistant", "household_load"),
+        retrieved_at=observed,
+        latest_observation_at=observed,
+        exclusions=tuple(
+            exclusion(offset, entity_id="sensor.household_energy")
+            for offset in excluded
         ),
     )
+
+
+def seed_household(
+    store: ProviderDataStore, data: HouseholdLoadData | None = None
+) -> None:
+    store.save(HOUSEHOLD_KEY, TypeAdapter(HouseholdLoadData), data or household_load())
 
 
 def grid_flow(
@@ -294,18 +343,18 @@ def battery_history(
     Following the importer, the state of charge at both boundaries of an excluded
     hour (values ``k`` and ``k + 1``) is ``None`` as well.
     """
-    energy = tuple(None if index in excluded else 0.5 for index in range(intervals))
+    energy_kwh = tuple(None if index in excluded else 0.5 for index in range(intervals))
     boundaries = set(excluded) | {index + 1 for index in excluded}
     return BatteryEfficiencyHistoryData(
         schema_version="1",
         start_time=START,
         interval_minutes=60,
-        battery_energy_in_kwh=energy,
-        battery_energy_out_kwh=energy,
-        inverter_charge_energy_in_kwh=energy,
-        inverter_charge_energy_out_kwh=energy,
-        inverter_discharge_energy_in_kwh=energy,
-        inverter_discharge_energy_out_kwh=energy,
+        battery_energy_in_kwh=energy_kwh,
+        battery_energy_out_kwh=energy_kwh,
+        inverter_charge_energy_in_kwh=energy_kwh,
+        inverter_charge_energy_out_kwh=energy_kwh,
+        inverter_discharge_energy_in_kwh=energy_kwh,
+        inverter_discharge_energy_out_kwh=energy_kwh,
         state_of_charge_percent=tuple(
             None if index in boundaries else 20.0 + 10 * index
             for index in range(intervals + 1)
@@ -330,14 +379,21 @@ def seed_battery(
     )
 
 
+def seed_all(store: ProviderDataStore) -> None:
+    """Persist the default record of every historic asset."""
+    seed_household(store)
+    seed_grid(store)
+    seed_prices(store)
+    seed_battery(store)
+
+
 @pytest.fixture
-def environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+def environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Environment]:
     """Yield a fully configured application; tests choose what data to seed."""
-    write_configuration(tmp_path, monkeypatch)
-    with TestClient(app) as client:
-        yield Environment(
-            client, ProviderDataStore(tmp_path / "provider-data"), tmp_path
-        )
+    with application(tmp_path, monkeypatch) as environment:
+        yield environment
 
 
 def by_id(body: Any) -> dict[str, Any]:
@@ -348,19 +404,10 @@ def availability(body: Any) -> dict[str, Any]:
     return {item["asset"]: item for item in body["assets"]}
 
 
-def corrupt(directory: Path, key: ProviderDataKey) -> None:
-    """Damage both the primary and backup file of one persisted record."""
-    for path in (directory / "provider-data").glob(f"{key.data_type}-{key.digest()}*"):
-        path.write_text("{corrupt\n", encoding="utf-8")
-
-
 def test_actual_scenario_returns_every_available_asset_series(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store)
-    seed_grid(environment.store)
-    seed_prices(environment.store)
-    seed_battery(environment.store)
+    seed_all(environment.store)
 
     body = environment.get_actual()
 
@@ -428,10 +475,7 @@ def test_actual_scenario_returns_every_available_asset_series(
 def test_availability_identifies_every_asset_and_why_absent_ones_are_missing(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store)
-    seed_grid(environment.store)
-    seed_prices(environment.store)
-    seed_battery(environment.store)
+    seed_all(environment.store)
 
     body = environment.get_actual()
     assets = availability(body)
@@ -470,7 +514,8 @@ def test_availability_identifies_every_asset_and_why_absent_ones_are_missing(
 def test_series_are_aligned_to_requested_hours_and_keep_explicit_gaps(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, (1.0, 2.0), start=START + timedelta(hours=1))
+    late_start = START + timedelta(hours=1)
+    seed_household(environment.store, household_load((1.0, 2.0), start=late_start))
     seed_grid(environment.store)
 
     body = environment.get_actual(end="2026-01-01T05:00:00Z")
@@ -490,10 +535,7 @@ def test_series_are_aligned_to_requested_hours_and_keep_explicit_gaps(
 def test_a_range_wholly_outside_retained_history_is_empty_not_invalid(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store)
-    seed_grid(environment.store)
-    seed_prices(environment.store)
-    seed_battery(environment.store)
+    seed_all(environment.store)
 
     body = environment.get_actual("2026-03-01T00:00:00Z", "2026-03-01T02:00:00Z")
 
@@ -528,11 +570,10 @@ def test_partially_covered_assets_do_not_hide_the_valid_ones(
 def test_unconfigured_and_unseeded_assets_do_not_invalidate_configured_ones(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(tmp_path, monkeypatch, grid=False, battery=None, prices=False)
-    with TestClient(app) as client:
-        store = ProviderDataStore(tmp_path / "provider-data")
-        seed_household(store)
-        environment = Environment(client, store, tmp_path)
+    with application(
+        tmp_path, monkeypatch, grid=False, battery=None, prices=False
+    ) as environment:
+        seed_household(environment.store)
 
         body = environment.get_actual()
 
@@ -568,73 +609,31 @@ def test_battery_history_imported_from_total_counters_with_a_dip_is_served(
     def handler(request: httpx.Request) -> httpx.Response:
         entity_id = request.url.params["filter_entity_id"]
         if entity_id == "sensor.battery_soc":
-            return httpx.Response(
-                200,
-                json=home_assistant_history_payload(
-                    entity_id,
-                    [
-                        (f"2026-01-01T{hour:02d}:00:00+00:00", str(20 + 10 * hour))
-                        for hour in range(5)
-                    ],
-                    unit="%",
-                    state_class="measurement",
-                ),
+            payload = home_assistant_history_payload(
+                entity_id,
+                [
+                    (f"2026-01-01T{hour:02d}:00:00+00:00", str(20 + 10 * hour))
+                    for hour in range(5)
+                ],
+                unit="%",
+                state_class="measurement",
             )
-        return httpx.Response(
-            200,
-            json=home_assistant_history_payload(
+        else:
+            payload = home_assistant_history_payload(
                 entity_id,
                 home_assistant_jittery_total_readings(3200.0, 1),
                 state_class="total",
-            ),
-        )
+            )
+        return httpx.Response(200, json=payload)
 
     leg = {
-        "energy_in": aggregate_settings(
-            add=[
-                {
-                    "entity_id": "sensor.charging_battery_energy",
-                    "state_class": "total",
-                    "unit": "kWh",
-                }
-            ]
-        ),
-        "energy_out": aggregate_settings(
-            add=[
-                {
-                    "entity_id": "sensor.discharging_battery_energy",
-                    "state_class": "total",
-                    "unit": "kWh",
-                }
-            ]
-        ),
+        "energy_in": energy("sensor.charging_battery_energy", "total"),
+        "energy_out": energy("sensor.discharging_battery_energy", "total"),
     }
     configuration = HomeAssistantConfiguration.model_validate(
-        {
-            "base_url": "http://homeassistant.test:8123",
-            "token": "test-token",
-            "timeout_seconds": 5,
-            "battery": {
-                "state_of_charge": {"entity_id": "sensor.battery_soc", "unit": "%"},
-                "capacity": 10,
-                "minimum_soc": 5,
-                "maximum_soc": 100,
-                "maximum_charge": 4,
-                "maximum_discharge": 4,
-                "efficiency_calculation": {
-                    "state_of_charge": {
-                        "entity_id": "sensor.battery_soc",
-                        "unit": "%",
-                    },
-                    "battery": leg,
-                    "inverter_charge": leg,
-                    "inverter_discharge": leg,
-                },
-            },
-        }
+        home_assistant_settings(battery=battery_settings(dict.fromkeys(LEGS, leg)))
     )
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    try:
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         history = import_and_build(
             HomeAssistantBatteryEfficiencyImporter(configuration),
             client,
@@ -642,8 +641,6 @@ def test_battery_history_imported_from_total_counters_with_a_dip_is_served(
             START + timedelta(hours=4),
             now=START,
         )
-    finally:
-        client.close()
     for leg_values in (
         history.battery_energy_in_kwh,
         history.battery_energy_out_kwh,
@@ -664,17 +661,11 @@ def test_battery_history_imported_from_total_counters_with_a_dip_is_served(
     assert state_of_charge["values"] == [20.0, None, None, 50.0]
     assert state_of_charge["missing_intervals"] == iso(1, 2)
     assert state_of_charge["validation_status"] == "valid"
-    persisted = ProviderDataStore(environment.directory / "provider-data").load(
+    persisted = environment.store.load(
         BATTERY_HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData)
     )
     assert persisted == history
-    excluded_hours = environment.client.get(
-        "/api/v1/dashboard/excluded-hours",
-        params={
-            "start_time": "2026-01-01T00:00:00Z",
-            "end_time": "2026-01-01T04:00:00Z",
-        },
-    ).json()
+    excluded_hours = environment.get_excluded_hours()
     assert [
         (item["hour_start"], item["source"]) for item in excluded_hours["hours"]
     ] == [("2026-01-01T01:00:00Z", "battery_efficiency")]
@@ -692,11 +683,7 @@ def test_battery_history_imported_from_total_counters_with_a_dip_is_served(
 def test_battery_without_efficiency_calculation_explains_missing_state_history(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(tmp_path, monkeypatch, battery="live")
-    with TestClient(app) as client:
-        environment = Environment(
-            client, ProviderDataStore(tmp_path / "provider-data"), tmp_path
-        )
+    with application(tmp_path, monkeypatch, battery="live") as environment:
         seed_household(environment.store)
 
         body = environment.get_actual()
@@ -726,11 +713,8 @@ def test_configured_assets_without_persisted_data_are_reported_unavailable(
 def test_missing_persistence_is_reported_for_every_configured_asset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(tmp_path, monkeypatch, persistence=False)
-    with TestClient(app) as client:
-        body = Environment(
-            client, ProviderDataStore(tmp_path / "unused"), tmp_path
-        ).get_actual()
+    with application(tmp_path, monkeypatch, persistence=False) as environment:
+        body = environment.get_actual()
 
     assert body["status"] == "unavailable"
     assert body["series"] == []
@@ -746,7 +730,7 @@ def test_missing_persistence_is_reported_for_every_configured_asset(
 def test_an_installation_without_assets_explains_that_nothing_is_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(
+    with application(
         tmp_path,
         monkeypatch,
         persistence=False,
@@ -754,11 +738,8 @@ def test_an_installation_without_assets_explains_that_nothing_is_configured(
         grid=False,
         battery=None,
         prices=False,
-    )
-    with TestClient(app) as client:
-        body = Environment(
-            client, ProviderDataStore(tmp_path / "unused"), tmp_path
-        ).get_actual()
+    ) as environment:
+        body = environment.get_actual()
 
     assert body["status"] == "unavailable"
     assert body["diagnostics"] == ["no historic energy asset is configured"]
@@ -782,11 +763,8 @@ def test_corrupt_persistence_is_withheld_and_isolated_from_valid_assets(
     key: ProviderDataKey,
     series_ids: set[str],
 ) -> None:
-    seed_household(environment.store)
-    seed_grid(environment.store)
-    seed_prices(environment.store)
-    seed_battery(environment.store)
-    corrupt(environment.directory, key)
+    seed_all(environment.store)
+    environment.corrupt(key)
 
     body = environment.get_actual()
 
@@ -803,8 +781,7 @@ def test_corrupt_household_persistence_is_never_returned_as_valid_actuals(
     environment: Environment,
 ) -> None:
     seed_household(environment.store)
-    for path in (environment.directory / "provider-data").glob("household-load-*"):
-        path.write_text("invalid\n", encoding="utf-8")
+    environment.corrupt(HOUSEHOLD_KEY, "invalid\n")
 
     body = environment.get_actual()
 
@@ -817,15 +794,11 @@ def test_corrupt_household_persistence_is_never_returned_as_valid_actuals(
 def test_only_corrupt_data_reports_an_invalid_dashboard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    write_configuration(
+    with application(
         tmp_path, monkeypatch, household=False, battery=None, prices=False
-    )
-    with TestClient(app) as client:
-        environment = Environment(
-            client, ProviderDataStore(tmp_path / "provider-data"), tmp_path
-        )
+    ) as environment:
         seed_grid(environment.store)
-        corrupt(tmp_path, GRID_KEY)
+        environment.corrupt(GRID_KEY)
 
         body = environment.get_actual()
 
@@ -833,105 +806,55 @@ def test_only_corrupt_data_reports_an_invalid_dashboard(
     assert body["series"] == []
 
 
+GRID_DATA = grid_flow((1.0, 2.0))
+
+
 @pytest.mark.parametrize(
-    ("key", "adapter", "record"),
+    ("key", "record"),
     [
-        (
+        pytest.param(
             GRID_KEY,
-            TypeAdapter(GridFlowData),
-            GridFlowData(
-                "1",
-                START,
-                60,
-                (1.0, 2.0),
-                (1.0,),
-                "kW",
-                ProviderSourceMetadata("home-assistant", "grid_flow"),
-                START,
-                START,
-            ),
+            replace(GRID_DATA, export_kw=(1.0,)),
+            id="export-shorter-than-import",
         ),
-        (
+        pytest.param(
             # Import is excluded, export is not: excluded hours must be excluded
             # for both channels together.
             GRID_KEY,
-            TypeAdapter(GridFlowData),
-            GridFlowData(
-                "1",
-                START,
-                60,
-                (None, 2.0),
-                (1.0, 2.0),
-                "kW",
-                ProviderSourceMetadata("home-assistant", "grid_flow"),
-                START,
-                START,
+            replace(
+                GRID_DATA,
+                import_kw=(None, 2.0),
+                export_kw=(1.0, 2.0),
                 exclusions=(exclusion(0),),
             ),
+            id="grid-hour-excluded-for-import-only",
         ),
-        (
+        pytest.param(
             # An hour without values has no explaining exclusion.
             GRID_KEY,
-            TypeAdapter(GridFlowData),
-            GridFlowData(
-                "1",
-                START,
-                60,
-                (None, 2.0),
-                (None, 2.0),
-                "kW",
-                ProviderSourceMetadata("home-assistant", "grid_flow"),
-                START,
-                START,
-            ),
+            replace(GRID_DATA, import_kw=(None, 2.0), export_kw=(None, 2.0)),
+            id="grid-hour-without-values-or-exclusion",
         ),
-        (
+        pytest.param(
             PRICE_HISTORY_KEY,
-            TypeAdapter(ElectricityPriceData),
-            ElectricityPriceData(
-                "1",
-                (START,),
-                60,
-                (0.3,),
-                (),
-                "EUR/kWh",
-                ProviderSourceMetadata("awattar.de", "de"),
-                START,
-                START,
+            replace(
+                price_history(count=1), export_price_eur_per_kwh=(), expires_at=START
             ),
+            id="prices-without-export",
         ),
-        (
+        pytest.param(
             BATTERY_HISTORY_KEY,
-            TypeAdapter(BatteryEfficiencyHistoryData),
-            BatteryEfficiencyHistoryData(
-                "1",
-                START,
-                60,
-                (0.5, 0.5),
-                (0.5, 0.5),
-                (0.5, 0.5),
-                (0.5, 0.5),
-                (0.5, 0.5),
-                (0.5, 0.5),
-                (20.0, 30.0),
-                "kWh",
-                ProviderSourceMetadata("home-assistant", "battery_efficiency_history"),
-                START,
-                START,
-            ),
+            replace(battery_history(intervals=2), state_of_charge_percent=(20.0, 30.0)),
+            id="battery-without-closing-boundary",
         ),
     ],
 )
 def test_structurally_inconsistent_records_are_withheld_as_invalid(
-    environment: Environment,
-    key: ProviderDataKey,
-    adapter: TypeAdapter[Any],
-    record: object,
+    environment: Environment, key: ProviderDataKey, record: object
 ) -> None:
     seed_household(environment.store)
-    directory = environment.directory / "provider-data"
-    (directory / f"{key.data_type}-{key.digest()}.json").write_bytes(
-        adapter.dump_json(record)
+    environment.record_file(key).write_bytes(
+        TypeAdapter(type(record)).dump_json(record)
     )
 
     body = environment.get_actual()
@@ -946,11 +869,8 @@ def test_a_damaged_primary_is_recovered_from_its_backup_and_served(
     environment: Environment,
 ) -> None:
     seed_grid(environment.store)
-    seed_grid(environment.store, grid_flow((9.0, 9.0, 9.0, 9.0), observed=START))
-    path = (
-        environment.directory / "provider-data" / f"grid-flow-{GRID_KEY.digest()}.json"
-    )
-    path.write_text("{corrupt", encoding="utf-8")
+    seed_grid(environment.store, grid_flow((9.0, 9.0, 9.0, 9.0)))
+    environment.record_file(GRID_KEY).write_text("{corrupt", encoding="utf-8")
 
     body = environment.get_actual()
 
@@ -964,10 +884,7 @@ def test_a_failed_recovery_write_is_reported_instead_of_serving_unverified_data(
     seed_household(environment.store)
     seed_grid(environment.store)
     seed_grid(environment.store)
-    path = (
-        environment.directory / "provider-data" / f"grid-flow-{GRID_KEY.digest()}.json"
-    )
-    path.write_text("{corrupt", encoding="utf-8")
+    environment.record_file(GRID_KEY).write_text("{corrupt", encoding="utf-8")
 
     def fail(*_: object) -> None:
         raise ProviderDataStoreError("disk is read-only")
@@ -983,41 +900,40 @@ def test_a_failed_recovery_write_is_reported_instead_of_serving_unverified_data(
     assert "disk is read-only" not in " ".join(body["diagnostics"])
 
 
-@pytest.mark.parametrize("threshold", [1.0, 1e9])
+@pytest.mark.parametrize(
+    ("threshold", "freshness", "status"),
+    [
+        pytest.param(1.0, "stale", "stale", id="stale"),
+        pytest.param(1e9, "fresh", "validated", id="fresh"),
+    ],
+)
 def test_polling_freshness_never_invalidates_historical_actuals(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, threshold: float
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    threshold: float,
+    freshness: str,
+    status: str,
 ) -> None:
-    write_configuration(
+    observed = START if freshness == "stale" else datetime.now(timezone.utc)
+    with application(
         tmp_path,
         monkeypatch,
         home_assistant_max_age=threshold,
         price_max_age=threshold,
         battery_interval_seconds=int(threshold),
-    )
-    now = datetime.now(timezone.utc)
-    with TestClient(app) as client:
-        environment = Environment(
-            client, ProviderDataStore(tmp_path / "provider-data"), tmp_path
-        )
-        seed_household(environment.store, observed=now if threshold > 1 else START)
-        seed_grid(
-            environment.store, grid_flow(observed=now if threshold > 1 else START)
-        )
-        seed_prices(
-            environment.store, price_history(retrieved=now if threshold > 1 else START)
-        )
-        seed_battery(
-            environment.store, battery_history(observed=now if threshold > 1 else START)
-        )
+    ) as environment:
+        seed_household(environment.store, household_load(observed=observed))
+        seed_grid(environment.store, grid_flow(observed=observed))
+        seed_prices(environment.store, price_history(retrieved=observed))
+        seed_battery(environment.store, battery_history(observed=observed))
 
         body = environment.get_actual()
 
-    expected = "stale" if threshold == 1.0 else "fresh"
-    assert body["status"] == ("stale" if expected == "stale" else "validated")
-    assert {item["freshness"] for item in body["series"]} == {expected}
+    assert body["status"] == status
+    assert {item["freshness"] for item in body["series"]} == {freshness}
     assert {item["validation_status"] for item in body["series"]} == {"valid"}
     assert by_id(body)["household_load_actual"]["values"] == [1.0, 2.0, 3.0, 4.0]
-    if expected == "stale":
+    if freshness == "stale":
         assert {
             availability(body)[name]["status"]
             for name in ("household_load", "grid_flow", "electricity_prices", "battery")
@@ -1028,7 +944,7 @@ def test_polling_freshness_never_invalidates_historical_actuals(
 def test_excluded_hours_are_null_gaps_only_in_the_series_they_belong_to(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, excluded=(1,))
+    seed_household(environment.store, household_load(excluded=(1,)))
     seed_grid(environment.store, grid_flow(excluded=(2,)))
     seed_prices(environment.store)
     seed_battery(environment.store, battery_history(excluded=(3,)))
@@ -1064,7 +980,7 @@ def test_excluded_hours_are_null_gaps_only_in_the_series_they_belong_to(
 def test_a_range_of_only_excluded_hours_is_empty_not_invalid(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, excluded=(0, 1, 2, 3))
+    seed_household(environment.store, household_load(excluded=(0, 1, 2, 3)))
     seed_grid(environment.store, grid_flow(excluded=(0, 1, 2, 3)))
 
     body = environment.get_actual()
@@ -1081,7 +997,7 @@ def test_a_range_of_only_excluded_hours_is_empty_not_invalid(
 def test_excluded_hours_outside_the_requested_range_are_not_reported(
     environment: Environment,
 ) -> None:
-    seed_household(environment.store, excluded=(3,))
+    seed_household(environment.store, household_load(excluded=(3,)))
     seed_grid(environment.store, grid_flow(excluded=(3,)))
 
     body = environment.get_actual(end="2026-01-01T03:00:00Z")
@@ -1099,8 +1015,7 @@ def test_suspect_hours_of_persisted_legacy_history_are_served_as_gaps(
     """Grid-flow and battery files of earlier versions flag hours with quality."""
     suspect = {"status": "suspect", "reason": "counter_reset", "entity_id": "s.grid"}
     valid = {"status": "valid", "reason": None, "entity_id": None}
-    directory = environment.directory / "provider-data"
-    directory.mkdir(exist_ok=True)
+    environment.directory.mkdir(exist_ok=True)
     common = {
         "schema_version": "1",
         "start_time": START.isoformat(),
@@ -1119,15 +1034,9 @@ def test_suspect_hours_of_persisted_legacy_history_are_served_as_gaps(
     legacy_battery = {
         **common,
         **{
-            name: [0.5] * 4
-            for name in (
-                "battery_energy_in_kwh",
-                "battery_energy_out_kwh",
-                "inverter_charge_energy_in_kwh",
-                "inverter_charge_energy_out_kwh",
-                "inverter_discharge_energy_in_kwh",
-                "inverter_discharge_energy_out_kwh",
-            )
+            f"{leg}_energy_{direction}_kwh": [0.5] * 4
+            for leg in LEGS
+            for direction in ("in", "out")
         },
         "state_of_charge_percent": [20.0, 30.0, 40.0, 50.0, 60.0],
         "unit": "kWh",
@@ -1141,9 +1050,7 @@ def test_suspect_hours_of_persisted_legacy_history_are_served_as_gaps(
         (GRID_KEY, legacy_grid),
         (BATTERY_HISTORY_KEY, legacy_battery),
     ):
-        (directory / f"{key.data_type}-{key.digest()}.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        environment.record_file(key).write_text(json.dumps(payload), encoding="utf-8")
 
     body = environment.get_actual()
 
@@ -1159,13 +1066,7 @@ def test_suspect_hours_of_persisted_legacy_history_are_served_as_gaps(
     assert state_of_charge["values"][2] is None
     assert iso(2)[0] in state_of_charge["missing_intervals"]
     assert {item["validation_status"] for item in series.values()} == {"valid"}
-    excluded_hours = environment.client.get(
-        "/api/v1/dashboard/excluded-hours",
-        params={
-            "start_time": "2026-01-01T00:00:00Z",
-            "end_time": "2026-01-01T04:00:00Z",
-        },
-    ).json()
+    excluded_hours = environment.get_excluded_hours()
     assert [
         (item["hour_start"], item["source"], cause["reason"])
         for item in excluded_hours["hours"]
@@ -1180,15 +1081,10 @@ def test_price_history_exposes_only_completed_hours_as_actuals(
     environment: Environment,
 ) -> None:
     now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-    seed_prices(
-        environment.store, price_history(now - timedelta(hours=2), 5, retrieved=now)
-    )
     start = now - timedelta(hours=2)
+    seed_prices(environment.store, price_history(start, 5, retrieved=now))
 
-    body = environment.get_actual(
-        start.isoformat().replace("+00:00", "Z"),
-        (now + timedelta(hours=3)).isoformat().replace("+00:00", "Z"),
-    )
+    body = environment.get_actual(zulu(start), zulu(now + timedelta(hours=3)))
 
     prices = by_id(body)["import_price_actual"]
     assert [value is not None for value in prices["values"]] == [
@@ -1198,7 +1094,7 @@ def test_price_history_exposes_only_completed_hours_as_actuals(
         False,
         False,
     ]
-    assert prices["available_end_time"] == now.isoformat().replace("+00:00", "Z")
+    assert prices["available_end_time"] == zulu(now)
     assert body["status"] == "partial"
 
 
@@ -1237,14 +1133,12 @@ def test_forecast_and_plan_data_never_appear_in_the_actual_scenario(
     assert {item["scenario_kind"] for item in body["series"]} == {"actual"}
     assert availability(body)["electricity_prices"]["status"] == "unavailable"
     assert availability(body)["pv_generation"]["status"] == "not_configured"
-    forecast = environment.client.get(
-        "/api/v1/dashboard/data",
-        params={
-            "scenario_kind": "forecast",
-            "start_time": "2026-01-01T00:00:00Z",
-            "end_time": "2026-01-01T02:00:00Z",
-        },
-    ).json()
+    forecast = environment.get(
+        "data",
+        scenario_kind="forecast",
+        start_time="2026-01-01T00:00:00Z",
+        end_time="2026-01-01T02:00:00Z",
+    )
     assert forecast["assets"] == []
 
 
@@ -1369,13 +1263,8 @@ def test_actual_dashboard_is_reachable_without_specifying_a_scenario(
 ) -> None:
     seed_household(environment.store)
 
-    response = environment.client.get(
-        "/api/v1/dashboard/data",
-        params={
-            "start_time": "2026-01-01T00:00:00Z",
-            "end_time": "2026-01-01T02:00:00Z",
-        },
+    body = environment.get(
+        "data", start_time="2026-01-01T00:00:00Z", end_time="2026-01-01T02:00:00Z"
     )
 
-    assert response.status_code == 200
-    assert response.json()["series"][0]["scenario_kind"] == "actual"
+    assert body["series"][0]["scenario_kind"] == "actual"

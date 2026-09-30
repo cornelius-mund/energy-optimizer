@@ -27,10 +27,7 @@ def test_require_aware_timestamps_accepts_aware_values() -> None:
     assert require_aware_timestamps([AWARE, AWARE]) == [AWARE, AWARE]
 
 
-@pytest.mark.parametrize(
-    "value",
-    [datetime(2026, 1, 1), [AWARE, datetime(2026, 1, 1)]],
-)
+@pytest.mark.parametrize("value", [datetime(2026, 1, 1), [AWARE, datetime(2026, 1, 1)]])
 def test_require_aware_timestamps_rejects_naive_values(
     value: datetime | list[datetime],
 ) -> None:

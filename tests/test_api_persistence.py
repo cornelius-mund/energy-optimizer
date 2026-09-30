@@ -3,10 +3,11 @@
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter
-from pytest import MonkeyPatch
 
 from energy_optimizer.api import app
 from energy_optimizer.exclusions import (
@@ -19,6 +20,30 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 HOUSEHOLD_KEY = ProviderDataKey("household-load", "home-assistant", "household_load")
+
+
+def at(hour: int) -> str:
+    """Return the ISO timestamp of ``hour`` hours after the start of the data."""
+    return (START + timedelta(hours=hour)).isoformat()
+
+
+def get_historic(client: TestClient, start: str, end: str) -> Any:
+    return client.get(
+        "/api/v1/historic/household-load",
+        params={"start_time": start, "end_time": end},
+    )
+
+
+def later_submission(
+    request: dict[str, object], start_hour: int, load_kw: list[float]
+) -> dict[str, object]:
+    """Return ``request`` moved to ``start_hour``, observed one hour afterwards."""
+    return request | {
+        "start_time": at(start_hour),
+        "load_kw": load_kw,
+        "retrieved_at": at(start_hour + 1),
+        "latest_observation_at": at(start_hour + 1),
+    }
 
 
 def test_grid_flow_provider_data_is_persisted_and_retrieved_after_restart(
@@ -42,15 +67,25 @@ def test_grid_flow_provider_data_is_persisted_and_retrieved_after_restart(
     assert restarted_response.json() == read_response.json()
 
 
-def test_grid_flow_direct_submission_is_not_persisted(
-    persistence_client: TestClient, grid_flow_request: dict[str, object]
+@pytest.mark.parametrize(
+    ("path", "request_fixture"),
+    [
+        ("/api/v1/grid-flow", "grid_flow_request"),
+        ("/api/v1/household-load", "household_load_request"),
+    ],
+)
+def test_direct_submission_is_not_persisted(
+    persistence_client: TestClient,
+    request: pytest.FixtureRequest,
+    path: str,
+    request_fixture: str,
 ) -> None:
-    request = grid_flow_request.copy()
-    request.pop("source")
+    submission = dict(request.getfixturevalue(request_fixture))
+    submission.pop("source")
 
     with persistence_client as client:
-        write_response = client.post("/api/v1/grid-flow", json=request)
-        read_response = client.get("/api/v1/grid-flow")
+        write_response = client.post(path, json=submission)
+        read_response = client.get(path)
 
     assert write_response.status_code == 200
     assert read_response.status_code == 404
@@ -74,10 +109,7 @@ def test_household_load_provider_data_is_persisted_and_retrieved_after_restart(
         "interval_minutes": 60,
         "load_kw": [1.2, 1.0],
         "unit": "kW",
-        "source": {
-            "provider": "home-assistant",
-            "entity_id": "household_load",
-        },
+        "source": {"provider": "home-assistant", "entity_id": "household_load"},
         "retrieved_at": "2026-01-01T00:00:00Z",
         "latest_observation_at": "2026-01-01T01:00:00Z",
     }
@@ -92,19 +124,12 @@ def test_household_load_provider_data_is_persisted_and_retrieved_after_restart(
 def test_household_load_provider_data_is_merged_on_persistence(
     persistence_client: TestClient, household_load_request: dict[str, object]
 ) -> None:
-    first = household_load_request.copy()
-    second = household_load_request.copy()
-    second.update(
-        {
-            "start_time": "2026-01-01T01:00:00+00:00",
-            "load_kw": [9.0, 3.0],
-            "retrieved_at": "2026-01-01T02:00:00+00:00",
-            "latest_observation_at": "2026-01-01T02:00:00+00:00",
-        }
-    )
+    second = later_submission(household_load_request, 1, [9.0, 3.0])
 
     with persistence_client as client:
-        first_response = client.post("/api/v1/household-load", json=first)
+        first_response = client.post(
+            "/api/v1/household-load", json=household_load_request
+        )
         second_response = client.post("/api/v1/household-load", json=second)
         read_response = client.get("/api/v1/household-load")
 
@@ -119,26 +144,12 @@ def test_household_load_provider_data_is_merged_on_persistence(
 def test_household_load_submission_after_a_gap_persists_the_gap_as_null_hours(
     persistence_client: TestClient, household_load_request: dict[str, object]
 ) -> None:
-    later = household_load_request.copy()
-    later.update(
-        {
-            "start_time": "2026-01-01T05:00:00+00:00",
-            "load_kw": [9.0],
-            "retrieved_at": "2026-01-01T06:00:00+00:00",
-            "latest_observation_at": "2026-01-01T06:00:00+00:00",
-        }
-    )
+    later = later_submission(household_load_request, 5, [9.0])
 
     with persistence_client as client:
         first = client.post("/api/v1/household-load", json=household_load_request)
         second = client.post("/api/v1/household-load", json=later)
-        historic = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T00:00:00+00:00",
-                "end_time": "2026-01-01T06:00:00+00:00",
-            },
-        )
+        historic = get_historic(client, at(0), at(6))
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -151,13 +162,7 @@ def test_historic_household_load_returns_requested_range_and_metadata(
 ) -> None:
     with persistence_client as client:
         client.post("/api/v1/household-load", json=household_load_request)
-        response = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T01:00:00+00:00",
-                "end_time": "2026-01-01T02:00:00+00:00",
-            },
-        )
+        response = get_historic(client, at(1), at(2))
 
     assert response.status_code == 200
     assert response.json() == {
@@ -182,8 +187,10 @@ def test_historic_household_load_returns_requested_range_and_metadata(
     }
 
 
-def seed_household_load_with_an_excluded_hour(configuration: Path) -> HourExclusion:
-    """Persist three hours whose middle hour is excluded and return its exclusion."""
+def test_historic_household_load_returns_null_for_an_excluded_hour(
+    persistence_configuration: Path,
+) -> None:
+    """Persist three hours whose middle hour is excluded and serve them."""
     hour_start = START + timedelta(hours=1)
     excluded = HourExclusion(
         hour_start,
@@ -196,7 +203,7 @@ def seed_household_load_with_an_excluded_hour(configuration: Path) -> HourExclus
             ),
         ),
     )
-    ProviderDataStore(configuration.parent / "provider-data").save(
+    ProviderDataStore(persistence_configuration.parent / "provider-data").save(
         HOUSEHOLD_KEY,
         TypeAdapter(HouseholdLoadData),
         HouseholdLoadData(
@@ -211,29 +218,10 @@ def seed_household_load_with_an_excluded_hour(configuration: Path) -> HourExclus
             exclusions=(excluded,),
         ),
     )
-    return excluded
-
-
-def test_historic_household_load_returns_null_for_an_excluded_hour(
-    persistence_configuration: Path,
-) -> None:
-    seed_household_load_with_an_excluded_hour(persistence_configuration)
 
     with TestClient(app) as client:
-        whole_range = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T00:00:00+00:00",
-                "end_time": "2026-01-01T03:00:00+00:00",
-            },
-        )
-        excluded_only = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T01:00:00+00:00",
-                "end_time": "2026-01-01T02:00:00+00:00",
-            },
-        )
+        whole_range = get_historic(client, at(0), at(3))
+        excluded_only = get_historic(client, at(1), at(2))
         stored = client.get("/api/v1/household-load")
 
     assert whole_range.status_code == 200
@@ -260,20 +248,18 @@ def test_historic_household_load_serves_suspect_hours_of_legacy_data_as_null(
 ) -> None:
     directory = persistence_configuration.parent / "provider-data"
     directory.mkdir()
-    quality = [
-        {"status": "valid", "reason": None, "entity_id": None},
-        {
-            "status": "suspect",
-            "reason": "reset_recovery",
-            "entity_id": "sensor.household_energy",
-        },
-        {"status": "valid", "reason": None, "entity_id": None},
-    ]
+    valid = {"status": "valid", "reason": None, "entity_id": None}
+    suspect = {
+        "status": "suspect",
+        "reason": "reset_recovery",
+        "entity_id": "sensor.household_energy",
+    }
+    quality = [valid, suspect, valid]
     (directory / f"household-load-{HOUSEHOLD_KEY.digest()}.ndjson").write_bytes(
         b"".join(
             json.dumps(
                 {
-                    "timestamp": (START + timedelta(hours=hour)).isoformat(),
+                    "timestamp": at(hour),
                     "load_kw": float(hour + 1),
                     "quality": quality[hour],
                     "schema_version": "1",
@@ -283,7 +269,7 @@ def test_historic_household_load_serves_suspect_hours_of_legacy_data_as_null(
                         "entity_id": "household_load",
                     },
                     "retrieved_at": START.isoformat(),
-                    "latest_observation_at": (START + timedelta(hours=3)).isoformat(),
+                    "latest_observation_at": at(3),
                 }
             ).encode()
             + b"\n"
@@ -292,13 +278,7 @@ def test_historic_household_load_serves_suspect_hours_of_legacy_data_as_null(
     )
 
     with TestClient(app) as client:
-        response = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T00:00:00+00:00",
-                "end_time": "2026-01-01T03:00:00+00:00",
-            },
-        )
+        response = get_historic(client, at(0), at(3))
 
     assert response.status_code == 200
     assert response.json()["status"] == "validated"
@@ -311,13 +291,7 @@ def test_historic_household_load_reports_empty_range(
 ) -> None:
     with persistence_client as client:
         client.post("/api/v1/household-load", json=household_load_request)
-        response = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-02T00:00:00+00:00",
-                "end_time": "2026-01-02T01:00:00+00:00",
-            },
-        )
+        response = get_historic(client, at(24), at(25))
 
     assert response.status_code == 200
     body = response.json()
@@ -330,27 +304,18 @@ def test_historic_household_load_reports_empty_range(
 
 def test_historic_household_load_reports_stale_but_valid_history(
     persistence_configuration: Path,
-    monkeypatch: MonkeyPatch,
     household_load_request: dict[str, object],
 ) -> None:
-    configuration = persistence_configuration
-    configuration.write_text(
-        configuration.read_text(encoding="utf-8").replace(
+    persistence_configuration.write_text(
+        persistence_configuration.read_text(encoding="utf-8").replace(
             "  timeout_seconds: 10", "  timeout_seconds: 10\n  max_data_age_seconds: 1"
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(configuration))
 
     with TestClient(app) as client:
         client.post("/api/v1/household-load", json=household_load_request)
-        response = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T00:00:00+00:00",
-                "end_time": "2026-01-01T01:00:00+00:00",
-            },
-        )
+        response = get_historic(client, at(0), at(1))
 
     assert response.status_code == 200
     assert response.json()["status"] == "stale"
@@ -359,27 +324,16 @@ def test_historic_household_load_reports_stale_but_valid_history(
 
 
 def test_historic_household_load_reports_corrupt_persistence(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-    persistence_configuration: Path,
+    tmp_path: Path, persistence_configuration: Path
 ) -> None:
-    monkeypatch.setenv("ENERGY_OPTIMIZER_CONFIG", str(persistence_configuration))
     store = tmp_path / "provider-data"
     store.mkdir()
-    key = "household-load-"
-    provider_key = ProviderDataKey("household-load", "home-assistant", "household_load")
-    (store / f"{key}{provider_key.digest()}.ndjson").write_text(
+    (store / f"household-load-{HOUSEHOLD_KEY.digest()}.ndjson").write_text(
         "invalid\n", encoding="utf-8"
     )
 
     with TestClient(app) as client:
-        response = client.get(
-            "/api/v1/historic/household-load",
-            params={
-                "start_time": "2026-01-01T00:00:00+00:00",
-                "end_time": "2026-01-01T01:00:00+00:00",
-            },
-        )
+        response = get_historic(client, at(0), at(1))
 
     assert response.status_code == 503
     assert "could not recover" in response.json()["detail"]
@@ -390,37 +344,11 @@ def test_historic_household_load_rejects_invalid_ranges(
 ) -> None:
     with persistence_client as client:
         responses = [
-            client.get(
-                "/api/v1/historic/household-load",
-                params={
-                    "start_time": "2026-01-01T01:00:00+00:00",
-                    "end_time": "2026-01-01T00:00:00+00:00",
-                },
-            ),
-            client.get(
-                "/api/v1/historic/household-load",
-                params={
-                    "start_time": "2026-01-01T00:00:00",
-                    "end_time": "2026-01-01T01:00:00+00:00",
-                },
-            ),
+            get_historic(client, at(1), at(0)),
+            get_historic(client, "2026-01-01T00:00:00", at(1)),
         ]
 
     assert all(response.status_code == 422 for response in responses)
-
-
-def test_household_load_direct_submission_is_not_persisted(
-    persistence_client: TestClient, household_load_request: dict[str, object]
-) -> None:
-    request = household_load_request.copy()
-    request.pop("source")
-
-    with persistence_client as client:
-        write_response = client.post("/api/v1/household-load", json=request)
-        read_response = client.get("/api/v1/household-load")
-
-    assert write_response.status_code == 200
-    assert read_response.status_code == 404
 
 
 def test_household_load_persistence_reports_missing_configuration(
