@@ -810,6 +810,138 @@ def self_contained_plan(name: str, events: list[str]) -> Any:
     return plan
 
 
+def purged_home_assistant(first_hour: int, last_hour: int) -> FakeHomeAssistant:
+    """Serve the example counters only from ``first_hour``, as after a purge."""
+    hours = range(first_hour, last_hour + 1)
+    states = {
+        entity: [(BASE + hour * ONE_HOUR, str(rate * hour)) for hour in hours]
+        for entity, rate in RATES.items()
+    }
+    states[SOC] = [
+        (BASE + hour * ONE_HOUR, str(40 + 10 * (hour % 5))) for hour in hours
+    ]
+    return FakeHomeAssistant(
+        states,
+        units={SOC: "%"},
+        state_classes={SOC: "measurement", "sensor.ev_energy": "total"},
+    )
+
+
+def test_hours_home_assistant_no_longer_holds_are_excluded_and_never_block_refreshes(
+    tmp_path: Path, caplog: LogCaptureFixture
+) -> None:
+    """Hours purged from the recorder while the service was down cannot be
+    fetched by any retry, so they become excluded hours and the refresh moves on.
+    """
+    store = ProviderDataStore(tmp_path)
+    first_client = example_home_assistant().client()
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration(tmp_path), store, home_assistant_client=first_client
+    )
+    assert orchestrator is not None
+    try:
+        first = orchestrator.run_due(BASE + 6 * ONE_HOUR + timedelta(minutes=30))
+    finally:
+        first_client.close()
+    # Home Assistant now retains hour 9 onward only; hours 6 to 8 are gone.
+    purged = purged_home_assistant(first_hour=9, last_hour=12)
+    client = purged.client()
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration(tmp_path), store, home_assistant_client=client
+    )
+    assert orchestrator is not None
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            second = orchestrator.run_due(
+                BASE + 12 * ONE_HOUR + timedelta(minutes=30), force=True
+            )
+    finally:
+        client.close()
+
+    success = {
+        "household_load": "success",
+        "grid_flow": "success",
+        "battery_efficiency": "success",
+    }
+    assert statuses(first) == statuses(second) == success
+    load = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    grid = store.load(GRID_KEY, GRID_ADAPTER)
+    efficiency = store.load(HISTORY_KEY, TypeAdapter(BatteryEfficiencyHistoryData))
+    assert load is not None
+    assert grid is not None
+    assert efficiency is not None
+    missing = (None,) * 3
+    assert load.start_time == grid.start_time == efficiency.start_time == BASE
+    assert load.load_kw[6:9] == missing
+    assert load.load_kw[:6] + load.load_kw[9:] == pytest.approx((4.0,) * 9)
+    assert grid.import_kw[6:9] == grid.export_kw[6:9] == missing
+    assert grid.import_kw[:6] + grid.import_kw[9:] == pytest.approx((2.0,) * 9)
+    for leg in (
+        efficiency.battery_energy_in_kwh,
+        efficiency.inverter_charge_energy_out_kwh,
+        efficiency.inverter_discharge_energy_in_kwh,
+    ):
+        assert len(leg) == 12
+        assert leg[6:9] == missing
+        assert None not in leg[:6] + leg[9:]
+    assert len(efficiency.state_of_charge_percent) == 12 + 1
+    assert efficiency.state_of_charge_percent[6:10] == (None,) * 4
+    gap_hours = [BASE + hour * ONE_HOUR for hour in (6, 7, 8)]
+    for excluded in (load.exclusions, grid.exclusions, efficiency.exclusions):
+        assert [item.hour_start for item in excluded] == gap_hours
+        assert all(
+            [cause.reason for cause in item.causes] == ["history_unavailable"]
+            for item in excluded
+        )
+        assert (
+            "2026-01-01T06:00:00+00:00 until 2026-01-01T09:00:00+00:00 (3 hours)"
+            in (excluded[0].causes[0].message)
+        )
+    # One warning per source names the missing hours, so the gap is visible.
+    unavailable = [
+        record.getMessage()
+        for record in caplog.records
+        if "event=provider_history_unavailable" in record.getMessage()
+    ]
+    assert unavailable == [
+        "event=provider_history_unavailable component=storage operation=merge "
+        f"source={source} hour_count=3 first_hour=2026-01-01T06:00:00+00:00 "
+        "last_hour=2026-01-01T08:00:00+00:00"
+        for source in ("household_load", "grid_flow", "battery_efficiency")
+    ]
+
+    # The next refresh continues after the new end instead of asking again for
+    # the hours Home Assistant does not hold.
+    later = purged_home_assistant(first_hour=9, last_hour=14)
+    later_client = later.client()
+    orchestrator = build_configured_orchestrator(
+        runtime_configuration(tmp_path), store, home_assistant_client=later_client
+    )
+    assert orchestrator is not None
+    try:
+        third = orchestrator.run_due(
+            BASE + 14 * ONE_HOUR + timedelta(minutes=30), force=True
+        )
+    finally:
+        later_client.close()
+    assert statuses(third) == success
+    requested = requested_ranges(later)
+    persisted_end = BASE + 12 * ONE_HOUR
+    assert requested["sensor.grid_export_energy"] == [
+        (persisted_end, BASE + 14 * ONE_HOUR)
+    ]
+    assert requested["sensor.household_energy"] == [
+        (persisted_end - ONE_HOUR, BASE + 14 * ONE_HOUR)
+    ]
+    assert requested[SOC] == [(persisted_end, BASE + 14 * ONE_HOUR)]
+    final = store.load(HOUSEHOLD_KEY, LOAD_ADAPTER)
+    assert final is not None
+    assert final.load_kw[6:9] == missing
+    assert final.load_kw[:6] + final.load_kw[9:] == pytest.approx((4.0,) * 11)
+    assert len(final.exclusions) == 3
+
+
 def test_every_plan_precedes_the_import_and_the_import_precedes_every_build(
     tmp_path: Path,
 ) -> None:

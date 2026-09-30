@@ -277,6 +277,29 @@ values, and hours flagged `suspect` become excluded hours with the reason
 history that was persisted. A refresh with excluded hours is a `success` and does
 not block optimization; there is no `suspect` run status.
 
+**Gaps that Home Assistant can no longer fill.** The incremental start asks for
+everything after the persisted end. When the service was down for longer than the
+recorder retains history, the importer trims the range to what Home Assistant
+still holds (`provider_history_truncated`), so the fetched range starts after the
+persisted end and the hours in between can never be fetched again. Failing the
+merge would repeat on every run, and the gap would only widen as Home Assistant's
+window moves on. Instead the merge rules of all three histories store each missing
+hour as an excluded hour with the reason `history_unavailable`
+(`history_unavailable_exclusions` in `exclusions.py`): a cause without entity and
+data points whose message names the whole missing range. The persisted history
+stays one contiguous series, the incremental start moves to the new end, and the
+valid hours before the gap and after it are unchanged. The household-load store
+also appends the gap hours as NDJSON records, because it appends only new records
+and the file would otherwise contain a hole that fails validation on the next
+read. In the battery-efficiency history all six legs hold `null` for a gap hour
+and the state of charge holds `null` for every boundary of it, one more than there
+are gap hours, so the series keeps one more state of charge than each energy leg and no
+value is invented; the calculation then ignores the gap like any excluded hour.
+Only a range that starts after the persisted end is bridged. An incoming range
+that overlaps the persisted end merges as before, and a range that ends before the
+persisted history starts, with hours in between, is still rejected. Each bridged
+gap is logged as one `provider_history_unavailable` warning per source and refresh.
+
 **Battery efficiency.** The measured battery-efficiency importer aligns the six
 energy legs and the state-of-charge history. The state of charge holds one value
 per hour boundary: `state_of_charge_percent[i]` is the last state recorded at or
@@ -334,8 +357,10 @@ read, and a backup copy allow recovery from interrupted or corrupted writes.
 Only data with a configured provider identity is persisted; source-less API
 submissions remain request-scoped. Non-household-load data remains a readable
 JSON model. Grid-flow saves are merged by hourly timestamp into one contiguous
-retained history (incoming values win, at most 87,672 hours, a gap is rejected
-without changing the stored history) by the pure rules in `history_merge.py`;
+retained history (incoming values win, at most 87,672 hours, hours between the
+stored history and a later incoming range are excluded as `history_unavailable`,
+any other gap is rejected without changing the stored history) by the pure rules
+in `history_merge.py`;
 measured battery-efficiency history is persisted as one aligned multi-series
 record.
 Each scheduled recompute requests only the hours after the previously

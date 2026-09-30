@@ -308,7 +308,10 @@ source matches the configured Home Assistant household-load provider.
 Source-less submissions and other providers are validated and returned but are
 not persisted. Matching household-load submissions merge by hourly timestamp,
 with incoming values overwriting duplicates and the oldest values removed
-beyond 87,672 hours. `GET /api/v1/household-load` retrieves the latest persisted
+beyond 87,672 hours. A submission that starts after the persisted history ends
+stores every hour in between as an excluded hour with the reason
+`history_unavailable` (`null` in the series), which a later submission of those
+hours replaces. `GET /api/v1/household-load` retrieves the latest persisted
 normalized provider data. Optimizer-owned state transitions remain outside this
 persistence boundary.
 
@@ -482,7 +485,10 @@ after the retained history. Price history is retained for the same number of
 hours and may skip hours. Retention, backup recovery, and provider import
 behavior are otherwise unchanged. A failed provider run keeps the last valid
 history, and the assets above report `unavailable` until the first successful run
-persists data.
+persists data. Hours that Home Assistant no longer held when a run resumed after a
+long downtime stay in the history as excluded hours with the reason
+`history_unavailable`, so they are `null` in the series like any other excluded
+hour and the history stays contiguous.
 
 ### Dashboard view
 
@@ -618,7 +624,9 @@ source and reason, and every excluded hour in ascending order:
 
 - `source` is `household_load`, `grid_flow`, or `battery_efficiency`. Grid import and
   export are excluded together, and an hour excluded in any battery-efficiency leg
-  or in the state of charge is excluded in all of them.
+  or in the state of charge is excluded in all of them. An hour with the reason
+  `history_unavailable` is excluded in the same way in every source that held
+  history before the gap.
 - A source `status` is `available` when its persisted history was read,
   `not_configured` when the installation has no such source, `unavailable` when no
   history has been persisted yet, and `invalid` when persisted data is corrupt and
@@ -630,7 +638,11 @@ source and reason, and every excluded hour in ascending order:
   `previous_value`, `value`, in the entity's unit), `step_kwh`, and `maximum_kwh`.
   For a combined hour, each data point names one component `entity_id` and its
   signed `step_kwh`. At most 50 data points are kept per entity and hour;
-  `data_point_count` is the number before that bound.
+  `data_point_count` is the number before that bound. A `history_unavailable` cause
+  has `entity_id: null`, no data points, and `data_point_count: 0`; its `message`
+  names the whole missing range, for example "The provider holds no history from
+  2026-08-21T16:00:00+00:00 until 2026-09-01T15:00:00+00:00 (263 hours), so these
+  hours cannot be imported."
 - `summary` counts excluded hours per source and reason; an hour counts once per
   distinct reason.
 
@@ -645,6 +657,7 @@ source and reason, and every excluded hour in ascending order:
 | `soc_out_of_range` | A state of charge is outside 0 to 100 percent |
 | `combined_negative`, `combined_not_finite` | The signed terms of an hour give a non-finite value, or a negative value unless the aggregation takes `part: positive` |
 | `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` |
+| `history_unavailable` | Home Assistant no longer holds the hour, because the service was down for longer than the recorder retains history; nothing was recorded for it |
 
 The Excluded hours tab loads this endpoint for the chosen window, converted from the
 configured time zone to whole UTC hours. It shows the
@@ -721,9 +734,12 @@ series longer than ten years (87,672 hourly values) return HTTP 422 with
 field-level validation details. When the source matches the configured Home
 Assistant grid-flow provider, `POST /api/v1/grid-flow` merges the submission into
 the retained history like household load does: incoming values replace
-overlapping hours, at most 87,672 hourly values are kept, and a submission that
-would leave a gap in the contiguous history is rejected with HTTP 503 without
-changing the retained data. `GET /api/v1/grid-flow` returns the complete retained
+overlapping hours, and at most 87,672 hourly values are kept. A submission that
+starts after the retained history ends stores every hour in between as an excluded
+hour with the reason `history_unavailable`, which a later submission of those hours
+replaces. A submission that ends before the retained history starts, with hours
+between them, would leave a gap in the contiguous history and is rejected with
+HTTP 503 without changing the retained data. `GET /api/v1/grid-flow` returns the complete retained
 history for the configured provider, or HTTP 404 when none is available. Range
 queries over this history use the historic multi-asset API described below.
 

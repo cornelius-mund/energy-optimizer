@@ -6,6 +6,7 @@ tests exercise the pure normalization directly on cleaned samples, so each rule 
 pinned independently of the HTTP layer.
 """
 
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +23,7 @@ from energy_optimizer.exclusions import (
     HourExclusion,
     cap_data_points,
     exclusion_summary,
+    history_unavailable_exclusions,
     merge_exclusions,
 )
 from energy_optimizer.providers.home_assistant_energy import (
@@ -384,6 +386,39 @@ def test_hours_without_a_sample_are_valid_and_carry_no_energy() -> None:
 
     assert series.values_kw == (0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
     assert series.exclusions == ()
+
+
+def test_history_unavailable_excludes_every_hour_of_the_range_with_one_cause(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="energy_optimizer.exclusions"):
+        exclusions = history_unavailable_exclusions("grid_flow", at(2), at(5))
+
+    assert "history_unavailable" in EXCLUSION_REASONS
+    assert [item.hour_start for item in exclusions] == [at(2), at(3), at(4)]
+    (cause,) = {item.causes for item in exclusions}
+    assert len(cause) == 1
+    assert (cause[0].reason, cause[0].entity_id, cause[0].data_point_count) == (
+        "history_unavailable",
+        None,
+        0,
+    )
+    assert cause[0].data_points == ()
+    assert cause[0].message == (
+        "The provider holds no history from 2026-01-01T02:00:00+00:00 until "
+        "2026-01-01T05:00:00+00:00 (3 hours), so these hours cannot be imported."
+    )
+    assert [record.getMessage() for record in caplog.records] == [
+        "event=provider_history_unavailable component=storage operation=merge "
+        "source=grid_flow hour_count=3 first_hour=2026-01-01T02:00:00+00:00 "
+        "last_hour=2026-01-01T04:00:00+00:00"
+    ]
+
+
+def test_history_unavailable_names_a_single_hour_in_the_singular() -> None:
+    (only,) = history_unavailable_exclusions("household_load", at(1), at(2))
+
+    assert only.causes[0].message.endswith("(1 hour), so this hour cannot be imported.")
 
 
 def test_exclusion_helpers_merge_cap_and_count() -> None:

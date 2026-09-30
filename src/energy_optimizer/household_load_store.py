@@ -15,6 +15,7 @@ from energy_optimizer.household_load_records import (
     HouseholdLoadRecord,
     as_utc,
     bounded_household_load,
+    bridge_household_load_gap,
     encode_household_records,
     household_load_exclusion_points,
     household_load_points,
@@ -77,7 +78,11 @@ class HouseholdLoadStore:
         key: ProviderDataKeyLike,
         incoming: HouseholdLoadData,
     ) -> HouseholdLoadData:
-        """Append household-load observations and compact when necessary."""
+        """Append household-load observations and compact when necessary.
+
+        Hours between the persisted history and the incoming range are appended
+        as excluded hours too, so the file itself stays contiguous.
+        """
         incoming_records = household_load_records(incoming)
         primary_path, backup_path = self._paths(key)
         try:
@@ -100,7 +105,10 @@ class HouseholdLoadStore:
                     "household-load history source identity does not match "
                     "incoming data"
                 )
-            merged = merge_household_load_history(history.model, incoming)
+            bridged = bridge_household_load_gap(history.model, incoming)
+            if bridged is not incoming:
+                incoming_records = household_load_records(bridged)
+            merged = merge_household_load_history(history.model, bridged)
             if history.ignored_incomplete_final_line:
                 self.compact(key, history.model, history.model)
                 history = HouseholdLoadHistory(
@@ -367,6 +375,7 @@ __all__ = [
     "ProviderDataKeyLike",
     "as_utc",
     "bounded_household_load",
+    "bridge_household_load_gap",
     "encode_household_records",
     "household_load_exclusion_points",
     "household_load_points",

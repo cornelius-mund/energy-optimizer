@@ -352,7 +352,11 @@ provider starts at the earliest safely derivable hour instead of requiring the
 full maximum. Later requests begin at the first hour after the final persisted
 hour, so scheduled collection never re-fetches completed hours already in the
 store. If no completed hour is missing, the scheduled cycle skips the provider
-request and persistence write.
+request and persistence write. When the service was down for longer than Home
+Assistant retains its history, the returned range starts after the persisted end;
+the hours in between can never be fetched again, so each of them is stored as an
+excluded hour with the reason `history_unavailable` (see below) and the refresh
+succeeds instead of failing on every later run.
 
 Each cycle runs in three phases so that a Home Assistant entity is downloaded at
 most once per cycle, even when several sources use it. First, every due source
@@ -386,9 +390,12 @@ and every later run requests only the completed hours after the retained history
 Each save is merged into one contiguous hourly history in the generic JSON
 provider store, with incoming values replacing overlapping hours and the oldest
 hours dropped beyond the retention limit. An excluded hour keeps its place without
-values, so it never leaves a gap. A fetched range that would leave a gap fails
-the run and keeps the last valid history for the next attempt. It uses the
-same Home Assistant energy semantics as household load and can combine multiple
+values, so it never leaves a gap. A fetched range that starts after the retained
+history ends leaves hours that Home Assistant no longer holds: each is stored as
+an excluded hour with the reason `history_unavailable`, so the retained history
+stays contiguous and later runs continue after the new end. Any other range that
+would leave a gap still fails the run and keeps the last valid history for the
+next attempt. It uses the same Home Assistant energy semantics as household load and can combine multiple
 signed entities independently for import and export. The retained history is
 served by the historic multi-asset dashboard read API (see
 [`docs/api.md`](docs/api.md)). The bootstrap only happens when no grid-flow
@@ -497,10 +504,20 @@ hour it closes. A sensor that publishes on the hour and is unavailable at
 | `soc_out_of_range` | A state of charge is outside 0 to 100 percent | As `unavailable`, for the state-of-charge entity |
 | `combined_negative`, `combined_not_finite` | The `add` and `subtract` terms of an hour give a non-finite value, or a negative value unless the aggregation takes the `positive` part | That hour |
 | `flagged_by_earlier_version` | An earlier version had flagged the hour `suspect` | That hour |
+| `history_unavailable` | Home Assistant no longer holds the hour: the service was down for longer than the recorder retains history, so the fetched range starts after the persisted end | Every hour between the persisted end and the start of the fetched range, in household load, grid flow, and battery efficiency alike |
 
 A counter that drops to zero and returns therefore excludes the hours of the drop
 and of the step back up, and the hours before and after keep their true energy.
 The set of reason codes is closed; every excluded hour lists at least one.
+
+A `history_unavailable` hour has no entity and no data point, because nothing was
+recorded for it; its message names the whole missing range. Retrying can never
+fill such a gap, so it is excluded instead of failing the run, and the persisted
+hours before it and the fetched hours after it stay unchanged. A battery-efficiency
+gap also has no state of charge: the boundaries of the missing hours, including
+the two that touch a valid hour, are unknown, so no full-charge cycle spans the
+gap. Each gap is reported by one `provider_history_unavailable` warning per source
+and refresh with the number of missing hours and their first and last hour.
 
 `maximum_interval_energy_kwh` is a per-entity setting (default `100` kWh) with the
 unit-converted maximum energy of one entity in one hour and in one counter step.

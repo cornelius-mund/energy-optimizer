@@ -116,6 +116,36 @@ def test_household_load_provider_data_is_merged_on_persistence(
     assert read_response.json() == second_response.json()
 
 
+def test_household_load_submission_after_a_gap_persists_the_gap_as_null_hours(
+    persistence_client: TestClient, household_load_request: dict[str, object]
+) -> None:
+    later = household_load_request.copy()
+    later.update(
+        {
+            "start_time": "2026-01-01T05:00:00+00:00",
+            "load_kw": [9.0],
+            "retrieved_at": "2026-01-01T06:00:00+00:00",
+            "latest_observation_at": "2026-01-01T06:00:00+00:00",
+        }
+    )
+
+    with persistence_client as client:
+        first = client.post("/api/v1/household-load", json=household_load_request)
+        second = client.post("/api/v1/household-load", json=later)
+        historic = client.get(
+            "/api/v1/historic/household-load",
+            params={
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T06:00:00+00:00",
+            },
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert historic.status_code == 200
+    assert historic.json()["load_kw"] == [1.2, 1.0, None, None, None, 9.0]
+
+
 def test_historic_household_load_returns_requested_range_and_metadata(
     persistence_client: TestClient, household_load_request: dict[str, object]
 ) -> None:

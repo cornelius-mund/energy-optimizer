@@ -19,7 +19,10 @@ from pydantic import (
     model_validator,
 )
 
-from energy_optimizer.exclusions import HourExclusion
+from energy_optimizer.exclusions import (
+    HourExclusion,
+    history_unavailable_exclusions,
+)
 from energy_optimizer.legacy_quality import legacy_exclusion
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
@@ -199,6 +202,37 @@ class HouseholdLoadHistory:
     ignored_incomplete_final_line: bool = False
 
 
+def bridge_household_load_gap(
+    existing: HouseholdLoadData,
+    incoming: HouseholdLoadData,
+) -> HouseholdLoadData:
+    """Extend ``incoming`` back to the end of ``existing`` over a gap.
+
+    When the provider no longer holds the hours between the persisted history and
+    the fetched range, retrying can never fill them. Every such hour is added to
+    ``incoming`` as an excluded hour with the reason ``history_unavailable``, so
+    the merged history stays contiguous. An incoming range that overlaps or
+    directly follows the persisted history is returned unchanged.
+    """
+    existing_end = as_utc(existing.start_time) + len(existing.load_kw) * _HOUR
+    incoming_start = as_utc(incoming.start_time)
+    if incoming_start <= existing_end:
+        return incoming
+    household_load_points(incoming)
+    gap = history_unavailable_exclusions("household_load", existing_end, incoming_start)
+    return HouseholdLoadData(
+        schema_version=incoming.schema_version,
+        start_time=existing_end,
+        interval_minutes=60,
+        load_kw=(None,) * len(gap) + incoming.load_kw,
+        unit=incoming.unit,
+        source=incoming.source,
+        retrieved_at=incoming.retrieved_at,
+        latest_observation_at=incoming.latest_observation_at,
+        exclusions=gap + incoming.exclusions,
+    )
+
+
 def merge_household_load_history(
     existing: HouseholdLoadData,
     incoming: HouseholdLoadData,
@@ -207,8 +241,10 @@ def merge_household_load_history(
 
     An incoming hour replaces the stored one completely: its value and its
     exclusion. Excluded hours stay in the series without a value, so the hours
-    remain contiguous.
+    remain contiguous. Hours that lie between the persisted history and the
+    incoming range are excluded as ``history_unavailable``.
     """
+    incoming = bridge_household_load_gap(existing, incoming)
     existing_points = household_load_points(existing)
     incoming_points = household_load_points(incoming)
     points = existing_points | incoming_points
