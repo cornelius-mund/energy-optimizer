@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, Literal
 
 from fastapi import Request
+from pydantic import TypeAdapter
 
 from energy_optimizer.api.historic import HistoricReadContext
 from energy_optimizer.api.routers.context import (
@@ -28,9 +29,10 @@ from energy_optimizer.api.schemas import (
     ExclusionCause,
 )
 from energy_optimizer.exclusions import HourExclusion, exclusion_summary
+from energy_optimizer.providers.home_assistant_energy_history import EnergyHistoryData
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStoreError
 
-ExcludedSource = Literal["household_load", "grid_flow", "battery_efficiency"]
+ExcludedSource = str
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,12 @@ def read_excluded_hours(
         "battery_efficiency": _read_battery_efficiency,
     }
     reads: dict[ExcludedSource, _SourceRead] = {}
+    for source in context.configuration.configured_energy_histories():
+
+        def read(context: HistoricReadContext, source: str = source) -> _SourceRead:
+            return _read_energy_history(context, source)
+
+        readers[source] = read
     for source, reader in readers.items():
         try:
             reads[source] = reader(context)
@@ -108,6 +116,20 @@ def read_excluded_hours(
             for source, item in hours
         ],
     )
+
+
+def _read_energy_history(context: HistoricReadContext, source: str) -> _SourceRead:
+    if context.store is None:
+        return _SourceRead(
+            "unavailable", "energy history persistence is not configured"
+        )
+    data = context.store.load(
+        ProviderDataKey("energy-history", "home-assistant", source),
+        TypeAdapter(EnergyHistoryData),
+    )
+    if data is None:
+        return _SourceRead("unavailable", "no imported energy history is available")
+    return _SourceRead("available", exclusions=_in_range(data.exclusions, context))
 
 
 def _in_range(

@@ -28,6 +28,7 @@ from energy_optimizer.api.routers.provider import (
 )
 from energy_optimizer.api.schemas import DashboardSeries, SourceMetadata
 from energy_optimizer.api.series import align_hourly_values
+from energy_optimizer.appliances import account_loads
 from energy_optimizer.config import Configuration
 from energy_optimizer.history_merge import grid_flow_points, price_points
 from energy_optimizer.providers.interfaces import BatteryEfficiencyHistoryData
@@ -483,4 +484,91 @@ def read_historic_assets(context: HistoricReadContext) -> list[HistoricAssetResu
                     error,
                 )
             )
+    from energy_optimizer.api.routers.appliances import energy_history
+
+    configuration = context.configuration
+    sources = configuration.configured_energy_histories()
+    # Configured generic sources supersede fixed absent-asset placeholders.
+    configured_names = {source.split(".", 1)[1] for source in sources}
+    results = [
+        result
+        for result in results
+        if not (
+            result.status == "not_configured"
+            and result.asset in configured_names
+            and result.asset in {"heat_pump", "electric_vehicle", "pv_generation"}
+        )
+    ]
+    appliance_series: dict[str, DashboardSeries] = {}
+    for source_id in sources:
+        try:
+            item = energy_history(
+                context.request, source_id, context.start, context.end
+            )
+            results.append(_result(source_id, source_id, [item]))
+            if source_id.startswith("appliance."):
+                appliance_series[source_id.removeprefix("appliance.")] = item
+        except HTTPException as error:
+            results.append(
+                HistoricAssetResult(
+                    source_id,
+                    "invalid" if error.status_code == 503 else "unavailable",
+                    reason=str(error.detail),
+                )
+            )
+    if configuration.appliances:
+        household = next(
+            (
+                item
+                for result in results
+                for item in result.series
+                if item.id == "household_load_actual"
+            ),
+            None,
+        )
+        if household is not None:
+            residual: list[float | None] = []
+            total: list[float | None] = []
+            for index, power in enumerate(household.values):
+                unmanaged, combined = account_loads(
+                    power,
+                    [
+                        (
+                            appliance.included_in_household_load,
+                            appliance_series[name].values[index]
+                            if name in appliance_series
+                            else None,
+                        )
+                        for name, appliance in configuration.appliances.items()
+                    ],
+                )
+                residual.append(unmanaged)
+                total.append(combined)
+            derived = [
+                household.model_copy(
+                    update={
+                        "id": name,
+                        "data_type": name.removesuffix("_actual"),
+                        "values": values,
+                        "source": None,
+                        "freshness": "stale"
+                        if household.freshness == "stale"
+                        or any(
+                            item.freshness == "stale"
+                            for item in appliance_series.values()
+                        )
+                        else "unknown",
+                        "missing_intervals": [
+                            time
+                            for time, value in zip(household.timestamps, values)
+                            if value is None
+                        ],
+                    }
+                )
+                for name, values in (
+                    ("unmanaged_household_load_actual", residual),
+                    ("total_consumption_actual", total),
+                )
+            ]
+            results.append(_result("load_accounting", "accounted consumption", derived))
     return results

@@ -32,7 +32,7 @@ def dashboard_redirect() -> RedirectResponse:
 
 @router.post("/optimize", response_model=OptimizationResponse)
 def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
-    """Validate an hourly optimization request at the versioned API boundary."""
+    """Validate hourly inputs; schedule optimization is not implemented."""
     return OptimizationResponse(
         status="validated",
         start_time=request.start_time,

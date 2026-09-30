@@ -2,9 +2,11 @@
 
 This document describes the architecture and the boundaries used for maintainable
 vertical slices. Package names may evolve as the energy and asset models become
-better understood. Every module below has a current runtime role, except the
-planned `optimization/` package, which does not exist yet: `POST /optimize` only
-validates its request. The `application` and `domain` layers named below are
+better understood. `appliances.py` defines general electrical capabilities and
+household accounting. Energy history uses shared Home Assistant history needs
+and counter aggregation for appliances, household load, and arbitrary sources.
+`POST /optimize` validates inputs only; schedule optimization is not implemented.
+The `application` and `domain` layers named below are
 boundaries without a package of their own.
 
 ## Package Structure
@@ -43,7 +45,7 @@ src/energy_optimizer/
 ├── history_merge.py          # Merge and retention rules for grid-flow and price history
 ├── household_load_store.py   # Append-friendly household-load NDJSON storage
 ├── storage_errors.py         # Storage error contract
-└── optimization/             # Planned, not yet present: model.py, solver.py, results.py (see Optimization)
+└── appliances.py              # Electrical capabilities and load accounting
 ```
 
 Generic storage delegates household-load history to its own NDJSON module, and

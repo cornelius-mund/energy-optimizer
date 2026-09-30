@@ -21,6 +21,10 @@ from energy_optimizer.household_load_records import (
 )
 from energy_optimizer.household_load_store import HouseholdLoadStore
 from energy_optimizer.legacy_quality import upgrade_legacy_quality
+from energy_optimizer.providers.home_assistant_energy_history import (
+    EnergyHistoryData,
+    merge_energy_history,
+)
 from energy_optimizer.providers.interfaces import (
     HOUSEHOLD_LOAD_MAX_VALUES,
     GridFlowData,
@@ -126,6 +130,13 @@ class ProviderDataStore:
         self, key: ProviderDataKey, adapter: TypeAdapter[ModelT], model: ModelT
     ) -> ModelT:
         """Replace the primary file, keeping a valid previous version as backup."""
+        if isinstance(model, EnergyHistoryData):
+            model = cast(
+                ModelT,
+                merge_energy_history(
+                    cast(EnergyHistoryData | None, self.load(key, adapter)), model
+                ),
+            )
         if isinstance(model, GridFlowData) and key.data_type == "grid-flow":
             try:
                 model = cast(

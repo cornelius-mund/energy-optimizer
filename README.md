@@ -1,5 +1,12 @@
 # Energy Optimizer
 
+General appliances (including heat pumps) have configurable household-load
+inclusion and continuous or discrete power capabilities. Their measured energy
+history uses the shared Home Assistant counter-history pipeline, also available
+for arbitrary energy sources such as PV. See the
+[appliance reference](docs/api.md#appliances-and-general-energy-history) and
+`config.example.yaml`. Schedule optimization is not implemented.
+
 An open-source web service for optimizing the energy usage of a single-family
 house. It optimizes the interaction between household electrical load,
 photovoltaic generation, electricity grid import and export, battery storage,

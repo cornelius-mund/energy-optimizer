@@ -16,7 +16,7 @@ MAX_HORIZON_HOURS = 87_672
 
 
 class _StrictModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class HourlyOptimizationRequest(_StrictModel):
@@ -447,14 +447,14 @@ class ExcludedHour(_StrictModel):
     """One excluded hour of one source."""
 
     hour_start: datetime = Field(description="UTC start of the excluded hour")
-    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    source: str = Field(min_length=1)
     causes: list[ExclusionCause] = Field(min_length=1)
 
 
 class ExcludedHoursSource(_StrictModel):
     """Whether one source could be read, and how many hours it excluded."""
 
-    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    source: str = Field(min_length=1)
     status: Literal["available", "not_configured", "unavailable", "invalid"] = Field(
         description=(
             "available: persisted history was read; not_configured: the "
@@ -469,7 +469,7 @@ class ExcludedHoursSource(_StrictModel):
 class ExcludedHoursSummary(_StrictModel):
     """The number of excluded hours of one source for one reason."""
 
-    source: Literal["household_load", "grid_flow", "battery_efficiency"]
+    source: str = Field(min_length=1)
     reason: ExclusionReason
     excluded_hour_count: int = Field(
         ge=1, description="Hours with this reason; an hour counts once per reason"

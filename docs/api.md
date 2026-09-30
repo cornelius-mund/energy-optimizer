@@ -15,14 +15,92 @@ details; each section lists only its additional 422 causes.
 
 ## Hourly optimization API
 
-`POST /optimize` validates an hourly request: a timezone-aware `start_time`,
+`POST /optimize` validates hourly inputs only: a timezone-aware `start_time`,
 `interval_minutes: 60`, and equally sized series of `load_kw`, `pv_generation_kw`,
 `import_price_eur_per_kwh`, and `export_price_eur_per_kwh`, with one value per hour
-from one to 168 hours, in kW or EUR/kWh as named by their fields. A valid request
-returns a `validated` response containing the horizon metadata; invalid JSON or
-values return HTTP 422 with field-level validation details. The endpoint is the API
-boundary for the optimizer; solver schedule results will be added by a later
-vertical slice.
+from one to 168 hours, in kW or EUR/kWh as named by their fields. It returns
+`status: "validated"`, `start_time`, `interval_minutes` and `hours`. There is no
+solver, schedule, objective or appliance energy requirement. Invalid inputs
+return 422.
+
+## Appliances and general energy history
+
+Heat pumps and other manageable appliances use the same installation-specific
+configuration and API contract:
+
+```yaml
+appliances:
+  heat_pump:
+    name: Heat pump
+    included_in_household_load: true
+    maximum_power_kw: 3
+    control: discrete
+    power_levels: [0, 0.3, 0.6, 1]
+    history:
+      terms:
+        - operation: add
+          entities:
+            - entity_id: sensor.heat_pump_energy
+              state_class: total_increasing
+              unit: kWh
+```
+
+`included_in_household_load` is required and refers to the **configured household
+series**, after any explicitly configured signed aggregation. Set it to false
+when that series excludes the appliance, including when its meter was already
+subtracted. Set it to true when the household series includes its consumption.
+The original household series and appliance history are preserved.
+
+Dashboard actuals additionally provide `unmanaged_household_load_actual` =
+household minus included appliances, and `total_consumption_actual` = household
+plus additional appliances. Thus each load is counted once. Missing appliance
+observations propagate to affected derived values as null gaps; an inconsistent
+negative unmanaged remainder also becomes a gap, never a fabricated zero.
+Appliance histories must describe disjoint physical loads for this accounting.
+
+`control: continuous` supports any power from zero to `maximum_power_kw` and
+must omit `power_levels`. `control: discrete` requires a unique ascending list
+of finite fractions between 0 and 1, starting at 0 and ending at 1. `[0, 1]`
+is on/off; `[0, 0.3, 0.6, 1]` with a 3 kW maximum is 0, 0.9, 1.8 and 3 kW.
+Maximum power must be finite, positive and at most 1000 kW. These describe
+controllable setpoints, not restrictions on measured hourly averages. There is
+no scheduling or actuator execution in this contract.
+
+`GET /api/v1/appliances` lists capabilities keyed by appliance ID.
+`POST /api/v1/appliances/validate` validates a capabilities object (the fields
+above excluding `history`); unknown fields, missing values or invalid control
+combinations return 422. IDs use lowercase letters, digits and underscores,
+start with a letter and have at most 64 characters. History is optional, so an
+appliance can be defined before a meter exists.
+
+All measured energy history uses `EnergyAggregate` and the shared
+`HomeAssistantHistoryImporter`, just like household load and grid flow. There
+is no heat-pump-specific snapshot importer or remaining-energy sensor. Counter
+units Wh/kWh/MWh normalize to hourly average kW. Resets, unavailable or malformed
+values, unit mismatches, physical plausibility limits and unavailable retained
+history use the existing exclusion rules. Counter history is actual measured
+consumption, not a forecast. Unknown hours remain null with exclusion causes.
+
+Configure arbitrary non-appliance sources under
+`home_assistant.energy_history.<id>` using the same signed aggregation, for
+example PV production or another household measurement. Enable polling using
+`orchestration.sources.appliance.<id>` for appliances and
+`orchestration.sources.history.<id>` for generic sources (these are dotted
+**source keys**, as shown in `config.example.yaml`). Connection URL, credentials,
+timeouts, freshness, polling interval and history lookback are shared settings.
+Every distinct counter is imported once per cycle and shared across all planned
+sources. First import bootstraps retained history up to ten years; subsequent
+imports continue from the checkpoint and retain earlier hours. Failed retrieval
+keeps the last valid history. Provider authentication errors identify the token
+problem without exposing it.
+
+`GET /api/v1/energy-history/{source_id}?start_time=...&end_time=...` reads a
+source such as `appliance.heat_pump` or `history.pv_generation` using the common
+dashboard series envelope. Ranges are half-open and UTC-hour aligned; timestamps
+require offsets. Responses include aligned values, source, coverage, retrieval
+time, freshness and missing intervals. Unknown or not-yet-imported sources
+return 404; unavailable persistence or corrupt data returns 503. Imported sources
+also appear in dashboard **actuals** with IDs `<source_id>_actual`.
 
 ## Electricity-price API
 
@@ -349,8 +427,9 @@ ID rather than returned to clients. The dashboard endpoint reports these states 
 the response body (HTTP 200); `GET /api/v1/historic/household-load` keeps
 returning HTTP 503 for corrupt household-load persistence.
 
-PV-generation actuals, electric-vehicle, and heat-pump history are reported as
-`not_configured` until an importer for them persists normalized history. PV
+PV-generation, electric-vehicle, and heat-pump placeholders are `not_configured`
+unless their IDs have a configured general energy/appliance history source;
+those sources return measured actuals through the common history pipeline. PV
 forecasts are available through `scenario_kind=forecast`. A new importer only
 needs to register a loader in `energy_optimizer.api.historic`; the envelope does
 not change.

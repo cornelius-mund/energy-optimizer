@@ -1,6 +1,22 @@
 # Copy this file to config.yaml and adjust values for the deployment.
 time_resolution_minutes: 60
 
+# Fractions of maximum power: [0, 1] is on/off. Continuous control omits levels.
+appliances:
+  heat_pump:
+    name: Heat pump
+    included_in_household_load: true
+    maximum_power_kw: 3
+    control: discrete
+    power_levels: [0, 0.3, 0.6, 1]
+    history:
+      terms:
+        - operation: add
+          entities:
+            - entity_id: sensor.heat_pump_energy
+              state_class: total_increasing
+              unit: kWh
+
 # IANA time zone in which the dashboard shows and accepts times. Data, API
 # timestamps, and stored records always stay in UTC. Use the exact, case-sensitive
 # name; the default is UTC. Only zones whose UTC offset is a whole number of hours
@@ -45,6 +61,14 @@ orchestration:
     battery:
       enabled: true
       interval_seconds: 300
+    appliance.heat_pump:
+      enabled: true
+      interval_seconds: 3600
+      history_lookback_seconds: 3600
+    history.pv_generation:
+      enabled: true
+      interval_seconds: 3600
+      history_lookback_seconds: 3600
     battery_efficiency:
       enabled: true
       interval_seconds: 86400
@@ -104,6 +128,15 @@ awattar:
 home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token
+  # Any measured energy source uses the same aggregation and history pipeline.
+  energy_history:
+    pv_generation:
+      terms:
+        - operation: add
+          entities:
+            - entity_id: sensor.pv_energy
+              state_class: total_increasing
+              unit: kWh
   household_load:
     terms:
       - operation: add
