@@ -370,6 +370,7 @@ Missing hours are never interpolated or replaced by zero.
 | Series id | Data type | Unit | Source |
 | --- | --- | --- | --- |
 | `household_load_actual` | `household_load` | `kW` | Home Assistant household-load history |
+| `pv_generation_actual` | `pv_generation` | `kW` | Home Assistant measured PV-generation history |
 | `grid_import_actual`, `grid_export_actual` | `grid_import`, `grid_export` | `kW` | Home Assistant grid-flow history |
 | `import_price_actual`, `export_price_actual` | `import_price`, `export_price` | `EUR/kWh` | Retained aWATTar market-price history |
 | `battery_state_of_charge_actual` | `battery_state_of_charge` | `%` | Retained battery state-of-charge history |
@@ -427,10 +428,17 @@ ID rather than returned to clients. The dashboard endpoint reports these states 
 the response body (HTTP 200); `GET /api/v1/historic/household-load` keeps
 returning HTTP 503 for corrupt household-load persistence.
 
-PV-generation, electric-vehicle, and heat-pump placeholders are `not_configured`
-unless their IDs have a configured general energy/appliance history source;
-those sources return measured actuals through the common history pipeline. PV
-forecasts are available through `scenario_kind=forecast`. A new importer only
+PV actuals are returned as `pv_generation_actual` when
+`home_assistant.pv_generation` is configured and the `pv_generation_history`
+orchestration source has persisted measured history. The source is
+`home-assistant` / `pv_generation`; hourly UTC values are kW, with excluded hours
+represented by null and listed in `missing_intervals`. Exclusion details are
+available through `/api/v1/dashboard/excluded-hours` under
+`pv_generation_history`. The retained record uses `generation_kw`,
+`latest_observation_at`, `retrieved_at` and explicit `scenario_kind: actual`.
+Electric-vehicle and heat-pump placeholders remain `not_configured` until a
+dedicated importer exists. General energy/appliance history is served separately.
+PV forecasts are available through `scenario_kind=forecast`. A new importer only
 needs to register a loader in `energy_optimizer.api.historic`; the envelope does
 not change.
 
@@ -451,7 +459,7 @@ Example (abridged) for a two-hour range with household load and grid flow:
   "assets": [
     {"asset": "household_load", "status": "available", "series_ids": ["household_load_actual"], "reason": null},
     {"asset": "pv_generation", "status": "not_configured", "series_ids": [],
-     "reason": "no historic PV-generation importer is available; PV forecasts are served by scenario_kind=forecast"},
+     "reason": "no Home Assistant PV-generation entities are configured"},
     {"asset": "grid_flow", "status": "unavailable", "series_ids": [],
      "reason": "no persisted grid-flow data is available yet"}
   ],
@@ -585,7 +593,8 @@ source and reason, and every excluded hour in ascending order:
 }
 ```
 
-- `source` is `household_load`, `grid_flow`, or `battery_efficiency`. Grid import and
+- `source` is `household_load`, `grid_flow`, `pv_generation_history`,
+  `battery_efficiency`, or a configured general energy/appliance source. Grid import and
   export are excluded together, and an hour excluded in any battery-efficiency leg
   or in the state of charge is excluded in all of them. An hour with the reason
   `history_unavailable` is excluded in the same way in every source that held

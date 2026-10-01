@@ -345,6 +345,7 @@ class HomeAssistantConfiguration(_StrictModel):
     base_url: AnyHttpUrl
     token: SecretStr
     household_load: EnergyAggregateConfiguration | None = None
+    pv_generation: EnergyAggregateConfiguration | None = None
     grid_import: EnergyAggregateConfiguration | None = None
     grid_export: EnergyAggregateConfiguration | None = None
     battery: HomeAssistantBatteryConfiguration | None = None

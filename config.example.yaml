@@ -65,7 +65,7 @@ orchestration:
       enabled: true
       interval_seconds: 3600
       history_lookback_seconds: 3600
-    history.pv_generation:
+    pv_generation_history:
       enabled: true
       interval_seconds: 3600
       history_lookback_seconds: 3600
@@ -129,14 +129,15 @@ home_assistant:
   base_url: http://homeassistant.local:8123
   token: replace-with-a-long-lived-access-token
   # Any measured energy source uses the same aggregation and history pipeline.
-  energy_history:
-    pv_generation:
-      terms:
-        - operation: add
-          entities:
-            - entity_id: sensor.pv_energy
-              state_class: total_increasing
-              unit: kWh
+  # Measured PV actuals; distinct from the Forecast.Solar pv_generation source.
+  pv_generation:
+    terms:
+      - operation: add
+        entities:
+          - entity_id: sensor.pv_energy
+            state_class: total_increasing
+            unit: kWh
+            maximum_interval_energy_kwh: 8
   household_load:
     terms:
       - operation: add

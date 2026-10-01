@@ -178,6 +178,7 @@
     export_price_actual: "Export price",
     battery_state_of_charge_actual: "Battery state of charge",
     pv_generation_forecast: "PV generation",
+    pv_generation_actual: "PV generation",
     import_price_forecast: "Import price",
     export_price_forecast: "Export price",
     inverter_charge_efficiency_actual: "Inverter charge efficiency",
@@ -188,6 +189,7 @@
   const assetLabel = (asset) => ({
     household_load: "Household load",
     pv_generation: "PV generation",
+    pv_generation_history: "PV generation history",
     grid_flow: "Grid import and export",
     electricity_prices: "Electricity prices",
     battery: "Battery state",
@@ -257,7 +259,7 @@
   };
   const chartSeries = (series) => ({
     power: series.filter((item) => [
-      "household_load_actual", "grid_import_actual", "grid_export_actual", "pv_generation_forecast",
+      "household_load_actual", "grid_import_actual", "grid_export_actual", "pv_generation_actual", "pv_generation_forecast",
     ].includes(item.id)),
     price: series.filter((item) => [
       "import_price_forecast", "export_price_forecast", "import_price_actual", "export_price_actual",
@@ -321,6 +323,7 @@
     grid_export_actual: "series-2",
     battery_state_of_charge_actual: "series-0",
     pv_generation_forecast: "series-0",
+    pv_generation_actual: "series-3",
     import_price_forecast: "series-1",
     export_price_forecast: "series-2",
     import_price_actual: "series-1",
@@ -538,6 +541,7 @@
   };
 
   const excludedSourceLabel = (source) => ({
+    pv_generation_history: "PV generation history",
     household_load: "Household load",
     grid_flow: "Grid import and export",
     battery_efficiency: "Battery efficiency",

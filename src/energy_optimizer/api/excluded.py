@@ -52,6 +52,7 @@ def read_excluded_hours(
     readers: dict[ExcludedSource, Callable[[HistoricReadContext], _SourceRead]] = {
         "household_load": _read_household_load,
         "grid_flow": _read_grid_flow,
+        "pv_generation_history": _read_pv_history,
         "battery_efficiency": _read_battery_efficiency,
     }
     reads: dict[ExcludedSource, _SourceRead] = {}
@@ -129,6 +130,27 @@ def _read_energy_history(context: HistoricReadContext, source: str) -> _SourceRe
     )
     if data is None:
         return _SourceRead("unavailable", "no imported energy history is available")
+    return _SourceRead("available", exclusions=_in_range(data.exclusions, context))
+
+
+def _read_pv_history(context: HistoricReadContext) -> _SourceRead:
+    from energy_optimizer.providers.home_assistant_pv import PvGenerationHistoryData
+
+    home_assistant = context.configuration.home_assistant
+    if home_assistant is None or home_assistant.pv_generation is None:
+        return _SourceRead(
+            "not_configured", "no Home Assistant PV-generation entities are configured"
+        )
+    if context.store is None:
+        return _SourceRead("unavailable", "PV-generation persistence is not configured")
+    data = context.store.load(
+        ProviderDataKey("pv-generation-history", "home-assistant", "pv_generation"),
+        TypeAdapter(PvGenerationHistoryData),
+    )
+    if data is None:
+        return _SourceRead(
+            "unavailable", "no imported PV-generation history is available"
+        )
     return _SourceRead("available", exclusions=_in_range(data.exclusions, context))
 
 
