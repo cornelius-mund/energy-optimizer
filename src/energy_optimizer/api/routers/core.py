@@ -46,7 +46,7 @@ def dashboard_redirect() -> RedirectResponse:
 def optimize(
     request: HourlyOptimizationRequest, http_request: Request
 ) -> OptimizationResponse:
-    """Calculate the cheapest schedule that supplies the household load."""
+    """Calculate the cheapest schedule for the household load and PV forecast."""
     configuration: Configuration = http_request.app.state.configuration
     plan = PLAN_SOLVER.solve(_planning_problem(request, configuration))
     return _optimization_response(request, plan)
@@ -58,8 +58,11 @@ def _planning_problem(
     return PlanningProblem(
         start_time=request.start_time,
         load_kw=tuple(request.load_kw),
+        pv_forecast_kw=tuple(request.pv_generation_kw),
         import_price_eur_per_kwh=tuple(request.import_price_eur_per_kwh),
+        export_price_eur_per_kwh=tuple(request.export_price_eur_per_kwh),
         maximum_import_kw=configuration.grid.maximum_import_kw,
+        maximum_export_kw=configuration.grid.maximum_export_kw,
         time_limit_seconds=configuration.solver.time_limit_seconds,
     )
 
@@ -77,8 +80,13 @@ def _optimization_response(
             PlannedHourResponse(
                 start_time=hour.start_time,
                 load_kw=hour.load_kw,
+                pv_generation_kw=hour.pv_generation_kw,
+                pv_self_consumption_kw=hour.pv_self_consumption_kw,
+                pv_curtailment_kw=hour.pv_curtailment_kw,
                 grid_import_kw=hour.grid_import_kw,
+                grid_export_kw=hour.grid_export_kw,
                 import_cost_eur=hour.import_cost_eur,
+                export_revenue_eur=hour.export_revenue_eur,
             )
             for hour in plan.hours
         ],

@@ -21,7 +21,7 @@ paths:
   /optimize:
     post:
       summary: Optimize
-      description: Calculate the cheapest schedule that supplies the household load.
+      description: Calculate the cheapest schedule for the household load and PV forecast.
       operationId: optimize_optimize_post
       requestBody:
         content:
@@ -1834,7 +1834,7 @@ components:
           - type: number
           - type: 'null'
           title: Objective Eur
-          description: Total import cost of the optimal plan in EUR
+          description: Import cost minus export revenue of the optimal plan in EUR
         schedule:
           items:
             $ref: '#/components/schemas/PlannedHourResponse'
@@ -1864,21 +1864,46 @@ components:
           type: number
           title: Load Kw
           description: Mandatory household load in kW
+        pv_generation_kw:
+          type: number
+          title: Pv Generation Kw
+          description: PV power that is actually used in kW
+        pv_self_consumption_kw:
+          type: number
+          title: Pv Self Consumption Kw
+          description: PV power that supplies the household load in kW
+        pv_curtailment_kw:
+          type: number
+          title: Pv Curtailment Kw
+          description: Forecast PV power that is not generated in kW
         grid_import_kw:
           type: number
           title: Grid Import Kw
-          description: Energy drawn from the grid in kW
+          description: Power drawn from the grid in kW
+        grid_export_kw:
+          type: number
+          title: Grid Export Kw
+          description: Power fed into the grid in kW
         import_cost_eur:
           type: number
           title: Import Cost Eur
           description: Import cost of the hour in EUR
+        export_revenue_eur:
+          type: number
+          title: Export Revenue Eur
+          description: Export revenue of the hour in EUR
       additionalProperties: false
       type: object
       required:
       - start_time
       - load_kw
+      - pv_generation_kw
+      - pv_self_consumption_kw
+      - pv_curtailment_kw
       - grid_import_kw
+      - grid_export_kw
       - import_cost_eur
+      - export_revenue_eur
       title: PlannedHourResponse
       description: One scheduled hour of the optimized plan.
     PvGenerationRequest:

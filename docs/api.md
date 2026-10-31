@@ -20,21 +20,29 @@ equally sized series of `load_kw`, `pv_generation_kw`, `import_price_eur_per_kwh
 and `export_price_eur_per_kwh`, with one value per hour from one to 168 hours, in
 kW or EUR/kWh as named by their fields. Invalid inputs return 422.
 
-The service supplies the mandatory `load_kw` entirely from the grid and minimizes
-the import cost with the HiGHS solver (modelled with linopy). The grid import is
-limited by `grid.maximum_import_kw` and the solver stops after
-`solver.time_limit_seconds`, both from the configuration. The PV and export series
-are validated but not yet used by the model.
+The service supplies the mandatory `load_kw` from the forecast PV generation and the
+grid and minimizes import cost minus export revenue with the HiGHS solver (modelled
+with linopy). PV use is bounded by `pv_generation_kw`; the part that is neither
+consumed nor exported is curtailed, which is chosen when the export price is
+negative or the export limit is reached. Grid import and export are limited by
+`grid.maximum_import_kw` and `grid.maximum_export_kw`, and the solver stops after
+`solver.time_limit_seconds`, all from the configuration. The grid is never used to
+import and export in the same hour, even if the export price exceeds the import
+price.
 
 The response contains `status`, `start_time`, `interval_minutes`, `hours`,
 `objective_eur`, and `schedule`:
 
-- `optimal`: `objective_eur` is the total import cost in EUR, and `schedule` holds
-  one entry per hour with `start_time`, `load_kw`, `grid_import_kw`, and
-  `import_cost_eur`. Every hour's `grid_import_kw` equals its `load_kw`.
-- `infeasible`: no plan can supply the load, for example because `load_kw`
-  exceeds `grid.maximum_import_kw` in an hour. The status is returned with HTTP 200,
-  `objective_eur` is `null`, and `schedule` is empty.
+- `optimal`: `objective_eur` is the import cost minus the export revenue in EUR, and
+  `schedule` holds one entry per hour with `start_time`, `load_kw`,
+  `pv_generation_kw` (the PV power used), `pv_self_consumption_kw` (the part of it
+  that is not exported), `pv_curtailment_kw` (forecast minus used), `grid_import_kw`,
+  `grid_export_kw`, `import_cost_eur`, and `export_revenue_eur`. Every hour
+  balances: `pv_generation_kw + grid_import_kw = load_kw + grid_export_kw`.
+- `infeasible`: no plan can supply the load, for example because the part of
+  `load_kw` that the PV forecast cannot cover exceeds `grid.maximum_import_kw` in an
+  hour. The status is returned with HTTP 200, `objective_eur` is `null`, and
+  `schedule` is empty.
 - `time_limit`: the solver stopped before proving optimality; `objective_eur` is
   `null` and `schedule` is empty.
 
