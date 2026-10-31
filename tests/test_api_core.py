@@ -43,6 +43,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 grid_export_kw=0.0,
                 import_cost_eur=0.36,
                 export_revenue_eur=0.0,
+                battery=None,
             ),
             planned_hour(
                 start_time="2026-01-01T01:00:00Z",
@@ -54,6 +55,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 grid_export_kw=0.0,
                 import_cost_eur=0.15,
                 export_revenue_eur=0.0,
+                battery=None,
             ),
         ],
     }
@@ -72,6 +74,80 @@ def test_optimize_exports_the_pv_surplus_and_credits_the_revenue(
     assert body["objective_eur"] == pytest.approx(0.20)
     assert body["schedule"][1]["grid_export_kw"] == pytest.approx(2.0)
     assert body["schedule"][1]["export_revenue_eur"] == pytest.approx(0.16)
+
+
+BATTERY = {
+    "capacity_kwh": 10.0,
+    "initial_soc_percent": 50.0,
+    "minimum_soc_percent": 0.0,
+    "maximum_soc_percent": 100.0,
+    "maximum_charge_kw": 3.0,
+    "maximum_discharge_kw": 2.0,
+    "charge_efficiency": 1.0,
+    "discharge_efficiency": 1.0,
+}
+
+
+def test_optimize_schedules_the_battery_between_cheap_and_expensive_hours(
+    client: TestClient, valid_request: dict[str, object]
+) -> None:
+    request = {
+        **valid_request,
+        "load_kw": [2.0, 2.0],
+        "pv_generation_kw": [0.0, 0.0],
+        "import_price_eur_per_kwh": [0.1, 0.5],
+        "battery": BATTERY,
+    }
+
+    with client:
+        response = client.post("/optimize", json=request)
+
+    body = response.json()
+    assert body["status"] == "optimal"
+    assert body["objective_eur"] == pytest.approx(0.4)
+    charging_hour, discharging_hour = body["schedule"]
+    assert charging_hour["battery"] == planned_hour(
+        charge_kw=2.0,
+        discharge_kw=0.0,
+        state_of_charge_kwh=7.0,
+        state_of_charge_percent=70.0,
+    ) | {"discharge_kw": pytest.approx(0.0, abs=1e-6)}
+    assert discharging_hour["battery"]["discharge_kw"] == pytest.approx(2.0)
+    assert discharging_hour["battery"]["state_of_charge_percent"] == pytest.approx(50.0)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_text"),
+    [
+        ({"initial_soc_percent": 95.0, "maximum_soc_percent": 90.0}, "initial"),
+        ({"minimum_soc_percent": 60.0}, "initial"),
+        ({"final_soc_percent": 100.0, "maximum_soc_percent": 80.0}, "final"),
+        ({"minimum_soc_percent": 90.0, "maximum_soc_percent": 10.0}, "minimum_soc"),
+        ({"charge_efficiency": 1.2}, "charge_efficiency"),
+        ({"capacity_kwh": 0}, "capacity_kwh"),
+    ],
+    ids=[
+        "initial-above-maximum",
+        "initial-below-minimum",
+        "final-above-maximum",
+        "inverted-band",
+        "efficiency-above-one",
+        "zero-capacity",
+    ],
+)
+def test_optimize_rejects_an_inconsistent_battery(
+    client: TestClient,
+    valid_request: dict[str, object],
+    override: dict[str, float],
+    expected_text: str,
+) -> None:
+    request = {**valid_request, "battery": {**BATTERY, **override}}
+
+    with client:
+        response = client.post("/optimize", json=request)
+
+    assert response.status_code == 422
+    assert expected_text in response.text
 
 
 def test_optimize_reports_a_load_above_the_import_limit_as_infeasible(

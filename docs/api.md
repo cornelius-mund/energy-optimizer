@@ -30,6 +30,19 @@ negative or the export limit is reached. Grid import and export are limited by
 import and export in the same hour, even if the export price exceeds the import
 price.
 
+An optional `battery` object adds a battery to the plan. It contains `capacity_kwh`,
+`initial_soc_percent`, `minimum_soc_percent`, `maximum_soc_percent`,
+`maximum_charge_kw`, `maximum_discharge_kw`, `charge_efficiency`, and
+`discharge_efficiency` (ratios in (0, 1]), and optionally `final_soc_percent`. The
+initial and final state of charge must lie within the minimum and maximum, otherwise
+the request is rejected with 422. The model keeps the state of charge within the
+band, applies the efficiencies when charging (stored = charged × efficiency) and
+discharging (drawn = delivered ÷ efficiency), and never charges and discharges in
+the same hour. The horizon must end with at least `final_soc_percent` (the initial
+state of charge by default), so that the plan cannot drain the battery for free in
+its last hour; a rolling plan therefore never sells the stored energy at the end of
+the horizon. The battery can be discharged to the grid.
+
 The response contains `status`, `start_time`, `interval_minutes`, `hours`,
 `objective_eur`, and `schedule`:
 
@@ -38,7 +51,11 @@ The response contains `status`, `start_time`, `interval_minutes`, `hours`,
   `pv_generation_kw` (the PV power used), `pv_self_consumption_kw` (the part of it
   that is not exported), `pv_curtailment_kw` (forecast minus used), `grid_import_kw`,
   `grid_export_kw`, `import_cost_eur`, and `export_revenue_eur`. Every hour
-  balances: `pv_generation_kw + grid_import_kw = load_kw + grid_export_kw`.
+  balances: `pv_generation_kw + grid_import_kw + battery.discharge_kw = load_kw +
+  grid_export_kw + battery.charge_kw`. With a battery, each entry also has
+  `battery` with `charge_kw`, `discharge_kw`, and the state of charge at the end of
+  the hour as `state_of_charge_kwh` and `state_of_charge_percent`; without one it is
+  `null`.
 - `infeasible`: no plan can supply the load, for example because the part of
   `load_kw` that the PV forecast cannot cover exceeds `grid.maximum_import_kw` in an
   hour. The status is returned with HTTP 200, `objective_eur` is `null`, and

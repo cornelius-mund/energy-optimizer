@@ -7,12 +7,16 @@ from energy_optimizer import __version__
 from energy_optimizer.api.schemas import (
     HourlyOptimizationRequest,
     OptimizationResponse,
+    PlannedBatteryResponse,
     PlannedHourResponse,
+    PlanningBatteryRequest,
 )
 from energy_optimizer.config import Configuration
 from energy_optimizer.optimization import (
+    BatterySpecification,
     LinopyPlanSolver,
     Plan,
+    PlannedBatteryHour,
     PlanningProblem,
     PlanSolver,
 )
@@ -64,6 +68,28 @@ def _planning_problem(
         maximum_import_kw=configuration.grid.maximum_import_kw,
         maximum_export_kw=configuration.grid.maximum_export_kw,
         time_limit_seconds=configuration.solver.time_limit_seconds,
+        battery=None if request.battery is None else _battery(request.battery),
+    )
+
+
+def _battery(battery: PlanningBatteryRequest) -> BatterySpecification:
+    def energy_kwh(percent: float) -> float:
+        return battery.capacity_kwh * percent / 100
+
+    final_percent = (
+        battery.initial_soc_percent
+        if battery.final_soc_percent is None
+        else battery.final_soc_percent
+    )
+    return BatterySpecification(
+        minimum_soc_kwh=energy_kwh(battery.minimum_soc_percent),
+        maximum_soc_kwh=energy_kwh(battery.maximum_soc_percent),
+        initial_soc_kwh=energy_kwh(battery.initial_soc_percent),
+        final_soc_kwh=energy_kwh(final_percent),
+        maximum_charge_kw=battery.maximum_charge_kw,
+        maximum_discharge_kw=battery.maximum_discharge_kw,
+        charge_efficiency=battery.charge_efficiency,
+        discharge_efficiency=battery.discharge_efficiency,
     )
 
 
@@ -87,7 +113,23 @@ def _optimization_response(
                 grid_export_kw=hour.grid_export_kw,
                 import_cost_eur=hour.import_cost_eur,
                 export_revenue_eur=hour.export_revenue_eur,
+                battery=_planned_battery(request.battery, hour.battery),
             )
             for hour in plan.hours
         ],
+    )
+
+
+def _planned_battery(
+    battery: PlanningBatteryRequest | None, planned: PlannedBatteryHour | None
+) -> PlannedBatteryResponse | None:
+    if battery is None or planned is None:
+        return None
+    return PlannedBatteryResponse(
+        charge_kw=planned.charge_kw,
+        discharge_kw=planned.discharge_kw,
+        state_of_charge_kwh=planned.state_of_charge_kwh,
+        state_of_charge_percent=planned.state_of_charge_kwh
+        / battery.capacity_kwh
+        * 100,
     )
