@@ -5,7 +5,8 @@ vertical slices. Package names may evolve as the energy and asset models become
 better understood. `appliances.py` defines general electrical capabilities and
 household accounting. Energy history uses shared Home Assistant history needs
 and counter aggregation for appliances, household load, and arbitrary sources.
-`POST /optimize` validates inputs only; schedule optimization is not implemented.
+`POST /optimize` solves the household-load schedule; PV, export, battery, and
+appliance scheduling are not implemented yet.
 The `application` and `domain` layers named below are
 boundaries without a package of their own.
 
@@ -26,6 +27,10 @@ src/energy_optimizer/
 │   ├── validation.py         # Shared HTTP validation helpers
 │   └── routers/              # Core, provider, and dashboard route groups
 ├── config.py                 # YAML loading and validated runtime settings
+├── optimization/
+│   ├── problem.py            # Solver-independent problem and plan types
+│   ├── solver.py             # PlanSolver port used by the application
+│   └── linopy_solver.py      # linopy and HiGHS implementation of the port
 ├── orchestration.py          # Scheduled provider retrieval and plan triggers
 ├── providers/
 │   ├── interfaces.py         # Provider-independent normalized data models
@@ -75,7 +80,7 @@ storage -> validated provider-independent data models
   optimization availability, persist successful normalized results, and trigger a
   plan from a coherent snapshot once an optimizer is configured.
 - `domain` contains provider- and framework-independent energy concepts. It should
-  not import FastAPI, Pyomo, HiGHS, or vendor clients.
+  not import FastAPI, linopy, HiGHS, or vendor clients.
 - `providers.interfaces` defines the data required by the application. Concrete
   provider adapters (see Providers) return normalized domain data before
   optimization sees it.

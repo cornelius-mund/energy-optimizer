@@ -294,7 +294,8 @@ Before completing work:
 - Use `uv run ruff` for linting and formatting.
 - Use `uv run mypy` for static type checking.
 - Keep MILP test cases small and deterministic.
-- Use `Pyomo` with `highspy` for optimization-model tests.
+- Use `linopy` with `highspy` (HiGHS) for the optimization model and its tests. Keep
+  the model behind the `PlanSolver` port so the modelling library can be replaced.
 - Assert energy balances and relevant constraint behavior.
 - Use numeric tolerances for floating-point values.
 - Test solver status explicitly, including infeasible models.

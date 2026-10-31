@@ -5,7 +5,9 @@ inclusion and continuous or discrete power capabilities. Their measured energy
 history uses the shared Home Assistant counter-history pipeline, also available
 for arbitrary energy sources such as PV. See the
 [appliance reference](docs/api.md#appliances-and-general-energy-history) and
-`config.example.yaml`. Schedule optimization is not implemented.
+`config.example.yaml`. `POST /optimize` calculates the cheapest schedule for the
+household load supplied from the grid; PV, export, battery, and appliance
+scheduling are not implemented yet.
 
 An open-source web service for optimizing the energy usage of a single-family
 house. It optimizes the interaction between household electrical load,
@@ -20,7 +22,7 @@ The service should calculate an energy schedule that minimizes total energy cost
 while respecting the technical constraints of the connected assets. It is
 designed to support input and output through HTTP APIs, YAML-based configuration,
 containerized deployment with Docker, and mixed-integer linear programming (MILP)
-optimization with HiGHS as the open-source MILP solver.
+optimization with HiGHS as the open-source MILP solver, modelled with linopy.
 
 ## Planned Architecture
 

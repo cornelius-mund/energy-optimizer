@@ -622,10 +622,26 @@ class GridFlowResponse(_StrictModel):
     latest_observation_at: datetime
 
 
-class OptimizationResponse(_StrictModel):
-    """Response returned after an hourly request passes API validation."""
+class PlannedHourResponse(_StrictModel):
+    """One scheduled hour of the optimized plan."""
 
-    status: Literal["validated"]
+    start_time: datetime
+    load_kw: float = Field(description="Mandatory household load in kW")
+    grid_import_kw: float = Field(description="Energy drawn from the grid in kW")
+    import_cost_eur: float = Field(description="Import cost of the hour in EUR")
+
+
+class OptimizationResponse(_StrictModel):
+    """Plan calculated for a validated hourly request.
+
+    The schedule is present only when the solver proved the plan optimal.
+    """
+
+    status: Literal["optimal", "infeasible", "time_limit"]
     start_time: datetime
     interval_minutes: Literal[60]
     hours: int = Field(ge=1, le=168)
+    objective_eur: float | None = Field(
+        description="Total import cost of the optimal plan in EUR"
+    )
+    schedule: list[PlannedHourResponse]

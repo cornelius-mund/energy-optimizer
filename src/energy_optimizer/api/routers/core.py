@@ -1,12 +1,24 @@
 """Core HTTP API routes."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import RedirectResponse
 
 from energy_optimizer import __version__
-from energy_optimizer.api.schemas import HourlyOptimizationRequest, OptimizationResponse
+from energy_optimizer.api.schemas import (
+    HourlyOptimizationRequest,
+    OptimizationResponse,
+    PlannedHourResponse,
+)
+from energy_optimizer.config import Configuration
+from energy_optimizer.optimization import (
+    LinopyPlanSolver,
+    Plan,
+    PlanningProblem,
+    PlanSolver,
+)
 
 router = APIRouter()
+PLAN_SOLVER: PlanSolver = LinopyPlanSolver()
 
 
 @router.get("/health")
@@ -31,11 +43,43 @@ def dashboard_redirect() -> RedirectResponse:
 
 
 @router.post("/optimize", response_model=OptimizationResponse)
-def optimize(request: HourlyOptimizationRequest) -> OptimizationResponse:
-    """Validate hourly inputs; schedule optimization is not implemented."""
+def optimize(
+    request: HourlyOptimizationRequest, http_request: Request
+) -> OptimizationResponse:
+    """Calculate the cheapest schedule that supplies the household load."""
+    configuration: Configuration = http_request.app.state.configuration
+    plan = PLAN_SOLVER.solve(_planning_problem(request, configuration))
+    return _optimization_response(request, plan)
+
+
+def _planning_problem(
+    request: HourlyOptimizationRequest, configuration: Configuration
+) -> PlanningProblem:
+    return PlanningProblem(
+        start_time=request.start_time,
+        load_kw=tuple(request.load_kw),
+        import_price_eur_per_kwh=tuple(request.import_price_eur_per_kwh),
+        maximum_import_kw=configuration.grid.maximum_import_kw,
+        time_limit_seconds=configuration.solver.time_limit_seconds,
+    )
+
+
+def _optimization_response(
+    request: HourlyOptimizationRequest, plan: Plan
+) -> OptimizationResponse:
     return OptimizationResponse(
-        status="validated",
+        status=plan.status.value,
         start_time=request.start_time,
         interval_minutes=request.interval_minutes,
         hours=len(request.load_kw),
+        objective_eur=plan.objective_eur,
+        schedule=[
+            PlannedHourResponse(
+                start_time=hour.start_time,
+                load_kw=hour.load_kw,
+                grid_import_kw=hour.grid_import_kw,
+                import_cost_eur=hour.import_cost_eur,
+            )
+            for hour in plan.hours
+        ],
     )

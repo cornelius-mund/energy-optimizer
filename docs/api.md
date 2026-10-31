@@ -15,13 +15,30 @@ details; each section lists only its additional 422 causes.
 
 ## Hourly optimization API
 
-`POST /optimize` validates hourly inputs only: a timezone-aware `start_time`,
-`interval_minutes: 60`, and equally sized series of `load_kw`, `pv_generation_kw`,
-`import_price_eur_per_kwh`, and `export_price_eur_per_kwh`, with one value per hour
-from one to 168 hours, in kW or EUR/kWh as named by their fields. It returns
-`status: "validated"`, `start_time`, `interval_minutes` and `hours`. There is no
-solver, schedule, objective or appliance energy requirement. Invalid inputs
-return 422.
+`POST /optimize` accepts a timezone-aware `start_time`, `interval_minutes: 60`, and
+equally sized series of `load_kw`, `pv_generation_kw`, `import_price_eur_per_kwh`,
+and `export_price_eur_per_kwh`, with one value per hour from one to 168 hours, in
+kW or EUR/kWh as named by their fields. Invalid inputs return 422.
+
+The service supplies the mandatory `load_kw` entirely from the grid and minimizes
+the import cost with the HiGHS solver (modelled with linopy). The grid import is
+limited by `grid.maximum_import_kw` and the solver stops after
+`solver.time_limit_seconds`, both from the configuration. The PV and export series
+are validated but not yet used by the model.
+
+The response contains `status`, `start_time`, `interval_minutes`, `hours`,
+`objective_eur`, and `schedule`:
+
+- `optimal`: `objective_eur` is the total import cost in EUR, and `schedule` holds
+  one entry per hour with `start_time`, `load_kw`, `grid_import_kw`, and
+  `import_cost_eur`. Every hour's `grid_import_kw` equals its `load_kw`.
+- `infeasible`: no plan can supply the load, for example because `load_kw`
+  exceeds `grid.maximum_import_kw` in an hour. The status is returned with HTTP 200,
+  `objective_eur` is `null`, and `schedule` is empty.
+- `time_limit`: the solver stopped before proving optimality; `objective_eur` is
+  `null` and `schedule` is empty.
+
+A solver result that is neither of these is an unexpected error and returns HTTP 500.
 
 ## Appliances and general energy history
 
