@@ -1,0 +1,191 @@
+"""Turn the persisted provider snapshot into a stored optimized plan."""
+
+import logging
+import math
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from pydantic import TypeAdapter
+
+from energy_optimizer.config import Configuration
+from energy_optimizer.optimization.linopy_solver import LinopyPlanSolver
+from energy_optimizer.optimization.problem import (
+    BatterySpecification,
+    Kilowatt,
+    Plan,
+    PlanningProblem,
+)
+from energy_optimizer.optimization.solver import PlanSolver
+from energy_optimizer.orchestration import ProviderDataSnapshot
+from energy_optimizer.providers.interfaces import (
+    BatteryData,
+    ElectricityPriceData,
+    HouseholdLoadData,
+    PvGenerationData,
+)
+from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
+
+logger = logging.getLogger(__name__)
+
+LOAD_FORECAST_DAYS = 7
+ONE_HOUR = timedelta(hours=1)
+PLAN_KEY = ProviderDataKey("optimization-plan", "energy-optimizer", "current")
+
+
+class PlanGenerationError(RuntimeError):
+    """Raised when the snapshot cannot produce a stored optimal plan."""
+
+
+@dataclass(frozen=True)
+class PlanSnapshot:
+    """The latest optimal plan and what is needed to present it."""
+
+    created_at: datetime
+    start_time: datetime
+    battery_capacity_kwh: float | None
+    plan: Plan
+
+
+PLAN_ADAPTER = TypeAdapter(PlanSnapshot)
+
+
+def load_forecast_kw(
+    history: HouseholdLoadData, hour_starts: list[datetime], time_zone: ZoneInfo
+) -> tuple[Kilowatt, ...]:
+    """Forecast each hour as the mean of that local hour over the last seven days.
+
+    This is a deliberately simple baseline; hours excluded from the history do
+    not contribute and an hour of day without any sample is an error.
+    """
+    history_end = history.start_time + ONE_HOUR * len(history.load_kw)
+    window_start = history_end - timedelta(days=LOAD_FORECAST_DAYS)
+    samples_by_hour: dict[int, list[float]] = defaultdict(list)
+    for index, load_kw in enumerate(history.load_kw):
+        hour_start = history.start_time + ONE_HOUR * index
+        if load_kw is not None and hour_start >= window_start:
+            samples_by_hour[hour_start.astimezone(time_zone).hour].append(load_kw)
+    forecast: list[Kilowatt] = []
+    for hour_start in hour_starts:
+        samples = samples_by_hour.get(hour_start.astimezone(time_zone).hour)
+        if not samples:
+            raise PlanGenerationError(
+                "the household-load history has no sample for local hour "
+                f"{hour_start.astimezone(time_zone).hour} in the last "
+                f"{LOAD_FORECAST_DAYS} days"
+            )
+        forecast.append(math.fsum(samples) / len(samples))
+    return tuple(forecast)
+
+
+def battery_specification(battery: BatteryData) -> BatterySpecification:
+    """Split the battery round trip evenly between charging and discharging."""
+    leg_efficiency = math.sqrt(battery.battery_efficiency)
+    return BatterySpecification(
+        minimum_soc_kwh=battery.minimum_soc_kwh,
+        maximum_soc_kwh=battery.maximum_soc_kwh,
+        initial_soc_kwh=battery.initial_soc_kwh,
+        final_soc_kwh=battery.initial_soc_kwh,
+        maximum_charge_kw=battery.maximum_charge_kw,
+        maximum_discharge_kw=battery.maximum_discharge_kw,
+        charge_efficiency=leg_efficiency,
+        discharge_efficiency=leg_efficiency,
+    )
+
+
+def planning_horizon(
+    prices: ElectricityPriceData, pv: PvGenerationData
+) -> list[datetime]:
+    """Return the hours for which both prices and the PV forecast exist."""
+    pv_end = pv.start_time + ONE_HOUR * len(pv.generation_kw)
+    return [
+        hour_start
+        for hour_start in prices.timestamps
+        if pv.start_time <= hour_start < pv_end
+    ]
+
+
+class PlanGenerator:
+    """Plan callable for the orchestrator: solve the snapshot and persist the plan."""
+
+    def __init__(
+        self,
+        configuration: Configuration,
+        store: ProviderDataStore,
+        solver: PlanSolver | None = None,
+    ) -> None:
+        self.configuration = configuration
+        self.store = store
+        self.solver = solver or LinopyPlanSolver()
+
+    def __call__(self, snapshot: ProviderDataSnapshot) -> PlanSnapshot:
+        problem = self.planning_problem(snapshot)
+        plan = self.solver.solve(problem)
+        if not plan.has_schedule():
+            raise PlanGenerationError(
+                f"the solver did not find an optimal plan: {plan.status.value}"
+            )
+        battery = snapshot.data.get("battery")
+        stored = PlanSnapshot(
+            created_at=snapshot.captured_at,
+            start_time=problem.start_time,
+            battery_capacity_kwh=(
+                battery.capacity_kwh if isinstance(battery, BatteryData) else None
+            ),
+            plan=plan,
+        )
+        self.store.save(PLAN_KEY, PLAN_ADAPTER, stored)
+        logger.info(
+            "event=plan_stored component=optimization operation=plan hours=%s "
+            "objective_eur=%.4f",
+            problem.hours(),
+            plan.objective_eur,
+        )
+        return stored
+
+    def planning_problem(self, snapshot: ProviderDataSnapshot) -> PlanningProblem:
+        load = _required(snapshot, "household_load", HouseholdLoadData)
+        pv = _required(snapshot, "pv_generation", PvGenerationData)
+        prices = _required(snapshot, "electricity_prices", ElectricityPriceData)
+        battery = snapshot.data.get("battery")
+        hour_starts = planning_horizon(prices, pv)
+        if not hour_starts:
+            raise PlanGenerationError(
+                "prices and the PV forecast do not overlap in any future hour"
+            )
+        price_index = {start: i for i, start in enumerate(prices.timestamps)}
+        prices_at = [price_index[start] for start in hour_starts]
+        return PlanningProblem(
+            start_time=hour_starts[0],
+            load_kw=load_forecast_kw(
+                load, hour_starts, ZoneInfo(self.configuration.timezone)
+            ),
+            pv_forecast_kw=tuple(
+                pv.generation_kw[int((start - pv.start_time) / ONE_HOUR)]
+                for start in hour_starts
+            ),
+            import_price_eur_per_kwh=tuple(
+                prices.import_price_eur_per_kwh[i] for i in prices_at
+            ),
+            export_price_eur_per_kwh=tuple(
+                prices.export_price_eur_per_kwh[i] for i in prices_at
+            ),
+            maximum_import_kw=self.configuration.grid.maximum_import_kw,
+            maximum_export_kw=self.configuration.grid.maximum_export_kw,
+            time_limit_seconds=self.configuration.solver.time_limit_seconds,
+            battery=(
+                battery_specification(battery)
+                if isinstance(battery, BatteryData)
+                else None
+            ),
+        )
+
+
+def _required[DataT](
+    snapshot: ProviderDataSnapshot, name: str, data_class: type[DataT]
+) -> DataT:
+    data = snapshot.data.get(name)
+    if not isinstance(data, data_class):
+        raise PlanGenerationError(f"the snapshot has no usable {name} data")
+    return data

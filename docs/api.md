@@ -65,6 +65,13 @@ The response contains `status`, `start_time`, `interval_minutes`, `hours`,
 
 A solver result that is neither of these is an unexpected error and returns HTTP 500.
 
+### Current plan
+
+`GET /plan` returns the latest plan that the orchestration cycle stored, in the same
+shape as the `POST /optimize` response plus `created_at`, the time of the provider
+snapshot it was computed from. It returns 404 before the first plan exists and 503
+when persistence is not configured. See the README for how the inputs are derived.
+
 ## Appliances and general energy history
 
 Heat pumps and other manageable appliances use the same installation-specific

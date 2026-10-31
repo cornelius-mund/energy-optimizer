@@ -1,7 +1,22 @@
 """Core HTTP API tests."""
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
+
+from energy_optimizer.api.app import app
+from energy_optimizer.optimization import (
+    Plan,
+    PlannedBatteryHour,
+    PlannedHour,
+    PlanStatus,
+)
+from energy_optimizer.optimization.plan_generation import (
+    PLAN_ADAPTER,
+    PLAN_KEY,
+    PlanSnapshot,
+)
 
 
 def test_health_returns_service_status_and_version(client: TestClient) -> None:
@@ -185,3 +200,65 @@ def test_optimize_rejects_invalid_hourly_inputs(
 
     assert response.status_code == 422
     assert expected_text in response.text
+
+
+def stored_plan() -> PlanSnapshot:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    return PlanSnapshot(
+        created_at=start - timedelta(minutes=30),
+        start_time=start,
+        battery_capacity_kwh=10.0,
+        plan=Plan(
+            status=PlanStatus.OPTIMAL,
+            objective_eur=0.3,
+            hours=(
+                PlannedHour(
+                    start_time=start,
+                    load_kw=1.0,
+                    pv_generation_kw=0.0,
+                    pv_self_consumption_kw=0.0,
+                    pv_curtailment_kw=0.0,
+                    grid_import_kw=1.0,
+                    grid_export_kw=0.0,
+                    import_cost_eur=0.3,
+                    export_revenue_eur=0.0,
+                    battery=PlannedBatteryHour(0.0, 0.0, 2.5),
+                ),
+            ),
+        ),
+    )
+
+
+def test_plan_is_not_found_before_the_first_plan_exists(
+    persistence_client: TestClient,
+) -> None:
+    with persistence_client:
+        response = persistence_client.get("/plan")
+
+    assert response.status_code == 404
+
+
+def test_plan_requires_persistence(client: TestClient) -> None:
+    with client:
+        response = client.get("/plan")
+
+    assert response.status_code == 503
+
+
+def test_plan_returns_the_stored_plan_with_the_battery_level_in_percent(
+    persistence_client: TestClient,
+) -> None:
+    with persistence_client:
+        store = app.state.provider_data_store
+        store.save(PLAN_KEY, PLAN_ADAPTER, stored_plan())
+
+        response = persistence_client.get("/plan")
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "optimal"
+    assert body["created_at"] == "2025-12-31T23:30:00Z"
+    assert body["objective_eur"] == pytest.approx(0.3)
+    assert body["schedule"][0]["battery"]["state_of_charge_percent"] == pytest.approx(
+        25.0
+    )

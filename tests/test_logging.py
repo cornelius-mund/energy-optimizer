@@ -474,7 +474,7 @@ def test_api_startup_logs_each_lifecycle_phase_in_order(
 
     monkeypatch.setattr(
         "energy_optimizer.api.lifecycle.build_configured_orchestrator",
-        lambda _configuration, _store: StubOrchestrator(),
+        lambda _configuration, _store, _generator: StubOrchestrator(),
     )
 
     with (
