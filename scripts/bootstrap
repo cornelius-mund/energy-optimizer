@@ -27,7 +27,9 @@ printf '==> Installing Chromium\n'
 uv run playwright install chromium
 
 printf '==> Installing Chromium system libraries\n'
-if [ "$(id -u)" -eq 0 ]; then
+if [ "$(uname -s)" != Linux ]; then
+    printf 'Not needed on %s: Playwright bundles what Chromium needs.\n' "$(uname -s)"
+elif [ "$(id -u)" -eq 0 ]; then
     uv run playwright install-deps chromium
 elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     sudo env "PATH=$PATH" "$repo_root/.venv/bin/playwright" install-deps chromium
