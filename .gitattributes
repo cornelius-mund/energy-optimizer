@@ -1,0 +1,4 @@
+# Keep LF in the working copy on every platform. The shell scripts, Dockerfile,
+# and YAML files are checked by shellcheck, shfmt, hadolint, and yamllint, which
+# reject CRLF, and the scripts do not run on Linux with CRLF.
+* text=auto eol=lf
