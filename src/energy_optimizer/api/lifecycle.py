@@ -10,13 +10,32 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
-from energy_optimizer.config import ConfigurationError, load_configuration
+from energy_optimizer.config import (
+    Configuration,
+    ConfigurationError,
+    load_configuration,
+)
+from energy_optimizer.control.ev_controller import EvController
 from energy_optimizer.logging_config import configure_logging
 from energy_optimizer.optimization.plan_generation import PlanGenerator
 from energy_optimizer.orchestration import build_configured_orchestrator
 from energy_optimizer.storage import ProviderDataStore
 
 logger = logging.getLogger("energy_optimizer.api")
+
+
+def _start_ev_control(
+    configuration: Configuration,
+    store: ProviderDataStore | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    ev = configuration.home_assistant.ev if configuration.home_assistant else None
+    if ev is None or ev.control is None or not ev.control.enabled or store is None:
+        return None
+    assert configuration.home_assistant is not None
+    controller = EvController(configuration.home_assistant, store)
+    logger.info("event=service_ev_control_starting component=control operation=startup")
+    return asyncio.create_task(controller.run_forever(stop_event))
 
 
 @asynccontextmanager
@@ -112,6 +131,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                     "event=service_orchestration_task_started "
                     "component=orchestration operation=startup"
                 )
+            application.state.ev_control_task = _start_ev_control(
+                configuration, store, stop_event
+            )
             logger.info(
                 "event=service_started component=api operation=startup "
                 "persistence_enabled=%s orchestration_enabled=%s "
@@ -136,6 +158,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         if service_started:
             logger.info("event=service_stopping component=api operation=shutdown")
             application.state.orchestration_stop_event.set()
+            ev_control_task = application.state.ev_control_task
+            if ev_control_task is not None:
+                await ev_control_task
             task = application.state.orchestration_task
             if task is not None:
                 try:

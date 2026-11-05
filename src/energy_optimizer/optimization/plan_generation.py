@@ -10,6 +10,11 @@ from zoneinfo import ZoneInfo
 from pydantic import TypeAdapter
 
 from energy_optimizer.config import Configuration, EvChargingConfiguration
+from energy_optimizer.control.ev_controller import (
+    EV_SCHEDULE_ADAPTER,
+    EV_SCHEDULE_KEY,
+    merge_schedule,
+)
 from energy_optimizer.optimization.linopy_solver import LinopyPlanSolver
 from energy_optimizer.optimization.problem import (
     BatterySpecification,
@@ -252,6 +257,7 @@ class PlanGenerator:
             ),
         )
         self.store.save(PLAN_KEY, PLAN_ADAPTER, stored)
+        self._save_ev_schedule(stored)
         logger.info(
             "event=plan_stored component=optimization operation=plan hours=%s "
             "objective_eur=%.4f",
@@ -275,6 +281,18 @@ class PlanGenerator:
             tariff.import_price_eur_per_kwh(price, start.astimezone(time_zone).hour)
             for price, start in zip(market, hour_starts, strict=True)
         )
+
+    def _save_ev_schedule(self, stored: PlanSnapshot) -> None:
+        if stored.ev_capacity_kwh is None:
+            return
+        hours = [hour for hour in stored.plan.hours if hour.ev is not None]
+        schedule = merge_schedule(
+            self.store.load(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER),
+            stored.created_at,
+            tuple(hour.start_time for hour in hours),
+            tuple(hour.ev.charge_kw for hour in hours if hour.ev),
+        )
+        self.store.save(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER, schedule)
 
     def planning_problem(self, snapshot: ProviderDataSnapshot) -> PlanningProblem:
         load = _required(snapshot, "household_load", HouseholdLoadData)

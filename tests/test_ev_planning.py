@@ -14,6 +14,7 @@ from energy_optimizer.config import (
     HomeAssistantConfiguration,
     HomeAssistantEvConfiguration,
 )
+from energy_optimizer.control.ev_controller import EV_SCHEDULE_ADAPTER, EV_SCHEDULE_KEY
 from energy_optimizer.optimization.plan_generation import (
     PlanGenerator,
     deadline_hours,
@@ -254,3 +255,28 @@ def test_the_soft_target_must_not_be_below_the_minimum() -> None:
         EvChargingConfiguration.model_validate(
             {**SOFT_TARGET, "target_soc_percent": 50}
         )
+
+
+def test_the_plan_stores_the_hourly_ev_power_for_the_charger_controller(
+    tmp_path: Path,
+) -> None:
+    hours = 18
+    store = ProviderDataStore(tmp_path)
+    car = importer(ev_responses("70", "on")).fetch(now=NOW)
+
+    stored = PlanGenerator(configuration(), store)(
+        snapshot(
+            household_load=flat_history(0.0),
+            pv_generation=pv_forecast([0.0] * hours),
+            electricity_prices=prices([0.30] * hours),
+            ev=car,
+        )
+    )
+
+    schedule = store.load(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER)
+    assert schedule is not None
+    assert schedule.updated_at == NOW
+    assert schedule.hour_starts == tuple(h.start_time for h in stored.plan.hours)
+    assert schedule.charge_kw == pytest.approx(
+        tuple(h.ev.charge_kw for h in stored.plan.hours if h.ev)
+    )

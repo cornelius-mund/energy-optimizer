@@ -62,6 +62,7 @@ class FakeWorld:
             days=HISTORY_DAYS
         )
         self.requests: list[str] = []
+        self.service_calls: list[tuple[str, dict[str, Any]]] = []
 
     def counter_kwh(self, boundary: datetime) -> float:
         hours = int((boundary - self.history_start) / ONE_HOUR)
@@ -170,6 +171,20 @@ def _handler(world: FakeWorld) -> type[BaseHTTPRequestHandler]:
                 self._reply(200, world.forecast())
             else:
                 self._reply(404, {"message": "not found"})
+
+        def do_POST(self) -> None:
+            url = urlparse(self.path)
+            if self.headers.get("Authorization") != f"Bearer {HOME_ASSISTANT_TOKEN}":
+                self._reply(401, {"message": "unauthorized"})
+                return
+            if not url.path.startswith("/api/services/"):
+                self._reply(404, {"message": "not found"})
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            service = url.path.removeprefix("/api/services/").replace("/", ".", 1)
+            world.service_calls.append((service, body))
+            self._reply(200, [])
 
         def _reply(self, status: int, body: object) -> None:
             payload = json.dumps(body).encode()
