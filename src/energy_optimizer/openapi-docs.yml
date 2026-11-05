@@ -1852,6 +1852,11 @@ components:
           - type: 'null'
           title: Objective Eur
           description: Import cost minus export revenue of the optimal plan in EUR
+        ev_shortfall_kwh:
+          type: number
+          title: Ev Shortfall Kwh
+          description: Energy the EV is short of its target at the deadline in kWh
+          default: 0
         schedule:
           items:
             $ref: '#/components/schemas/PlannedHourResponse'
@@ -1899,6 +1904,11 @@ components:
           - type: 'null'
           title: Objective Eur
           description: Import cost minus export revenue of the optimal plan in EUR
+        ev_shortfall_kwh:
+          type: number
+          title: Ev Shortfall Kwh
+          description: Energy the EV is short of its target at the deadline in kWh
+          default: 0
         schedule:
           items:
             $ref: '#/components/schemas/PlannedHourResponse'
@@ -1944,6 +1954,26 @@ components:
       - state_of_charge_percent
       title: PlannedBatteryResponse
       description: Battery power and state of charge at the end of one scheduled hour.
+    PlannedEvResponse:
+      properties:
+        charge_kw:
+          type: number
+          title: Charge Kw
+        state_of_charge_kwh:
+          type: number
+          title: State Of Charge Kwh
+        state_of_charge_percent:
+          type: number
+          title: State Of Charge Percent
+      additionalProperties: false
+      type: object
+      required:
+      - charge_kw
+      - state_of_charge_kwh
+      - state_of_charge_percent
+      title: PlannedEvResponse
+      description: Electric-vehicle charge power and state of charge at the end of
+        one hour.
     PlannedHourResponse:
       properties:
         start_time:
@@ -1987,6 +2017,11 @@ components:
           - $ref: '#/components/schemas/PlannedBatteryResponse'
           - type: 'null'
           description: Battery dispatch; null when the request had no battery
+        ev:
+          anyOf:
+          - $ref: '#/components/schemas/PlannedEvResponse'
+          - type: 'null'
+          description: EV charging; null when no car is planned
       additionalProperties: false
       type: object
       required:

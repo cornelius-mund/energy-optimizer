@@ -37,6 +37,7 @@ from energy_optimizer.providers.home_assistant_energy_history import (
     EnergyHistoryData,
     HomeAssistantEnergyHistoryImporter,
 )
+from energy_optimizer.providers.home_assistant_ev import HomeAssistantEvImporter
 from energy_optimizer.providers.home_assistant_grid_flow import (
     HomeAssistantGridFlowImporter,
 )
@@ -49,11 +50,13 @@ from energy_optimizer.providers.home_assistant_history import (
 from energy_optimizer.providers.interfaces import (
     BATTERY_EFFICIENCY_SOURCE_ID,
     BATTERY_SOURCE_ID,
+    EV_SOURCE_ID,
     HOUSEHOLD_LOAD_MAX_VALUES,
     BatteryData,
     BatteryEfficiencyData,
     BatteryEfficiencyHistoryData,
     ElectricityPriceData,
+    EvData,
     GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
@@ -898,6 +901,24 @@ def _build_battery_registration(
     )
 
 
+def _build_ev_registration(
+    configuration: Configuration, sources: _Sources, store: ProviderDataStore
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    if home_assistant is None or home_assistant.ev is None or "ev" not in sources:
+        return None
+    importer = HomeAssistantEvImporter(home_assistant)
+    return _registration(
+        "ev",
+        EvData,
+        TypeAdapter(EvData),
+        ProviderDataKey("ev", "home-assistant", EV_SOURCE_ID),
+        store,
+        _fetch_plan(lambda now: importer.fetch(now=now)),
+        importer.is_fresh,
+    )
+
+
 def _build_battery_efficiency_registration(
     configuration: Configuration, sources: _Sources, store: ProviderDataStore
 ) -> ProviderRegistration | None:
@@ -1003,6 +1024,7 @@ _REGISTRATION_FACTORIES = (
     _build_electricity_prices_registration,
     _build_grid_flow_registration,
     _build_battery_registration,
+    _build_ev_registration,
     _build_battery_efficiency_registration,
 )
 

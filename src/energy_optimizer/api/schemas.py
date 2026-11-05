@@ -675,6 +675,14 @@ class PlannedBatteryResponse(_StrictModel):
     state_of_charge_percent: float
 
 
+class PlannedEvResponse(_StrictModel):
+    """Electric-vehicle charge power and state of charge at the end of one hour."""
+
+    charge_kw: float
+    state_of_charge_kwh: float
+    state_of_charge_percent: float
+
+
 class PlannedHourResponse(_StrictModel):
     """One scheduled hour of the optimized plan."""
 
@@ -694,6 +702,9 @@ class PlannedHourResponse(_StrictModel):
     battery: PlannedBatteryResponse | None = Field(
         description="Battery dispatch; null when the request had no battery"
     )
+    ev: PlannedEvResponse | None = Field(
+        default=None, description="EV charging; null when no car is planned"
+    )
 
 
 class OptimizationResponse(_StrictModel):
@@ -708,6 +719,10 @@ class OptimizationResponse(_StrictModel):
     hours: int = Field(ge=1, le=168)
     objective_eur: float | None = Field(
         description="Import cost minus export revenue of the optimal plan in EUR"
+    )
+    ev_shortfall_kwh: float = Field(
+        default=0,
+        description="Energy the EV is short of its target at the deadline in kWh",
     )
     schedule: list[PlannedHourResponse]
 

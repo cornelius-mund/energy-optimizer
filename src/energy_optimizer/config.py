@@ -3,7 +3,7 @@
 import logging
 import math
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -339,6 +339,41 @@ class HomeAssistantBatteryConfiguration(_StrictModel):
         return value.value / 1000 if value.unit == "Wh" else value.value
 
 
+class HomeAssistantEvPlugConfiguration(_StrictModel):
+    """The entity that tells whether the car is connected to the charger."""
+
+    entity_id: str = Field(min_length=1, max_length=255)
+    plugged_in_states: list[str] = Field(default_factory=lambda: ["on"], min_length=1)
+
+
+class HomeAssistantEvConfiguration(_StrictModel):
+    """The car's state of charge and plug state in Home Assistant plus its charger."""
+
+    state_of_charge: HomeAssistantBatteryEntityConfiguration
+    plugged_in: HomeAssistantEvPlugConfiguration
+    capacity_kwh: float = Field(gt=0)
+    minimum_charge_kw: float = Field(gt=0)
+    maximum_charge_kw: float = Field(gt=0)
+    charge_efficiency: float = Field(default=0.9, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_units_and_power(self) -> "HomeAssistantEvConfiguration":
+        if self.state_of_charge.unit not in {"%", "kWh"}:
+            raise ValueError("ev.state_of_charge must use % or kWh")
+        if self.minimum_charge_kw > self.maximum_charge_kw:
+            raise ValueError("ev.minimum_charge_kw must not exceed maximum_charge_kw")
+        return self
+
+
+class EvChargingConfiguration(_StrictModel):
+    """What the owner wants from the car: a state of charge at a local time."""
+
+    minimum_soc_percent: float = Field(gt=0, le=100)
+    deadline: time = Field(
+        description="Local time of day by which the car must hold the state of charge"
+    )
+
+
 class HomeAssistantConfiguration(_StrictModel):
     """Connection and energy mappings for Home Assistant."""
 
@@ -349,6 +384,7 @@ class HomeAssistantConfiguration(_StrictModel):
     grid_import: EnergyAggregateConfiguration | None = None
     grid_export: EnergyAggregateConfiguration | None = None
     battery: HomeAssistantBatteryConfiguration | None = None
+    ev: HomeAssistantEvConfiguration | None = None
     energy_history: dict[str, EnergyAggregateConfiguration] = Field(
         default_factory=dict
     )
@@ -591,6 +627,7 @@ class Configuration(_StrictModel):
     forecast_solar: ForecastSolarConfiguration | None = None
     awattar: AwattarConfiguration | None = None
     tariff: TariffConfiguration | None = None
+    ev_charging: EvChargingConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
     orchestration: OrchestrationConfiguration | None = None
 

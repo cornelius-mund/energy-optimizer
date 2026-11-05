@@ -69,7 +69,9 @@ A solver result that is neither of these is an unexpected error and returns HTTP
 
 `GET /plan` returns the latest plan that the orchestration cycle stored, in the same
 shape as the `POST /optimize` response plus `created_at`, the time of the provider
-snapshot it was computed from. It returns 404 before the first plan exists and 503
+snapshot it was computed from. With an electric vehicle configured, each hour has an `ev` object and the
+response has `ev_shortfall_kwh`, the energy the car is short of its target at the
+deadline. It returns 404 before the first plan exists and 503
 when persistence is not configured. See the README for how the inputs are derived.
 
 ## Appliances and general energy history

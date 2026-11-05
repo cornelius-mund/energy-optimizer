@@ -47,6 +47,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
         "interval_minutes": 60,
         "hours": 2,
         "objective_eur": pytest.approx(0.51),
+        "ev_shortfall_kwh": 0.0,
         "schedule": [
             planned_hour(
                 start_time="2026-01-01T00:00:00Z",
@@ -59,6 +60,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 import_cost_eur=0.36,
                 export_revenue_eur=0.0,
                 battery=None,
+                ev=None,
             ),
             planned_hour(
                 start_time="2026-01-01T01:00:00Z",
@@ -71,6 +73,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 import_cost_eur=0.15,
                 export_revenue_eur=0.0,
                 battery=None,
+                ev=None,
             ),
         ],
     }

@@ -8,6 +8,7 @@ from energy_optimizer.api.schemas import (
     HourlyOptimizationRequest,
     OptimizationResponse,
     PlannedBatteryResponse,
+    PlannedEvResponse,
     PlannedHourResponse,
     PlanningBatteryRequest,
     PlanSnapshotResponse,
@@ -18,6 +19,7 @@ from energy_optimizer.optimization import (
     LinopyPlanSolver,
     Plan,
     PlannedBatteryHour,
+    PlannedEvHour,
     PlanningProblem,
     PlanSolver,
 )
@@ -111,7 +113,9 @@ def _optimization_response(
 
 
 def _planned_hours(
-    plan: Plan, battery_capacity_kwh: float | None
+    plan: Plan,
+    battery_capacity_kwh: float | None,
+    ev_capacity_kwh: float | None = None,
 ) -> list[PlannedHourResponse]:
     return [
         PlannedHourResponse(
@@ -125,6 +129,7 @@ def _planned_hours(
             import_cost_eur=hour.import_cost_eur,
             export_revenue_eur=hour.export_revenue_eur,
             battery=_planned_battery(battery_capacity_kwh, hour.battery),
+            ev=_planned_ev(ev_capacity_kwh, hour.ev),
         )
         for hour in plan.hours
     ]
@@ -148,7 +153,22 @@ def current_plan(http_request: Request) -> PlanSnapshotResponse:
         interval_minutes=60,
         hours=len(stored.plan.hours),
         objective_eur=stored.plan.objective_eur,
-        schedule=_planned_hours(stored.plan, stored.battery_capacity_kwh),
+        ev_shortfall_kwh=stored.plan.ev_shortfall_kwh,
+        schedule=_planned_hours(
+            stored.plan, stored.battery_capacity_kwh, stored.ev_capacity_kwh
+        ),
+    )
+
+
+def _planned_ev(
+    capacity_kwh: float | None, planned: PlannedEvHour | None
+) -> PlannedEvResponse | None:
+    if capacity_kwh is None or planned is None:
+        return None
+    return PlannedEvResponse(
+        charge_kw=planned.charge_kw,
+        state_of_charge_kwh=planned.state_of_charge_kwh,
+        state_of_charge_percent=planned.state_of_charge_kwh / capacity_kwh * 100,
     )
 
 
