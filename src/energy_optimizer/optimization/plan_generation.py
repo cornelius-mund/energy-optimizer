@@ -111,14 +111,31 @@ def deadline_hours(
     Returns None when the deadline lies beyond the planning horizon, because the
     car then does not need to be charged by this plan yet.
     """
-    first_hour = hour_starts[0].astimezone(time_zone)
-    candidate = datetime.combine(first_hour.date(), deadline, tzinfo=time_zone)
-    if candidate <= first_hour:
-        candidate = datetime.combine(
-            first_hour.date() + timedelta(days=1), deadline, tzinfo=time_zone
-        )
-    hours_until = -(-(candidate.astimezone(UTC) - hour_starts[0]) // ONE_HOUR)
-    return hours_until if hours_until <= len(hour_starts) else None
+    upcoming = next_deadline(
+        dict.fromkeys(range(7), (100.0, deadline)), hour_starts[0].astimezone(time_zone)
+    )
+    return None if upcoming is None else hours_until(upcoming[0], hour_starts)
+
+
+def hours_until(deadline: datetime, hour_starts: list[datetime]) -> int | None:
+    count = -(-(deadline.astimezone(UTC) - hour_starts[0]) // ONE_HOUR)
+    return count if count <= len(hour_starts) else None
+
+
+def next_deadline(
+    targets: dict[int, tuple[float, time]], first_hour: datetime
+) -> tuple[datetime, float] | None:
+    """Find the first local deadline after ``first_hour`` and its minimum percent."""
+    for offset in range(8):
+        day = first_hour.date() + timedelta(days=offset)
+        target = targets.get(day.weekday())
+        if target is None:
+            continue
+        percent, deadline = target
+        candidate = datetime.combine(day, deadline, tzinfo=first_hour.tzinfo)
+        if candidate > first_hour:
+            return candidate, percent
+    return None
 
 
 def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecification:
@@ -187,12 +204,14 @@ def ev_specification(
         return pv_surplus_charging(ev, limit_kwh, surplus_kw)
     if charging.strategy == "immediate":
         return immediate_charging(ev, limit_kwh, len(hour_starts))
-    assert charging.minimum_soc_percent is not None
-    target_kwh = charging.minimum_soc_percent / 100 * ev.capacity_kwh
     soft_target = charging.strategy == "minimum_plus_target"
-    assert charging.deadline is not None
-    hours_until_deadline = deadline_hours(charging.deadline, hour_starts, time_zone)
-    if hours_until_deadline is None:
+    upcoming = next_deadline(
+        charging.day_targets(), hour_starts[0].astimezone(time_zone)
+    )
+    hours_until_deadline = (
+        None if upcoming is None else hours_until(upcoming[0], hour_starts)
+    )
+    if upcoming is None or hours_until_deadline is None:
         logger.warning(
             "event=ev_deadline_beyond_horizon component=optimization operation=plan"
         )
@@ -200,7 +219,7 @@ def ev_specification(
     return EvSpecification(
         capacity_kwh=ev.capacity_kwh,
         initial_soc_kwh=ev.state_of_charge_kwh,
-        target_soc_kwh=target_kwh,
+        target_soc_kwh=upcoming[1] / 100 * ev.capacity_kwh,
         deadline_hours=hours_until_deadline,
         plugged_in=(ev.plugged_in,) * len(hour_starts),
         minimum_charge_kw=ev.minimum_charge_kw,

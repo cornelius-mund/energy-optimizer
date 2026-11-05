@@ -112,9 +112,23 @@ def _chain_configuration(world_url: str, data_directory: Path) -> dict[str, Any]
             "poll_interval_seconds": 1,
         },
     }
-    configuration["ev_charging"] = {
+    day_target = {
         "minimum_soc_percent": EV_TARGET_PERCENT,
         "deadline": EV_DEADLINE.strftime("%H:00"),
+    }
+    configuration["ev_charging"] = {
+        "weekly": {
+            day: day_target
+            for day in (
+                "monday",
+                "tuesday",
+                "wednesday",
+                "thursday",
+                "friday",
+                "saturday",
+                "sunday",
+            )
+        }
     }
     del home_assistant["grid_import"], home_assistant["grid_export"]
     configuration["forecast_solar"]["base_url"] = world_url

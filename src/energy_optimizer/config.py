@@ -392,6 +392,27 @@ class HomeAssistantEvConfiguration(_StrictModel):
         return self
 
 
+type Weekday = Literal[
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"
+]
+WEEKDAYS: tuple[Weekday, ...] = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
+
+class EvDayTargetConfiguration(_StrictModel):
+    """The state of charge the car must hold at a local time on one weekday."""
+
+    minimum_soc_percent: float = Field(gt=0, le=100)
+    deadline: time
+
+
 class EvChargingConfiguration(_StrictModel):
     """What the owner wants from the car: a state of charge at a local time."""
 
@@ -411,6 +432,13 @@ class EvChargingConfiguration(_StrictModel):
         default=None,
         description="Local time of day by which the car must hold the state of charge",
     )
+    weekly: dict[Weekday, EvDayTargetConfiguration] = Field(
+        default_factory=dict,
+        description=(
+            "Deadline and minimum state of charge per weekday; they replace the "
+            "general `deadline` and `minimum_soc_percent` on the days they name"
+        ),
+    )
     target_soc_percent: float | None = Field(
         default=None,
         gt=0,
@@ -428,12 +456,23 @@ class EvChargingConfiguration(_StrictModel):
 
     @model_validator(mode="after")
     def validate_deadline(self) -> "EvChargingConfiguration":
-        if self.strategy in ("deadline", "minimum_plus_target") and (
-            self.deadline is None or self.minimum_soc_percent is None
+        has_general_target = (
+            self.deadline is not None and self.minimum_soc_percent is not None
+        )
+        if (self.deadline is None) != (self.minimum_soc_percent is None) and (
+            self.strategy in ("deadline", "minimum_plus_target")
         ):
             raise ValueError(
-                "ev_charging.deadline and minimum_soc_percent are required for "
-                f"the {self.strategy} strategy"
+                "ev_charging.deadline and minimum_soc_percent must be set together"
+            )
+        if (
+            self.strategy in ("deadline", "minimum_plus_target")
+            and not has_general_target
+            and not self.weekly
+        ):
+            raise ValueError(
+                "ev_charging.deadline and minimum_soc_percent or a weekly schedule "
+                f"are required for the {self.strategy} strategy"
             )
         if self.strategy == "minimum_plus_target":
             self._validate_soft_target()
@@ -445,11 +484,30 @@ class EvChargingConfiguration(_StrictModel):
                 "ev_charging.target_soc_percent and value_eur_per_kwh are required "
                 "for the minimum_plus_target strategy"
             )
-        assert self.minimum_soc_percent is not None
-        if self.target_soc_percent < self.minimum_soc_percent:
+        highest_minimum = max(
+            [self.minimum_soc_percent or 0.0]
+            + [day.minimum_soc_percent for day in self.weekly.values()]
+        )
+        if self.target_soc_percent < highest_minimum:
             raise ValueError(
-                "ev_charging.target_soc_percent must not be below minimum_soc_percent"
+                "ev_charging.target_soc_percent must not be below any minimum"
             )
+
+    def day_targets(self) -> dict[int, tuple[float, time]]:
+        """Minimum state of charge and deadline per weekday (Monday is 0)."""
+        general = (
+            (self.minimum_soc_percent, self.deadline)
+            if self.minimum_soc_percent is not None and self.deadline is not None
+            else None
+        )
+        targets: dict[int, tuple[float, time]] = {}
+        for index, name in enumerate(WEEKDAYS):
+            entry = self.weekly.get(name)
+            if entry is not None:
+                targets[index] = (entry.minimum_soc_percent, entry.deadline)
+            elif general is not None:
+                targets[index] = general
+        return targets
 
     @property
     def limit_soc_percent(self) -> float:
