@@ -48,6 +48,8 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
         "hours": 2,
         "objective_eur": pytest.approx(0.51),
         "ev_shortfall_kwh": 0.0,
+        "battery_throughput_kwh": 0.0,
+        "degradation_cost_eur": 0.0,
         "schedule": [
             planned_hour(
                 start_time="2026-01-01T00:00:00Z",
@@ -129,9 +131,30 @@ def test_optimize_schedules_the_battery_between_cheap_and_expensive_hours(
         discharge_kw=0.0,
         state_of_charge_kwh=7.0,
         state_of_charge_percent=70.0,
+        degradation_cost_eur=0.0,
     ) | {"discharge_kw": pytest.approx(0.0, abs=1e-6)}
     assert discharging_hour["battery"]["discharge_kw"] == pytest.approx(2.0)
     assert discharging_hour["battery"]["state_of_charge_percent"] == pytest.approx(50.0)
+
+
+def test_optimize_charges_the_throughput_cost_of_every_kwh_the_battery_delivers(
+    client: TestClient, valid_request: dict[str, object]
+) -> None:
+    request = {
+        **valid_request,
+        "load_kw": [2.0, 2.0],
+        "pv_generation_kw": [0.0, 0.0],
+        "import_price_eur_per_kwh": [0.1, 0.5],
+        "battery": {**BATTERY, "throughput_cost_eur_per_kwh": 0.2},
+    }
+
+    with client:
+        body = client.post("/optimize", json=request).json()
+
+    assert body["battery_throughput_kwh"] == pytest.approx(2.0)
+    assert body["degradation_cost_eur"] == pytest.approx(0.4)
+    assert body["objective_eur"] == pytest.approx(0.4 + 0.4)
+    assert body["schedule"][1]["battery"]["degradation_cost_eur"] == pytest.approx(0.4)
 
 
 @pytest.mark.parametrize(

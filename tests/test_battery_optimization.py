@@ -19,6 +19,7 @@ def battery(
     maximum_discharge_kw: float = 2.0,
     charge_efficiency: float = 1.0,
     discharge_efficiency: float = 1.0,
+    throughput_cost_eur_per_kwh: float = 0.0,
 ) -> BatterySpecification:
     return BatterySpecification(
         minimum_soc_kwh=minimum_soc_kwh,
@@ -29,6 +30,7 @@ def battery(
         maximum_discharge_kw=maximum_discharge_kw,
         charge_efficiency=charge_efficiency,
         discharge_efficiency=discharge_efficiency,
+        throughput_cost_eur_per_kwh=throughput_cost_eur_per_kwh,
     )
 
 
@@ -127,6 +129,39 @@ def test_a_plan_without_a_battery_reports_no_battery_hours() -> None:
     plan = solve(problem((1.0,), (0.3,)))
 
     assert plan.hours[0].battery is None
+
+
+def test_a_throughput_cost_below_the_price_spread_still_lets_the_battery_cycle() -> (
+    None
+):
+    plan = solve(
+        problem(
+            (2.0, 2.0), (0.1, 0.5), battery=battery(throughput_cost_eur_per_kwh=0.2)
+        )
+    )
+
+    assert plan.battery_throughput_kwh == pytest.approx(2.0)
+    assert plan.degradation_cost_eur == pytest.approx(0.4)
+    assert plan.objective_eur == pytest.approx(0.4 + 0.4)
+
+
+def test_a_throughput_cost_above_the_price_spread_leaves_the_battery_idle() -> None:
+    plan = solve(
+        problem(
+            (2.0, 2.0), (0.1, 0.5), battery=battery(throughput_cost_eur_per_kwh=0.5)
+        )
+    )
+
+    assert plan.battery_throughput_kwh == pytest.approx(0.0, abs=TOLERANCE)
+    assert plan.degradation_cost_eur == pytest.approx(0.0, abs=TOLERANCE)
+    assert plan.objective_eur == pytest.approx(2.0 * 0.1 + 2.0 * 0.5)
+
+
+def test_without_a_throughput_cost_the_battery_cycles_at_any_positive_spread() -> None:
+    plan = solve(problem((2.0, 2.0), (0.1, 0.5), battery=battery()))
+
+    assert plan.battery_throughput_kwh == pytest.approx(2.0)
+    assert plan.degradation_cost_eur == pytest.approx(0.0)
 
 
 @settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])

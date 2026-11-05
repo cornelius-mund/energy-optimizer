@@ -40,6 +40,12 @@ class PlanningBatteryRequest(_StrictModel):
     discharge_efficiency: float = Field(
         gt=0, le=1, description="Ratio of drawn energy that is delivered"
     )
+    throughput_cost_eur_per_kwh: float = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="Wear cost of each kWh the battery delivers in EUR",
+    )
 
     @model_validator(mode="after")
     def validate_state_of_charge_band(self) -> "PlanningBatteryRequest":
@@ -673,6 +679,9 @@ class PlannedBatteryResponse(_StrictModel):
     discharge_kw: float
     state_of_charge_kwh: float
     state_of_charge_percent: float
+    degradation_cost_eur: float = Field(
+        default=0, description="Battery wear cost of the hour in EUR"
+    )
 
 
 class PlannedEvResponse(_StrictModel):
@@ -719,6 +728,13 @@ class OptimizationResponse(_StrictModel):
     hours: int = Field(ge=1, le=168)
     objective_eur: float | None = Field(
         description="Import cost minus export revenue of the optimal plan in EUR"
+    )
+    battery_throughput_kwh: float = Field(
+        default=0, description="Energy the battery delivers over the plan in kWh"
+    )
+    degradation_cost_eur: float = Field(
+        default=0,
+        description="Battery wear cost over the plan in EUR, part of the objective",
     )
     ev_shortfall_kwh: float = Field(
         default=0,

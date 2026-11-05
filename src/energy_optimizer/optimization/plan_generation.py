@@ -88,7 +88,9 @@ def load_forecast_kw(
     return tuple(forecast)
 
 
-def battery_specification(battery: BatteryData) -> BatterySpecification:
+def battery_specification(
+    battery: BatteryData, throughput_cost_eur_per_kwh: float = 0.0
+) -> BatterySpecification:
     """Split the battery round trip evenly between charging and discharging."""
     leg_efficiency = math.sqrt(battery.battery_efficiency)
     return BatterySpecification(
@@ -100,6 +102,7 @@ def battery_specification(battery: BatteryData) -> BatterySpecification:
         maximum_discharge_kw=battery.maximum_discharge_kw,
         charge_efficiency=leg_efficiency,
         discharge_efficiency=leg_efficiency,
+        throughput_cost_eur_per_kwh=throughput_cost_eur_per_kwh,
     )
 
 
@@ -301,6 +304,12 @@ class PlanGenerator:
             for price, start in zip(market, hour_starts, strict=True)
         )
 
+    def _throughput_cost(self) -> float:
+        home_assistant = self.configuration.home_assistant
+        if home_assistant is None or home_assistant.battery is None:
+            return 0.0
+        return home_assistant.battery.throughput_cost_eur_per_kwh
+
     def _save_ev_schedule(self, stored: PlanSnapshot) -> None:
         if stored.ev_capacity_kwh is None:
             return
@@ -350,7 +359,7 @@ class PlanGenerator:
             maximum_export_kw=self.configuration.grid.maximum_export_kw,
             time_limit_seconds=self.configuration.solver.time_limit_seconds,
             battery=(
-                battery_specification(battery)
+                battery_specification(battery, self._throughput_cost())
                 if isinstance(battery, BatteryData)
                 else None
             ),

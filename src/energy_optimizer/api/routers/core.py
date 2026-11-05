@@ -94,6 +94,7 @@ def _battery(battery: PlanningBatteryRequest) -> BatterySpecification:
         maximum_discharge_kw=battery.maximum_discharge_kw,
         charge_efficiency=battery.charge_efficiency,
         discharge_efficiency=battery.discharge_efficiency,
+        throughput_cost_eur_per_kwh=battery.throughput_cost_eur_per_kwh,
     )
 
 
@@ -106,6 +107,9 @@ def _optimization_response(
         interval_minutes=request.interval_minutes,
         hours=len(request.load_kw),
         objective_eur=plan.objective_eur,
+        battery_throughput_kwh=plan.battery_throughput_kwh,
+        degradation_cost_eur=plan.degradation_cost_eur,
+        ev_shortfall_kwh=plan.ev_shortfall_kwh,
         schedule=_planned_hours(
             plan, request.battery.capacity_kwh if request.battery else None
         ),
@@ -154,6 +158,8 @@ def current_plan(http_request: Request) -> PlanSnapshotResponse:
         hours=len(stored.plan.hours),
         objective_eur=stored.plan.objective_eur,
         ev_shortfall_kwh=stored.plan.ev_shortfall_kwh,
+        battery_throughput_kwh=stored.plan.battery_throughput_kwh,
+        degradation_cost_eur=stored.plan.degradation_cost_eur,
         schedule=_planned_hours(
             stored.plan, stored.battery_capacity_kwh, stored.ev_capacity_kwh
         ),
@@ -182,4 +188,5 @@ def _planned_battery(
         discharge_kw=planned.discharge_kw,
         state_of_charge_kwh=planned.state_of_charge_kwh,
         state_of_charge_percent=planned.state_of_charge_kwh / capacity_kwh * 100,
+        degradation_cost_eur=planned.degradation_cost_eur,
     )
