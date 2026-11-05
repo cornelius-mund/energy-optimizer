@@ -29,6 +29,12 @@
   const efficiencyMetrics = document.querySelector("#efficiency-metrics");
   const chartNote = document.querySelector("#chart-note");
   const excludedContent = document.querySelector("#excluded-content");
+  const planContent = document.querySelector("#plan-content");
+  const planSummary = document.querySelector("#plan-summary");
+  const planEmpty = document.querySelector("#plan-empty");
+  const planTable = document.querySelector("#plan-table");
+  const planHead = document.querySelector("#plan-head");
+  const planRows = document.querySelector("#plan-rows");
   const excludedSources = document.querySelector("#excluded-sources");
   const excludedSummary = document.querySelector("#excluded-summary");
   const excludedEmpty = document.querySelector("#excluded-empty");
@@ -620,7 +626,124 @@
     excludedEmpty.hidden = data.hours.length !== 0 || !available;
   };
 
+  const planNumber = (value, digits = 2) => (value === null || value === undefined ? "–" : Number(value).toFixed(digits));
+  const planColumns = (schedule) => {
+    const columns = [
+      [`Hour (${timeZone})`, (hour) => formatTimestamp(hour.start_time)],
+      ["Load (kW)", (hour) => planNumber(hour.load_kw)],
+      ["PV (kW)", (hour) => planNumber(hour.pv_generation_kw)],
+      ["Grid import (kW)", (hour) => planNumber(hour.grid_import_kw)],
+      ["Grid export (kW)", (hour) => planNumber(hour.grid_export_kw)],
+    ];
+    if (schedule.some((hour) => hour.battery)) {
+      columns.push(
+        ["Battery charge (kW)", (hour) => planNumber(hour.battery && hour.battery.charge_kw)],
+        ["Battery discharge (kW)", (hour) => planNumber(hour.battery && hour.battery.discharge_kw)],
+        ["Battery state (%)", (hour) => planNumber(hour.battery && hour.battery.state_of_charge_percent, 1)],
+      );
+    }
+    if (schedule.some((hour) => hour.ev)) {
+      columns.push(
+        ["EV charge (kW)", (hour) => planNumber(hour.ev && hour.ev.charge_kw)],
+        ["EV state (%)", (hour) => planNumber(hour.ev && hour.ev.state_of_charge_percent, 1)],
+      );
+    }
+    columns.push(["Net cost (EUR)", (hour) => planNumber(hour.import_cost_eur - hour.export_revenue_eur, 3)]);
+    return columns;
+  };
+  const planSummaryItems = (plan) => {
+    const importCost = plan.schedule.reduce((sum, hour) => sum + hour.import_cost_eur, 0);
+    const exportRevenue = plan.schedule.reduce((sum, hour) => sum + hour.export_revenue_eur, 0);
+    const first = plan.schedule[0];
+    const last = plan.schedule[plan.schedule.length - 1];
+    const end = new Date(new Date(last.start_time).getTime() + 3600000);
+    const items = [
+      ["Solver status", plan.status],
+      ["Objective (EUR)", planNumber(plan.objective_eur, 3)],
+      ["Import cost (EUR)", planNumber(importCost, 3)],
+      ["Export revenue (EUR)", planNumber(exportRevenue, 3)],
+      ["Planned hours", String(plan.hours)],
+      ["Plan range", `${formatTimestamp(first.start_time)} to ${formatTimestamp(end)}`],
+      ["Based on data from", formatTimestamp(plan.created_at)],
+    ];
+    if (plan.degradation_cost_eur) items.push(["Battery wear cost (EUR)", planNumber(plan.degradation_cost_eur, 3)]);
+    if (plan.schedule.some((hour) => hour.ev)) items.push(["EV shortfall at deadline (kWh)", planNumber(plan.ev_shortfall_kwh)]);
+    if (plan.load_forecast) {
+      const error = plan.load_forecast.mean_absolute_error_kw;
+      items.push(["Load forecast", `${plan.load_forecast.method}${error === null ? "" : ` (±${planNumber(error)} kW)`}`]);
+    }
+    return items;
+  };
+  const renderPlan = (plan) => {
+    planSummary.replaceChildren();
+    planHead.replaceChildren();
+    planRows.replaceChildren();
+    const empty = !plan || plan.schedule.length === 0;
+    planEmpty.hidden = !empty;
+    planTable.hidden = empty;
+    if (empty) return;
+    planSummaryItems(plan).forEach(([label, value]) => {
+      const item = document.createElement("div");
+      const term = document.createElement("dt");
+      const description = document.createElement("dd");
+      term.textContent = label;
+      description.textContent = value;
+      item.append(term, description);
+      planSummary.append(item);
+    });
+    const columns = planColumns(plan.schedule);
+    const headRow = document.createElement("tr");
+    columns.forEach(([title]) => {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      cell.textContent = title;
+      headRow.append(cell);
+    });
+    planHead.append(headRow);
+    plan.schedule.forEach((hour) => {
+      const row = document.createElement("tr");
+      columns.forEach(([, value]) => appendCell(row, value(hour)));
+      planRows.append(row);
+    });
+  };
+  const loadPlan = async () => {
+    setStatus("Loading the plan...");
+    diagnostic("debug", "data_load_started", { scenario });
+    let requestId = "none";
+    let responseStatus = "none";
+    try {
+      const response = await fetch("/plan");
+      requestId = response.headers.get("X-Request-ID") || "none";
+      responseStatus = response.status;
+      if (scenario !== "plan") return;
+      if (response.status === 404) {
+        renderPlan(null);
+        planContent.hidden = false;
+        setStatus("No plan has been created yet.");
+        return;
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "The plan could not be loaded.");
+      if (scenario !== "plan") return;
+      renderPlan(data);
+      planContent.hidden = false;
+      diagnostic("debug", "data_load_completed", { scenario, hours: data.hours, requestId });
+      setStatus(`Plan with ${data.hours} hour${data.hours === 1 ? "" : "s"}; solver status ${data.status}.`);
+    } catch (error) {
+      diagnostic("error", "data_load_failed", { scenario, status: responseStatus, message: error instanceof Error ? error.message : String(error), requestId });
+      if (scenario === "plan") setStatus(error instanceof Error ? error.message : "The plan could not be loaded.", "error");
+    }
+  };
+
   const renderHeader = (data = {}) => {
+    if (scenario === "plan") {
+      badge.innerHTML = "<span></span> Optimization plan";
+      form.hidden = true;
+      rangeEyebrow.textContent = "Plan";
+      rangeHeading.textContent = "The latest optimization plan";
+      rangeHelp.textContent = "The plan covers the future hours for which prices and PV forecasts exist. It is recomputed whenever the planning inputs refresh.";
+      return;
+    }
     if (scenario === "excluded") {
       badge.innerHTML = "<span></span> Excluded hours";
       rangeEyebrow.textContent = "Time window";
@@ -695,6 +818,11 @@
   const load = async (start, end, correctionAttempted = false) => {
     content.hidden = true;
     excludedContent.hidden = true;
+    planContent.hidden = true;
+    if (scenario === "plan") {
+      await loadPlan();
+      return;
+    }
     if (scenario === "excluded") {
       await loadExcluded(start, end);
       return;
@@ -762,7 +890,7 @@
   };
 
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => {
-    scenario = { "forecast-tab": "forecast", "efficiency-tab": "efficiency", "excluded-tab": "excluded" }[tab.id] || "actual";
+    scenario = { "forecast-tab": "forecast", "efficiency-tab": "efficiency", "excluded-tab": "excluded", "plan-tab": "plan" }[tab.id] || "actual";
     diagnostic("info", "tab_clicked", { tab: tab.id, scenario });
     document.querySelectorAll(".tab").forEach((item) => {
       const active = item === tab;
@@ -771,6 +899,7 @@
     renderHeader();
     content.hidden = true;
     excludedContent.hidden = true;
+    planContent.hidden = true;
     loadSelectedRange();
   }));
   form.addEventListener("submit", (event) => {

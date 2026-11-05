@@ -149,6 +149,8 @@ frontend cannot be templated, so it reads the zone from
 `GET /api/v1/dashboard/settings` (`{"timezone": "Europe/Berlin"}`) before its
 first data request, using the browser's `Intl` support and no dependency.
 
+- **Plan tab:** shows the latest optimization plan hour by hour with a summary of
+  its economics; see [`docs/api.md`](docs/api.md#plan-view).
 - **Shown in the configured zone:** the start and end controls, the default range,
   chart axis labels, tooltips and accessible point labels, the detail lists
   (coverage, retrieved, generated, published), and the Excluded hours table.

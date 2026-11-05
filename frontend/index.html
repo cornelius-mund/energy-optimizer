@@ -27,6 +27,7 @@
         <button class="tab is-active" id="actuals-tab" type="button" role="tab" aria-selected="true" aria-controls="dashboard-panel">Historic actuals</button>
        <button class="tab" id="forecast-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Forecast</button>
        <button class="tab" id="efficiency-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Efficiency</button>
+       <button class="tab" id="plan-tab" type="button" role="tab" aria-selected="false" aria-controls="plan-content">Plan</button>
        <button class="tab" id="excluded-tab" type="button" role="tab" aria-selected="false" aria-controls="dashboard-panel">Excluded hours</button>
       </nav>
 
@@ -136,6 +137,28 @@
                 </tr>
               </thead>
               <tbody id="excluded-rows"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section id="plan-content" class="plan-grid" role="region" aria-live="polite" aria-labelledby="plan-heading" hidden>
+        <article class="card plan-card">
+          <p class="eyebrow">Optimization plan</p>
+          <h2 id="plan-heading">Recommended schedule</h2>
+          <p class="excluded-lede">
+            This is the plan the optimizer computed from the forecast inputs, not
+            a measurement. Each row is one planned hour; flows are planned kW,
+            states are at the end of the hour, and costs are in EUR (positive is
+            a cost, negative a revenue).
+          </p>
+          <dl id="plan-summary" class="plan-summary" aria-label="Plan summary"></dl>
+          <p id="plan-empty" class="excluded-empty" hidden>No plan has been created yet. A plan appears after the first complete refresh of all planning inputs.</p>
+          <div class="table-wrap">
+            <table id="plan-table" class="excluded-table plan-table" hidden>
+              <caption class="visually-hidden">Planned hourly energy flows, battery and vehicle states and costs</caption>
+              <thead id="plan-head"></thead>
+              <tbody id="plan-rows"></tbody>
             </table>
           </div>
         </article>
