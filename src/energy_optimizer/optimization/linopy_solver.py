@@ -12,6 +12,12 @@ from energy_optimizer.optimization.battery_model import (
     add_battery,
     read_battery_hour,
 )
+from energy_optimizer.optimization.ev_model import (
+    SHORTFALL_PENALTY_EUR_PER_KWH,
+    EvVariables,
+    add_ev,
+    read_ev_hour,
+)
 from energy_optimizer.optimization.problem import (
     Plan,
     PlannedHour,
@@ -39,6 +45,7 @@ class _GridAndPvVariables:
     grid_export: Variable
     pv_used: Variable
     battery: BatteryVariables | None
+    ev: EvVariables | None
 
 
 class LinopyPlanSolver:
@@ -63,6 +70,7 @@ def _add_variables(
     model: Model, hours: pandas.RangeIndex, problem: PlanningProblem
 ) -> _GridAndPvVariables:
     return _GridAndPvVariables(
+        ev=None if problem.ev is None else add_ev(model, hours, problem.ev),
         battery=(
             None
             if problem.battery is None
@@ -131,6 +139,8 @@ def _consumed_kw(
     consumed_kw = variables.grid_export + load_kw
     if variables.battery is not None:
         consumed_kw = consumed_kw + variables.battery.charge
+    if variables.ev is not None:
+        consumed_kw = consumed_kw + variables.ev.charge
     return consumed_kw
 
 
@@ -146,7 +156,10 @@ def _minimize_net_cost(
     export_revenue = variables.grid_export * _hourly(
         problem.export_price_eur_per_kwh, hours
     )
-    model.add_objective((import_cost - export_revenue).sum())
+    objective = (import_cost - export_revenue).sum()
+    if variables.ev is not None:
+        objective = objective + SHORTFALL_PENALTY_EUR_PER_KWH * variables.ev.shortfall
+    model.add_objective(objective)
 
 
 def _solve(model: Model, time_limit_seconds: float) -> PlanStatus:
@@ -186,12 +199,24 @@ def _read_plan(
                 if variables.battery is None
                 else read_battery_hour(variables.battery, hour)
             ),
+            ev=None if variables.ev is None else read_ev_hour(variables.ev, hour),
         )
         for hour in range(problem.hours())
     )
     return Plan(
-        status=PlanStatus.OPTIMAL, objective_eur=_objective_value(model), hours=hours
+        status=PlanStatus.OPTIMAL,
+        objective_eur=sum(
+            hour.import_cost_eur - hour.export_revenue_eur for hour in hours
+        ),
+        hours=hours,
+        ev_shortfall_kwh=_shortfall_kwh(variables),
     )
+
+
+def _shortfall_kwh(variables: _GridAndPvVariables) -> float:
+    if variables.ev is None:
+        return 0.0
+    return max(float(variables.ev.shortfall.solution.item()), 0.0)
 
 
 def _objective_value(model: Model) -> float:
