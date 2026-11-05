@@ -10,12 +10,14 @@ from pydantic import ValidationError
 
 from energy_optimizer.config import (
     Configuration,
+    EvChargingConfiguration,
     HomeAssistantConfiguration,
     HomeAssistantEvConfiguration,
 )
 from energy_optimizer.optimization.plan_generation import (
     PlanGenerator,
     deadline_hours,
+    immediate_charging,
 )
 from energy_optimizer.providers.home_assistant_ev import (
     HomeAssistantError,
@@ -177,3 +179,37 @@ def test_a_car_that_is_not_plugged_in_is_planned_with_a_shortfall(
 
     assert stored.plan.ev_shortfall_kwh == pytest.approx(6.0)
     assert sum(h.ev.charge_kw for h in stored.plan.hours if h.ev) == 0.0
+
+
+def immediate_schedule(
+    soc: str, target_percent: float, cable: str = "on", hours: int = 8
+) -> tuple[float, ...]:
+    car = importer(ev_responses(soc, cable)).fetch(now=NOW)
+    specification = immediate_charging(car, target_percent / 100 * 60, hours)
+    assert specification.fixed_charge_kw is not None
+    return specification.fixed_charge_kw
+
+
+def test_immediate_charging_uses_full_power_until_the_target_is_stored() -> None:
+    schedule = immediate_schedule("50", 80)
+
+    assert schedule == pytest.approx((4.0,) * 5 + (0.0,) * 3)
+
+
+def test_immediate_charging_ends_with_the_remaining_energy() -> None:
+    schedule = immediate_schedule("50", 55)
+
+    assert schedule == pytest.approx((3 / 0.9,) + (0.0,) * 7)
+
+
+def test_immediate_charging_rounds_a_tiny_remainder_up_to_the_charger_minimum() -> None:
+    assert immediate_schedule("50", 50.5)[0] == pytest.approx(1.4)
+
+
+def test_immediate_charging_never_charges_an_unplugged_car() -> None:
+    assert immediate_schedule("50", 80, cable="off") == (0.0,) * 8
+
+
+def test_the_deadline_strategy_requires_a_deadline() -> None:
+    with pytest.raises(ValidationError):
+        EvChargingConfiguration.model_validate({"minimum_soc_percent": 80})
