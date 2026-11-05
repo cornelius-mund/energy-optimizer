@@ -314,8 +314,15 @@ receives one coherent `ProviderDataSnapshot`, plans every future hour covered by
 both the prices and the PV forecast, and stores the latest optimal plan, which
 `GET /plan` returns (404 before the first plan). A snapshot the solver cannot
 satisfy is reported as `plan_status: failed` and keeps the previous plan. The load
-forecast is a baseline: the mean of the same local hour over the last seven days
-of household-load history, ignoring excluded hours. The battery round-trip
+forecast is chosen by a backtest (`load_forecast.method`, default `auto`): each
+method forecasts the last `backtest_days` (default 7) days from the history before
+them and the one with the smallest mean absolute error wins. Methods are
+`seven_day_mean` (the same local hour over the last seven days) and
+`weekday_profile` (the same local hour on the same kind of day, weekday or weekend,
+over the last 28 days; at least two samples per hour). Excluded hours never
+contribute. If the best method cannot forecast the planned hours the next one is
+tried; if none can, planning fails with an explicit error and keeps the previous
+plan. `GET /plan` reports the method and its backtest error as `load_forecast`. The battery round-trip
 efficiency is split evenly over charging and discharging, every kWh the battery
 delivers costs `home_assistant.battery.throughput_cost_eur_per_kwh` (default 0, the
 wear of the cells; the optimizer only cycles the battery when the price spread pays

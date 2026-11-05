@@ -6,6 +6,7 @@ from starlette.responses import RedirectResponse
 from energy_optimizer import __version__
 from energy_optimizer.api.schemas import (
     HourlyOptimizationRequest,
+    LoadForecastResponse,
     OptimizationResponse,
     PlannedBatteryResponse,
     PlannedEvResponse,
@@ -157,6 +158,14 @@ def current_plan(http_request: Request) -> PlanSnapshotResponse:
         interval_minutes=60,
         hours=len(stored.plan.hours),
         objective_eur=stored.plan.objective_eur,
+        load_forecast=(
+            None
+            if stored.load_forecast_method is None
+            else LoadForecastResponse(
+                method=stored.load_forecast_method,
+                mean_absolute_error_kw=stored.load_forecast_mae_kw,
+            )
+        ),
         ev_shortfall_kwh=stored.plan.ev_shortfall_kwh,
         battery_throughput_kwh=stored.plan.battery_throughput_kwh,
         degradation_cost_eur=stored.plan.degradation_cost_eur,

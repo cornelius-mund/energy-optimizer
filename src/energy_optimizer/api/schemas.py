@@ -743,7 +743,17 @@ class OptimizationResponse(_StrictModel):
     schedule: list[PlannedHourResponse]
 
 
+class LoadForecastResponse(_StrictModel):
+    """How the household load of the plan was forecast."""
+
+    method: str
+    mean_absolute_error_kw: float | None = Field(
+        description="Backtest error of the method in kW; null if it could not be tested"
+    )
+
+
 class PlanSnapshotResponse(OptimizationResponse):
     """The latest plan stored by the orchestration cycle."""
 
     created_at: datetime = Field(description="When the provider snapshot was taken")
+    load_forecast: LoadForecastResponse | None = None

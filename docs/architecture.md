@@ -33,6 +33,7 @@ src/energy_optimizer/
 │   ├── battery_model.py      # Battery dispatch and state-of-charge constraints
 │   ├── linopy_solver.py      # linopy and HiGHS implementation of the port
 │   ├── ev_model.py           # EV charging constraints
+│   ├── load_forecast.py      # Load forecast methods and backtest selection
 │   └── plan_generation.py    # Snapshot to planning problem, solve, persist the plan
 ├── control/
 │   └── ev_controller.py      # Applies the planned EV power through Home Assistant

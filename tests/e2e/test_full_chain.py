@@ -459,3 +459,12 @@ def test_the_running_service_hands_the_charger_back_while_no_plan_covers_the_hou
             },
         ),
     ]
+
+
+def test_the_plan_reports_how_the_load_was_forecast(
+    chain: tuple[str, FakeWorld],
+) -> None:
+    forecast = _wait_for_plan(chain[0])["load_forecast"]
+
+    assert forecast["method"] in {"seven_day_mean", "weekday_profile"}
+    assert forecast["mean_absolute_error_kw"] == pytest.approx(0.0, abs=1e-6)
