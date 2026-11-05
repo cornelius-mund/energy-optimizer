@@ -303,19 +303,37 @@ def test_the_car_is_charged_to_its_target_before_the_deadline_in_cheap_hours(
     assert average_charging_price < average_price
 
 
+def _chain_with(
+    tmp_path_factory: pytest.TempPathFactory, name: str, ev_charging: dict[str, Any]
+) -> Iterator[tuple[str, FakeWorld]]:
+    root = tmp_path_factory.mktemp(name)
+    with running_fake_world() as (world_url, world):
+        configuration = _chain_configuration(world_url, root / "provider-data")
+        configuration["ev_charging"] = ev_charging
+        with running_service(configuration, root) as service_url:
+            yield service_url, world
+
+
 @pytest.fixture(scope="module")
 def immediate_chain(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[tuple[str, FakeWorld]]:
-    root = tmp_path_factory.mktemp("immediate-chain")
-    with running_fake_world() as (world_url, world):
-        configuration = _chain_configuration(world_url, root / "provider-data")
-        configuration["ev_charging"] = {
-            "strategy": "immediate",
-            "minimum_soc_percent": EV_TARGET_PERCENT,
-        }
-        with running_service(configuration, root) as service_url:
-            yield service_url, world
+    yield from _chain_with(
+        tmp_path_factory,
+        "immediate-chain",
+        {"strategy": "immediate", "minimum_soc_percent": EV_TARGET_PERCENT},
+    )
+
+
+@pytest.fixture(scope="module")
+def surplus_chain(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, FakeWorld]]:
+    yield from _chain_with(
+        tmp_path_factory,
+        "surplus-chain",
+        {"strategy": "surplus", "minimum_soc_percent": EV_TARGET_PERCENT},
+    )
 
 
 def test_the_immediate_strategy_charges_at_full_power_from_the_first_hour(
@@ -332,3 +350,19 @@ def test_the_immediate_strategy_charges_at_full_power_from_the_first_hour(
     )
     assert sum(charged_kw) * EV_EFFICIENCY == pytest.approx(needed_kwh)
     assert all(kw == pytest.approx(0.0, abs=TOLERANCE) for kw in charged_kw[6:])
+
+
+def test_the_surplus_strategy_charges_only_from_pv_that_the_household_leaves(
+    surplus_chain: tuple[str, FakeWorld],
+) -> None:
+    plan = _wait_for_plan(surplus_chain[0])
+    charged = [h for h in plan["schedule"] if h["ev"]["charge_kw"] > TOLERANCE]
+
+    assert charged
+    for hour in plan["schedule"]:
+        surplus_kw = max(pv_kw(_hour_of_day(hour)) - hour["load_kw"], 0.0)
+        assert hour["ev"]["charge_kw"] <= surplus_kw + TOLERANCE
+    assert max(h["ev"]["state_of_charge_kwh"] for h in plan["schedule"]) <= (
+        EV_CAPACITY_KWH * EV_TARGET_PERCENT / 100 + TOLERANCE
+    )
+    assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=TOLERANCE)

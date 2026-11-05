@@ -148,3 +148,35 @@ def test_a_fixed_charge_schedule_is_followed_whatever_the_prices() -> None:
     assert charged_kw(plan) == pytest.approx([4.0, 4.0, 0.0, 0.0], abs=TOLERANCE)
     assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
     assert plan.objective_eur == pytest.approx(4.0 * 0.30 + 4.0 * 0.10)
+
+
+def test_surplus_charging_never_uses_more_than_the_pv_that_the_household_leaves() -> (
+    None
+):
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        surplus_kw=(0.0, 3.0, 0.5, 0.0),
+        value_eur_per_kwh=1.0,
+    )
+
+    plan = solve_with(
+        ev, prices=(0.30, 0.10, 0.20, 0.40), pv_forecast_kw=(0, 3, 0.5, 0)
+    )
+
+    # Charging is worth it whenever the export revenue forgone (0.05) is below
+    # nothing: it is free energy otherwise lost, so the car takes what it can.
+    assert charged_kw(plan) == pytest.approx([0.0, 3.0, 0.0, 0.0], abs=TOLERANCE)
+    assert all(hour.grid_import_kw <= TOLERANCE for hour in plan.hours)
+
+
+def test_surplus_charging_stops_at_the_charge_limit() -> None:
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        surplus_kw=(4.0, 4.0, 4.0, 4.0),
+        charge_limit_kwh=INITIAL_SOC_KWH + 5.0,
+        value_eur_per_kwh=1.0,
+    )
+
+    plan = solve_with(ev, pv_forecast_kw=(4.0, 4.0, 4.0, 4.0))
+
+    assert sum(charged_kw(plan)) * 0.9 <= 5.0 + TOLERANCE

@@ -159,6 +159,9 @@ def _minimize_net_cost(
     objective = (import_cost - export_revenue).sum()
     if variables.ev is not None:
         objective = objective + SHORTFALL_PENALTY_EUR_PER_KWH * variables.ev.shortfall
+        assert problem.ev is not None
+        stored_value = problem.ev.value_eur_per_kwh * problem.ev.charge_efficiency
+        objective = objective - stored_value * variables.ev.charge.sum()
     model.add_objective(objective)
 
 

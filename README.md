@@ -364,10 +364,16 @@ ev_charging:
   deadline: "07:00"          # local time, see `timezone`
 ```
 
-Strategies (`ev_charging.strategy`): `deadline` (default) and `immediate`. With
+Strategies (`ev_charging.strategy`): `deadline` (default), `immediate` and `surplus`. With
 `immediate` the car charges at full power from the first hour while plugged in until
 `minimum_soc_percent` is stored (the last hour is rounded up to the charger minimum);
 no deadline is needed and the rest of the plan is optimized around that fixed load.
+
+With `surplus` the car charges only with PV that the household load leaves over
+(forecast PV minus forecast load, per hour), up to `minimum_soc_percent` (default
+100). It has no deadline and no target; each kWh stored is valued above exporting
+it, so the car takes the surplus whenever the charger minimum power is reached.
+It never draws from the grid because its power is bounded by the surplus.
 
 The `deadline` strategy: the car must hold `minimum_soc_percent` at the next
 local `deadline`. The plan charges it in the cheapest hours before then, using PV

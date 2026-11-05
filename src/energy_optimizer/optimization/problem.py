@@ -43,7 +43,11 @@ class EvSpecification:
     between its minimum and maximum. A target that cannot be reached is not an
     error: the plan charges as much as possible and reports the shortfall.
     A ``fixed_charge_kw`` schedule replaces the choice of hours and power; the
-    rest of the plan is optimized around it.
+    rest of the plan is optimized around it. ``surplus_kw`` bounds the charge
+    power per hour (PV that the household does not use) and ``charge_limit_kwh``
+    the state of charge the car is charged up to. Every kWh stored beyond the
+    target is worth ``value_eur_per_kwh`` in the optimization (not in the reported
+    objective), which is what makes the car take energy that would be exported.
     """
 
     capacity_kwh: KilowattHour
@@ -55,6 +59,9 @@ class EvSpecification:
     maximum_charge_kw: Kilowatt
     charge_efficiency: float
     fixed_charge_kw: tuple[Kilowatt, ...] | None = None
+    surplus_kw: tuple[Kilowatt, ...] | None = None
+    charge_limit_kwh: KilowattHour | None = None
+    value_eur_per_kwh: EuroPerKilowattHour = 0.0
 
 
 @dataclass(frozen=True)

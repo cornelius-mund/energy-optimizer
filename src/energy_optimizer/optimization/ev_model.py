@@ -36,7 +36,7 @@ def add_ev(
         charge=model.add_variables(
             lower=0 if fixed is None else pandas.Series(fixed, index=hours),
             upper=(
-                specification.maximum_charge_kw * can_charge
+                _power_bound(specification, hours, can_charge)
                 if fixed is None
                 else pandas.Series(fixed, index=hours)
             ),
@@ -45,7 +45,7 @@ def add_ev(
         ),
         state_of_charge=model.add_variables(
             lower=0,
-            upper=specification.capacity_kwh,
+            upper=specification.charge_limit_kwh or specification.capacity_kwh,
             coords=[hours],
             name="ev_soc_kwh",
         ),
@@ -58,6 +58,16 @@ def add_ev(
     _add_state_of_charge_dynamics(model, hours, specification, variables)
     _require_target_at_deadline(model, hours, specification, variables)
     return variables
+
+
+def _power_bound(
+    specification: EvSpecification, hours: pandas.RangeIndex, can_charge: pandas.Series
+) -> pandas.Series:
+    bound = specification.maximum_charge_kw * can_charge
+    if specification.surplus_kw is None:
+        return bound
+    surplus = pandas.Series(specification.surplus_kw, index=hours, dtype=float)
+    return bound.clip(upper=surplus)
 
 
 def _limit_power_to_the_charger_range(

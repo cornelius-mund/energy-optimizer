@@ -32,6 +32,7 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 logger = logging.getLogger(__name__)
 
 LOAD_FORECAST_DAYS = 7
+SURPLUS_CHARGING_VALUE_EUR_PER_KWH = 1.0
 ONE_HOUR = timedelta(hours=1)
 PLAN_KEY = ProviderDataKey("optimization-plan", "energy-optimizer", "current")
 
@@ -149,13 +150,36 @@ def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecifica
     )
 
 
+def pv_surplus_charging(
+    ev: EvData, limit_kwh: float, surplus_kw: tuple[float, ...]
+) -> EvSpecification:
+    """Charge only from PV that the household does not use, up to the limit."""
+    hours = len(surplus_kw)
+    return EvSpecification(
+        capacity_kwh=ev.capacity_kwh,
+        initial_soc_kwh=ev.state_of_charge_kwh,
+        target_soc_kwh=0.0,
+        deadline_hours=hours,
+        plugged_in=(ev.plugged_in,) * hours,
+        minimum_charge_kw=ev.minimum_charge_kw,
+        maximum_charge_kw=ev.maximum_charge_kw,
+        charge_efficiency=ev.charge_efficiency,
+        surplus_kw=surplus_kw,
+        charge_limit_kwh=min(limit_kwh, ev.capacity_kwh),
+        value_eur_per_kwh=SURPLUS_CHARGING_VALUE_EUR_PER_KWH,
+    )
+
+
 def ev_specification(
     ev: EvData,
     charging: EvChargingConfiguration,
     hour_starts: list[datetime],
     time_zone: ZoneInfo,
+    surplus_kw: tuple[float, ...],
 ) -> EvSpecification | None:
-    target_kwh = charging.minimum_soc_percent / 100 * ev.capacity_kwh
+    target_kwh = charging.target_soc_percent / 100 * ev.capacity_kwh
+    if charging.strategy == "surplus":
+        return pv_surplus_charging(ev, target_kwh, surplus_kw)
     if charging.strategy == "immediate":
         return immediate_charging(ev, target_kwh, len(hour_starts))
     assert charging.deadline is not None
@@ -168,7 +192,7 @@ def ev_specification(
     return EvSpecification(
         capacity_kwh=ev.capacity_kwh,
         initial_soc_kwh=ev.state_of_charge_kwh,
-        target_soc_kwh=charging.minimum_soc_percent / 100 * ev.capacity_kwh,
+        target_soc_kwh=target_kwh,
         deadline_hours=hours_until_deadline,
         plugged_in=(ev.plugged_in,) * len(hour_starts),
         minimum_charge_kw=ev.minimum_charge_kw,
@@ -259,15 +283,21 @@ class PlanGenerator:
             )
         price_index = {start: i for i, start in enumerate(prices.timestamps)}
         prices_at = [price_index[start] for start in hour_starts]
+        load_kw = load_forecast_kw(
+            load, hour_starts, ZoneInfo(self.configuration.timezone)
+        )
+        pv_forecast_kw = tuple(
+            pv.generation_kw[int((start - pv.start_time) / ONE_HOUR)]
+            for start in hour_starts
+        )
+        surplus_kw = tuple(
+            max(pv_kw - consumed_kw, 0.0)
+            for pv_kw, consumed_kw in zip(pv_forecast_kw, load_kw, strict=True)
+        )
         return PlanningProblem(
             start_time=hour_starts[0],
-            load_kw=load_forecast_kw(
-                load, hour_starts, ZoneInfo(self.configuration.timezone)
-            ),
-            pv_forecast_kw=tuple(
-                pv.generation_kw[int((start - pv.start_time) / ONE_HOUR)]
-                for start in hour_starts
-            ),
+            load_kw=load_kw,
+            pv_forecast_kw=pv_forecast_kw,
             import_price_eur_per_kwh=self._import_prices(
                 prices, hour_starts, prices_at
             ),
@@ -282,18 +312,25 @@ class PlanGenerator:
                 if isinstance(battery, BatteryData)
                 else None
             ),
-            ev=self._ev(snapshot, hour_starts),
+            ev=self._ev(snapshot, hour_starts, surplus_kw),
         )
 
     def _ev(
-        self, snapshot: ProviderDataSnapshot, hour_starts: list[datetime]
+        self,
+        snapshot: ProviderDataSnapshot,
+        hour_starts: list[datetime],
+        surplus_kw: tuple[float, ...],
     ) -> EvSpecification | None:
         ev = snapshot.data.get("ev")
         charging = self.configuration.ev_charging
         if not isinstance(ev, EvData) or charging is None:
             return None
         return ev_specification(
-            ev, charging, hour_starts, ZoneInfo(self.configuration.timezone)
+            ev,
+            charging,
+            hour_starts,
+            ZoneInfo(self.configuration.timezone),
+            surplus_kw,
         )
 
 
