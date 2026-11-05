@@ -368,7 +368,9 @@ class HomeAssistantEvConfiguration(_StrictModel):
 class EvChargingConfiguration(_StrictModel):
     """What the owner wants from the car: a state of charge at a local time."""
 
-    strategy: Literal["deadline", "immediate", "surplus"] = "deadline"
+    strategy: Literal["deadline", "immediate", "surplus", "minimum_plus_target"] = (
+        "deadline"
+    )
     minimum_soc_percent: float | None = Field(
         default=None,
         gt=0,
@@ -382,20 +384,52 @@ class EvChargingConfiguration(_StrictModel):
         default=None,
         description="Local time of day by which the car must hold the state of charge",
     )
+    target_soc_percent: float | None = Field(
+        default=None,
+        gt=0,
+        le=100,
+        description=(
+            "`minimum_plus_target`: the car is charged above the minimum up to this "
+            "state of charge while energy costs less than `value_eur_per_kwh`"
+        ),
+    )
+    value_eur_per_kwh: float | None = Field(
+        default=None,
+        ge=0,
+        description="`minimum_plus_target`: value of a stored kWh above the minimum",
+    )
 
     @model_validator(mode="after")
     def validate_deadline(self) -> "EvChargingConfiguration":
-        if self.strategy == "deadline" and (
+        if self.strategy in ("deadline", "minimum_plus_target") and (
             self.deadline is None or self.minimum_soc_percent is None
         ):
             raise ValueError(
                 "ev_charging.deadline and minimum_soc_percent are required for "
-                "the deadline strategy"
+                f"the {self.strategy} strategy"
             )
+        if self.strategy == "minimum_plus_target":
+            self._validate_soft_target()
         return self
 
+    def _validate_soft_target(self) -> None:
+        if self.target_soc_percent is None or self.value_eur_per_kwh is None:
+            raise ValueError(
+                "ev_charging.target_soc_percent and value_eur_per_kwh are required "
+                "for the minimum_plus_target strategy"
+            )
+        assert self.minimum_soc_percent is not None
+        if self.target_soc_percent < self.minimum_soc_percent:
+            raise ValueError(
+                "ev_charging.target_soc_percent must not be below minimum_soc_percent"
+            )
+
     @property
-    def target_soc_percent(self) -> float:
+    def limit_soc_percent(self) -> float:
+        """The state of charge the car is charged up to, as far as it is a limit."""
+        if self.strategy == "minimum_plus_target":
+            assert self.target_soc_percent is not None
+            return self.target_soc_percent
         return 100.0 if self.minimum_soc_percent is None else self.minimum_soc_percent
 
 
