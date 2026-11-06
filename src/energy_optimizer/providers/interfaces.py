@@ -11,6 +11,7 @@ HOUSEHOLD_LOAD_MAX_VALUES = 87_672
 PV_GENERATION_SOURCE_ID = "pv_generation"
 GRID_FLOW_SOURCE_ID = "grid_flow"
 BATTERY_SOURCE_ID = "battery"
+EV_SOURCE_ID = "ev"
 BATTERY_EFFICIENCY_SOURCE_ID = "battery_efficiency"
 BATTERY_EFFICIENCY_HISTORY_SOURCE_ID = "battery_efficiency_history"
 ELECTRICITY_PRICE_SOURCE_ID = "de"
@@ -113,6 +114,24 @@ class BatteryData:
     battery_efficiency: float
     unit: Literal["kWh"]
     power_unit: Literal["kW"]
+    source: SourceMetadata
+    retrieved_at: datetime
+    latest_observation_at: datetime
+
+
+@dataclass(frozen=True)
+class EvData:
+    """Current state of the electric vehicle and its charger."""
+
+    schema_version: Literal["1"]
+    start_time: datetime
+    state_of_charge_kwh: float
+    capacity_kwh: float
+    plugged_in: bool
+    minimum_charge_kw: float
+    maximum_charge_kw: float
+    charge_efficiency: float
+    unit: Literal["kWh"]
     source: SourceMetadata
     retrieved_at: datetime
     latest_observation_at: datetime

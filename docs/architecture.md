@@ -32,6 +32,7 @@ src/energy_optimizer/
 │   ├── solver.py             # PlanSolver port used by the application
 │   ├── battery_model.py      # Battery dispatch and state-of-charge constraints
 │   ├── linopy_solver.py      # linopy and HiGHS implementation of the port
+│   ├── ev_model.py           # EV charging constraints
 │   └── plan_generation.py    # Snapshot to planning problem, solve, persist the plan
 ├── orchestration.py          # Scheduled provider retrieval and plan triggers
 ├── providers/

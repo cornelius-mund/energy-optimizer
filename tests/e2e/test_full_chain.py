@@ -2,7 +2,7 @@
 
 import time
 from collections.abc import Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,9 @@ from energy_optimizer.config import TariffConfiguration
 from fake_world import (
     BATTERY_SOC_ENTITY,
     BATTERY_SOC_PERCENT,
+    EV_PLUG_ENTITY,
+    EV_SOC_ENTITY,
+    EV_SOC_PERCENT,
     HOME_ASSISTANT_TOKEN,
     HOUSEHOLD_ENERGY_ENTITY,
     FakeWorld,
@@ -44,7 +47,22 @@ TARIFF = {
     "electricity_tax_ct_per_kwh": 2.05,
     "vat_rate": 0.19,
 }
-PLANNING_SOURCES = ["household_load", "pv_generation", "electricity_prices", "battery"]
+EV_CAPACITY_KWH = 60.0
+EV_TARGET_PERCENT = 60.0
+EV_MINIMUM_CHARGE_KW = 1.4
+EV_MAXIMUM_CHARGE_KW = 4.0
+EV_EFFICIENCY = 0.9
+HOURS_UNTIL_EV_DEADLINE = 12
+PLANNING_SOURCES = [
+    "household_load",
+    "pv_generation",
+    "electricity_prices",
+    "battery",
+    "ev",
+]
+
+
+EV_DEADLINE = datetime.now(UTC) + timedelta(hours=HOURS_UNTIL_EV_DEADLINE)
 
 
 def _chain_configuration(world_url: str, data_directory: Path) -> dict[str, Any]:
@@ -76,6 +94,18 @@ def _chain_configuration(world_url: str, data_directory: Path) -> dict[str, Any]
         "maximum_charge": 4,
         "maximum_discharge": 4,
         "battery_efficiency": BATTERY_EFFICIENCY,
+    }
+    home_assistant["ev"] = {
+        "state_of_charge": {"entity_id": EV_SOC_ENTITY, "unit": "%"},
+        "plugged_in": {"entity_id": EV_PLUG_ENTITY},
+        "capacity_kwh": EV_CAPACITY_KWH,
+        "minimum_charge_kw": EV_MINIMUM_CHARGE_KW,
+        "maximum_charge_kw": EV_MAXIMUM_CHARGE_KW,
+        "charge_efficiency": EV_EFFICIENCY,
+    }
+    configuration["ev_charging"] = {
+        "minimum_soc_percent": EV_TARGET_PERCENT,
+        "deadline": EV_DEADLINE.strftime("%H:00"),
     }
     del home_assistant["grid_import"], home_assistant["grid_export"]
     configuration["forecast_solar"]["base_url"] = world_url
@@ -158,7 +188,7 @@ def test_each_planned_hour_balances_and_uses_the_forecast_inputs(
             pv_kw(hour_of_day)
         )
         supplied = hour["pv_generation_kw"] + hour["grid_import_kw"]
-        consumed = hour["load_kw"] + hour["grid_export_kw"]
+        consumed = hour["load_kw"] + hour["grid_export_kw"] + hour["ev"]["charge_kw"]
         assert supplied + battery["discharge_kw"] == pytest.approx(
             consumed + battery["charge_kw"], abs=TOLERANCE
         )
@@ -216,7 +246,58 @@ def test_the_plan_costs_less_than_buying_everything_at_the_tariff(
         - max(pv_kw(_hour_of_day(h)) - h["load_kw"], 0) * _market_price(h)
         for h in schedule
     )
+    ev_energy_kwh = (
+        EV_CAPACITY_KWH * (EV_TARGET_PERCENT - EV_SOC_PERCENT) / 100 / EV_EFFICIENCY
+    )
+    immediate_charging_cost = 0.0
+    for hour in schedule:
+        charge_kw = min(EV_MAXIMUM_CHARGE_KW, ev_energy_kwh)
+        immediate_charging_cost += charge_kw * _gross_price(hour)
+        ev_energy_kwh -= charge_kw
     planned_cost = sum(h["import_cost_eur"] - h["export_revenue_eur"] for h in schedule)
 
     assert plan["objective_eur"] == pytest.approx(planned_cost, abs=1e-6)
-    assert plan["objective_eur"] < unplanned_cost - 0.01
+    assert plan["objective_eur"] < unplanned_cost + immediate_charging_cost - 0.01
+
+
+def _deadline_index(schedule: list[dict[str, Any]]) -> int:
+    start = datetime.fromisoformat(schedule[0]["start_time"])
+    deadline = EV_DEADLINE.replace(minute=0, second=0, microsecond=0)
+    return int((deadline - start) / timedelta(hours=1))
+
+
+def test_the_car_is_charged_to_its_target_before_the_deadline_in_cheap_hours(
+    chain: tuple[str, FakeWorld],
+) -> None:
+    plan = _wait_for_plan(chain[0])
+    schedule = plan["schedule"]
+    deadline_index = _deadline_index(schedule)
+    target_kwh = EV_CAPACITY_KWH * EV_TARGET_PERCENT / 100
+
+    assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=TOLERANCE)
+    assert schedule[deadline_index - 1]["ev"]["state_of_charge_kwh"] >= (
+        target_kwh - TOLERANCE
+    )
+    previous = EV_CAPACITY_KWH * EV_SOC_PERCENT / 100
+    for index, hour in enumerate(schedule):
+        charge_kw = hour["ev"]["charge_kw"]
+        assert charge_kw == pytest.approx(0.0, abs=TOLERANCE) or (
+            EV_MINIMUM_CHARGE_KW - TOLERANCE
+            <= charge_kw
+            <= EV_MAXIMUM_CHARGE_KW + TOLERANCE
+        )
+        if index >= deadline_index:
+            assert charge_kw == pytest.approx(0.0, abs=TOLERANCE)
+        assert hour["ev"]["state_of_charge_kwh"] == pytest.approx(
+            previous + charge_kw * EV_EFFICIENCY, abs=1e-4
+        )
+        previous = hour["ev"]["state_of_charge_kwh"]
+
+    before_deadline = schedule[:deadline_index]
+    charged_kwh = sum(h["ev"]["charge_kw"] for h in before_deadline)
+    average_charging_price = (
+        sum(h["ev"]["charge_kw"] * _gross_price(h) for h in before_deadline)
+        / charged_kwh
+    )
+    average_price = sum(_gross_price(h) for h in before_deadline) / deadline_index
+    assert average_charging_price < average_price

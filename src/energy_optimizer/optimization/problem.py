@@ -35,6 +35,26 @@ class BatterySpecification:
 
 
 @dataclass(frozen=True)
+class EvSpecification:
+    """An electric vehicle that charges while plugged in and leaves at a deadline.
+
+    Charging is only planned before ``deadline_hours``; the car must hold
+    ``target_soc_kwh`` by then. A charger delivers either nothing or a power
+    between its minimum and maximum. A target that cannot be reached is not an
+    error: the plan charges as much as possible and reports the shortfall.
+    """
+
+    capacity_kwh: KilowattHour
+    initial_soc_kwh: KilowattHour
+    target_soc_kwh: KilowattHour
+    deadline_hours: int
+    plugged_in: tuple[bool, ...]
+    minimum_charge_kw: Kilowatt
+    maximum_charge_kw: Kilowatt
+    charge_efficiency: float
+
+
+@dataclass(frozen=True)
 class PlanningProblem:
     """Hourly inputs and technical limits of one planning horizon."""
 
@@ -47,6 +67,7 @@ class PlanningProblem:
     maximum_export_kw: Kilowatt
     time_limit_seconds: float
     battery: BatterySpecification | None = None
+    ev: EvSpecification | None = None
 
     def hours(self) -> int:
         return len(self.load_kw)
@@ -56,6 +77,12 @@ class PlanningProblem:
 class PlannedBatteryHour:
     charge_kw: Kilowatt
     discharge_kw: Kilowatt
+    state_of_charge_kwh: KilowattHour
+
+
+@dataclass(frozen=True)
+class PlannedEvHour:
+    charge_kw: Kilowatt
     state_of_charge_kwh: KilowattHour
 
 
@@ -71,18 +98,21 @@ class PlannedHour:
     import_cost_eur: Euro
     export_revenue_eur: Euro
     battery: PlannedBatteryHour | None = None
+    ev: PlannedEvHour | None = None
 
 
 @dataclass(frozen=True)
 class Plan:
     """A schedule exists only if the solver proved it optimal.
 
-    The objective is the import cost minus the export revenue.
+    The objective is the import cost minus the export revenue, without the
+    penalty the solver applies to an EV shortfall.
     """
 
     status: PlanStatus
     objective_eur: Euro | None
     hours: tuple[PlannedHour, ...]
+    ev_shortfall_kwh: KilowattHour = 0.0
 
     def has_schedule(self) -> bool:
         return self.status is PlanStatus.OPTIMAL

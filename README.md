@@ -345,6 +345,35 @@ tariff:
   vat_rate: 0.19
 ```
 
+### Electric vehicle charging
+
+Configure the car under `home_assistant.ev` and the wish under `ev_charging`, then
+add `ev` to the orchestration sources and the required plan sources:
+
+```yaml
+home_assistant:
+  ev:
+    state_of_charge: {entity_id: sensor.ev9_battery_level, unit: "%"}  # or kWh
+    plugged_in: {entity_id: binary_sensor.ev9_charging_cable, plugged_in_states: ["on"]}
+    capacity_kwh: 99.8
+    minimum_charge_kw: 1.4   # lowest power the wall box delivers
+    maximum_charge_kw: 11
+    charge_efficiency: 0.9
+ev_charging:
+  minimum_soc_percent: 80
+  deadline: "07:00"          # local time, see `timezone`
+```
+
+The strategy is `deadline`: the car must hold `minimum_soc_percent` at the next
+local `deadline`. The plan charges it in the cheapest hours before then, using PV
+surplus first because exporting it pays less than importing costs. Charging is
+planned only while the car is plugged in (the current plug state is assumed for the
+whole horizon) and only before the deadline. The charger delivers either nothing or
+a power between its minimum and maximum. If the target cannot be reached, the plan
+charges as much as possible and reports `ev_shortfall_kwh` instead of failing. A
+deadline beyond the planning horizon is not planned yet. The plan hours carry an
+`ev` object with `charge_kw`, `state_of_charge_kwh` and `state_of_charge_percent`.
+
 ### Home Assistant measured PV history
 
 Configure `home_assistant.pv_generation` as an energy aggregation of cumulative

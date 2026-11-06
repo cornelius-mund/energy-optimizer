@@ -4,15 +4,16 @@ import logging
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from pydantic import TypeAdapter
 
-from energy_optimizer.config import Configuration
+from energy_optimizer.config import Configuration, EvChargingConfiguration
 from energy_optimizer.optimization.linopy_solver import LinopyPlanSolver
 from energy_optimizer.optimization.problem import (
     BatterySpecification,
+    EvSpecification,
     Kilowatt,
     Plan,
     PlanningProblem,
@@ -22,6 +23,7 @@ from energy_optimizer.orchestration import ProviderDataSnapshot
 from energy_optimizer.providers.interfaces import (
     BatteryData,
     ElectricityPriceData,
+    EvData,
     HouseholdLoadData,
     PvGenerationData,
 )
@@ -46,6 +48,7 @@ class PlanSnapshot:
     start_time: datetime
     battery_capacity_kwh: float | None
     plan: Plan
+    ev_capacity_kwh: float | None = None
 
 
 PLAN_ADAPTER = TypeAdapter(PlanSnapshot)
@@ -94,6 +97,48 @@ def battery_specification(battery: BatteryData) -> BatterySpecification:
     )
 
 
+def deadline_hours(
+    deadline: time, hour_starts: list[datetime], time_zone: ZoneInfo
+) -> int | None:
+    """Count the planned hours before the next local ``deadline``.
+
+    Returns None when the deadline lies beyond the planning horizon, because the
+    car then does not need to be charged by this plan yet.
+    """
+    first_hour = hour_starts[0].astimezone(time_zone)
+    candidate = datetime.combine(first_hour.date(), deadline, tzinfo=time_zone)
+    if candidate <= first_hour:
+        candidate = datetime.combine(
+            first_hour.date() + timedelta(days=1), deadline, tzinfo=time_zone
+        )
+    hours_until = -(-(candidate.astimezone(UTC) - hour_starts[0]) // ONE_HOUR)
+    return hours_until if hours_until <= len(hour_starts) else None
+
+
+def ev_specification(
+    ev: EvData,
+    charging: EvChargingConfiguration,
+    hour_starts: list[datetime],
+    time_zone: ZoneInfo,
+) -> EvSpecification | None:
+    hours_until_deadline = deadline_hours(charging.deadline, hour_starts, time_zone)
+    if hours_until_deadline is None:
+        logger.warning(
+            "event=ev_deadline_beyond_horizon component=optimization operation=plan"
+        )
+        return None
+    return EvSpecification(
+        capacity_kwh=ev.capacity_kwh,
+        initial_soc_kwh=ev.state_of_charge_kwh,
+        target_soc_kwh=charging.minimum_soc_percent / 100 * ev.capacity_kwh,
+        deadline_hours=hours_until_deadline,
+        plugged_in=(ev.plugged_in,) * len(hour_starts),
+        minimum_charge_kw=ev.minimum_charge_kw,
+        maximum_charge_kw=ev.maximum_charge_kw,
+        charge_efficiency=ev.charge_efficiency,
+    )
+
+
 def planning_horizon(
     prices: ElectricityPriceData, pv: PvGenerationData
 ) -> list[datetime]:
@@ -127,6 +172,7 @@ class PlanGenerator:
                 f"the solver did not find an optimal plan: {plan.status.value}"
             )
         battery = snapshot.data.get("battery")
+        ev = snapshot.data.get("ev")
         stored = PlanSnapshot(
             created_at=snapshot.captured_at,
             start_time=problem.start_time,
@@ -134,6 +180,9 @@ class PlanGenerator:
                 battery.capacity_kwh if isinstance(battery, BatteryData) else None
             ),
             plan=plan,
+            ev_capacity_kwh=(
+                ev.capacity_kwh if isinstance(ev, EvData) and problem.ev else None
+            ),
         )
         self.store.save(PLAN_KEY, PLAN_ADAPTER, stored)
         logger.info(
@@ -195,6 +244,18 @@ class PlanGenerator:
                 if isinstance(battery, BatteryData)
                 else None
             ),
+            ev=self._ev(snapshot, hour_starts),
+        )
+
+    def _ev(
+        self, snapshot: ProviderDataSnapshot, hour_starts: list[datetime]
+    ) -> EvSpecification | None:
+        ev = snapshot.data.get("ev")
+        charging = self.configuration.ev_charging
+        if not isinstance(ev, EvData) or charging is None:
+            return None
+        return ev_specification(
+            ev, charging, hour_starts, ZoneInfo(self.configuration.timezone)
         )
 
 

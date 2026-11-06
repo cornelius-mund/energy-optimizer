@@ -19,6 +19,9 @@ HOME_ASSISTANT_TOKEN = "test-token"
 HISTORY_DAYS = 10
 HOUSEHOLD_ENERGY_ENTITY = "sensor.household_energy"
 BATTERY_SOC_ENTITY = "sensor.battery_soc"
+EV_SOC_ENTITY = "sensor.ev9_battery_level"
+EV_PLUG_ENTITY = "binary_sensor.ev9_charging_cable"
+EV_SOC_PERCENT = 30
 BATTERY_SOC_PERCENT = 50
 CHEAP_EUR_PER_MWH = 50.0
 NORMAL_EUR_PER_MWH = 150.0
@@ -47,6 +50,12 @@ def _floor_hour(moment: datetime) -> datetime:
 
 class FakeWorld:
     """State shared by the request handlers of one fake server."""
+
+    states: dict[str, tuple[str, dict[str, str]]] = {
+        BATTERY_SOC_ENTITY: (str(BATTERY_SOC_PERCENT), {"unit_of_measurement": "%"}),
+        EV_SOC_ENTITY: (str(EV_SOC_PERCENT), {"unit_of_measurement": "%"}),
+        EV_PLUG_ENTITY: ("on", {}),
+    }
 
     def __init__(self) -> None:
         self.history_start = _floor_hour(datetime.now(timezone.utc)) - timedelta(
@@ -137,14 +146,18 @@ def _handler(world: FakeWorld) -> type[BaseHTTPRequestHandler]:
                     else [[]]
                 )
                 self._reply(200, body)
-            elif url.path == f"/api/states/{BATTERY_SOC_ENTITY}":
+            elif url.path.startswith("/api/states/") and (
+                url.path.removeprefix("/api/states/") in world.states
+            ):
+                entity = url.path.removeprefix("/api/states/")
+                state, attributes = world.states[entity]
                 self._reply(
                     200,
                     {
-                        "entity_id": BATTERY_SOC_ENTITY,
-                        "state": str(BATTERY_SOC_PERCENT),
+                        "entity_id": entity,
+                        "state": state,
                         "last_updated": datetime.now(timezone.utc).isoformat(),
-                        "attributes": {"unit_of_measurement": "%"},
+                        "attributes": attributes,
                     },
                 )
             elif url.path == "/awattar":

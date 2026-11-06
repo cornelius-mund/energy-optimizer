@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from hypothesis import given
+from hypothesis import given, settings
 from hypothesis import strategies as strategies
 from linopy import Model
 
@@ -173,6 +173,7 @@ def test_an_unknown_solver_termination_is_an_error_not_a_plan(
         solve(problem((1.0,), (0.1,)))
 
 
+@settings(deadline=None)
 @given(
     hourly_inputs=strategies.lists(
         strategies.tuples(
