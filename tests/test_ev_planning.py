@@ -19,6 +19,7 @@ from energy_optimizer.optimization.plan_generation import (
     PlanGenerator,
     deadline_hours,
     immediate_charging,
+    next_deadline,
     pv_surplus_charging,
 )
 from energy_optimizer.providers.home_assistant_ev import (
@@ -280,3 +281,104 @@ def test_the_plan_stores_the_hourly_ev_power_for_the_charger_controller(
     assert schedule.charge_kw == pytest.approx(
         tuple(h.ev.charge_kw for h in stored.plan.hours if h.ev)
     )
+
+
+WEEKLY = {
+    "strategy": "deadline",
+    "weekly": {
+        "monday": {"minimum_soc_percent": 80, "deadline": "07:00"},
+        "saturday": {"minimum_soc_percent": 50, "deadline": "12:00"},
+    },
+}
+
+
+def test_a_weekly_schedule_replaces_the_general_target_on_its_days() -> None:
+    charging = EvChargingConfiguration.model_validate(
+        {**WEEKLY, "minimum_soc_percent": 60, "deadline": "09:00"}
+    )
+
+    targets = charging.day_targets()
+
+    assert targets[0] == (80, time(7, 0))
+    assert targets[1] == (60, time(9, 0))
+    assert targets[5] == (50, time(12, 0))
+
+
+def test_without_a_general_target_only_the_named_weekdays_have_a_deadline() -> None:
+    targets = EvChargingConfiguration.model_validate(WEEKLY).day_targets()
+
+    assert sorted(targets) == [0, 5]
+
+
+def test_a_weekly_schedule_alone_satisfies_the_deadline_strategy() -> None:
+    EvChargingConfiguration.model_validate(WEEKLY)
+    with pytest.raises(ValidationError):
+        EvChargingConfiguration.model_validate({"strategy": "deadline"})
+    with pytest.raises(ValidationError):
+        EvChargingConfiguration.model_validate(
+            {"strategy": "deadline", "minimum_soc_percent": 80}
+        )
+
+
+def test_the_next_deadline_skips_days_without_a_target_and_passed_times() -> None:
+    targets = EvChargingConfiguration.model_validate(WEEKLY).day_targets()
+    # Tuesday 2026-03-10 14:00 Berlin: the next target is Saturday 12:00.
+    tuesday = datetime(2026, 3, 10, 14, tzinfo=BERLIN)
+
+    deadline, percent = next_deadline(targets, tuesday)  # type: ignore[misc]
+
+    assert deadline == datetime(2026, 3, 14, 12, tzinfo=BERLIN)
+    assert percent == 50
+    monday_evening = datetime(2026, 3, 9, 8, tzinfo=BERLIN)
+    deadline, percent = next_deadline(targets, monday_evening)  # type: ignore[misc]
+    assert deadline == datetime(2026, 3, 14, 12, tzinfo=BERLIN)
+
+
+def test_the_monday_target_applies_before_its_deadline() -> None:
+    targets = EvChargingConfiguration.model_validate(WEEKLY).day_targets()
+    monday_early = datetime(2026, 3, 9, 5, tzinfo=BERLIN)
+
+    deadline, percent = next_deadline(targets, monday_early)  # type: ignore[misc]
+
+    assert (deadline, percent) == (datetime(2026, 3, 9, 7, tzinfo=BERLIN), 80)
+
+
+def test_the_soft_target_must_cover_every_weekday_minimum() -> None:
+    with pytest.raises(ValidationError):
+        EvChargingConfiguration.model_validate(
+            {
+                **WEEKLY,
+                "strategy": "minimum_plus_target",
+                "target_soc_percent": 70,
+                "value_eur_per_kwh": 0.2,
+            }
+        )
+
+
+def test_the_plan_uses_the_target_of_the_weekday_that_comes_next(
+    tmp_path: Path,
+) -> None:
+    hours = 30
+    wednesday = {
+        "strategy": "deadline",
+        "weekly": {"wednesday": {"minimum_soc_percent": 80, "deadline": "07:00"}},
+    }
+    settings = configuration().model_dump(mode="json")
+    settings["ev_charging"] = wednesday
+    car = importer(ev_responses("70", "on")).fetch(now=NOW)
+
+    stored = PlanGenerator(
+        Configuration.model_validate(settings), ProviderDataStore(tmp_path)
+    )(
+        snapshot(
+            household_load=flat_history(0.0),
+            pv_generation=pv_forecast([0.0] * hours),
+            electricity_prices=prices([0.30] * hours),
+            ev=car,
+        )
+    )
+
+    # Tuesday 14:00 Berlin to Wednesday 07:00 is 17 hours; nothing is charged after.
+    charged = [h.ev.charge_kw for h in stored.plan.hours if h.ev]
+    assert sum(charged[:17]) * 0.9 == pytest.approx(6.0)
+    assert sum(charged[17:]) == 0.0

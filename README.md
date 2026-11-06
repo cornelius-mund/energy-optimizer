@@ -369,6 +369,23 @@ Strategies (`ev_charging.strategy`): `deadline` (default), `immediate`, `surplus
 `minimum_soc_percent` is stored (the last hour is rounded up to the charger minimum);
 no deadline is needed and the rest of the plan is optimized around that fixed load.
 
+Targets per weekday: instead of (or on top of) the general `minimum_soc_percent` and
+`deadline`, give a `weekly` block. A named day replaces the general target on that
+day, other days use the general one, and a day with neither has no deadline. The plan
+uses the next deadline after the first planned hour (looking up to a week ahead):
+
+```yaml
+ev_charging:
+  strategy: deadline
+  minimum_soc_percent: 60    # general target, optional with a weekly block
+  deadline: "09:00"
+  weekly:
+    monday: {minimum_soc_percent: 80, deadline: "06:30"}
+    saturday: {minimum_soc_percent: 50, deadline: "12:00"}
+```
+
+With `minimum_plus_target`, `target_soc_percent` must not be below any minimum.
+
 With `surplus` the car charges only with PV that the household load leaves over
 (forecast PV minus forecast load, per hour), up to `minimum_soc_percent` (default
 100). It has no deadline and no target; each kWh stored is valued above exporting
