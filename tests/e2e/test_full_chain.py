@@ -325,6 +325,27 @@ def immediate_chain(
     )
 
 
+SOFT_TARGET_PERCENT = 80.0
+SOFT_VALUE_EUR_PER_KWH = 0.25
+
+
+@pytest.fixture(scope="module")
+def soft_target_chain(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, FakeWorld]]:
+    yield from _chain_with(
+        tmp_path_factory,
+        "soft-target-chain",
+        {
+            "strategy": "minimum_plus_target",
+            "minimum_soc_percent": EV_TARGET_PERCENT,
+            "target_soc_percent": SOFT_TARGET_PERCENT,
+            "value_eur_per_kwh": SOFT_VALUE_EUR_PER_KWH,
+            "deadline": EV_DEADLINE.strftime("%H:00"),
+        },
+    )
+
+
 @pytest.fixture(scope="module")
 def surplus_chain(
     tmp_path_factory: pytest.TempPathFactory,
@@ -366,3 +387,29 @@ def test_the_surplus_strategy_charges_only_from_pv_that_the_household_leaves(
         EV_CAPACITY_KWH * EV_TARGET_PERCENT / 100 + TOLERANCE
     )
     assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=TOLERANCE)
+
+
+def test_the_soft_target_charges_cheap_hours_above_the_minimum_but_never_beyond_it(
+    soft_target_chain: tuple[str, FakeWorld],
+) -> None:
+    plan = _wait_for_plan(soft_target_chain[0])
+    schedule = plan["schedule"]
+    deadline_index = _deadline_index(schedule)
+    minimum_kwh = EV_CAPACITY_KWH * EV_TARGET_PERCENT / 100
+    limit_kwh = EV_CAPACITY_KWH * SOFT_TARGET_PERCENT / 100
+    initial_kwh = EV_CAPACITY_KWH * EV_SOC_PERCENT / 100
+
+    assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=TOLERANCE)
+    assert schedule[deadline_index - 1]["ev"]["state_of_charge_kwh"] >= (
+        minimum_kwh - TOLERANCE
+    )
+    assert max(h["ev"]["state_of_charge_kwh"] for h in schedule) <= (
+        limit_kwh + TOLERANCE
+    )
+    worth_it = SOFT_VALUE_EUR_PER_KWH * EV_EFFICIENCY
+    expensive_stored_kwh = sum(
+        h["ev"]["charge_kw"] * EV_EFFICIENCY
+        for h in schedule
+        if _gross_price(h) >= worth_it
+    )
+    assert expensive_stored_kwh <= minimum_kwh - initial_kwh + TOLERANCE

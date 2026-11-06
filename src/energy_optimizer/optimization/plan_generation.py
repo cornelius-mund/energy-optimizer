@@ -177,11 +177,14 @@ def ev_specification(
     time_zone: ZoneInfo,
     surplus_kw: tuple[float, ...],
 ) -> EvSpecification | None:
-    target_kwh = charging.target_soc_percent / 100 * ev.capacity_kwh
+    limit_kwh = charging.limit_soc_percent / 100 * ev.capacity_kwh
     if charging.strategy == "surplus":
-        return pv_surplus_charging(ev, target_kwh, surplus_kw)
+        return pv_surplus_charging(ev, limit_kwh, surplus_kw)
     if charging.strategy == "immediate":
-        return immediate_charging(ev, target_kwh, len(hour_starts))
+        return immediate_charging(ev, limit_kwh, len(hour_starts))
+    assert charging.minimum_soc_percent is not None
+    target_kwh = charging.minimum_soc_percent / 100 * ev.capacity_kwh
+    soft_target = charging.strategy == "minimum_plus_target"
     assert charging.deadline is not None
     hours_until_deadline = deadline_hours(charging.deadline, hour_starts, time_zone)
     if hours_until_deadline is None:
@@ -198,6 +201,8 @@ def ev_specification(
         minimum_charge_kw=ev.minimum_charge_kw,
         maximum_charge_kw=ev.maximum_charge_kw,
         charge_efficiency=ev.charge_efficiency,
+        charge_limit_kwh=limit_kwh if soft_target else None,
+        value_eur_per_kwh=(charging.value_eur_per_kwh or 0.0) if soft_target else 0.0,
     )
 
 

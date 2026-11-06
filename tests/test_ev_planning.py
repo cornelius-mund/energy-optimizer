@@ -229,4 +229,28 @@ def test_surplus_charging_is_bounded_by_the_surplus_and_the_charge_limit() -> No
 def test_the_surplus_strategy_needs_neither_a_deadline_nor_a_target() -> None:
     charging = EvChargingConfiguration.model_validate({"strategy": "surplus"})
 
-    assert charging.target_soc_percent == 100.0
+    assert charging.limit_soc_percent == 100.0
+
+
+SOFT_TARGET = {
+    "strategy": "minimum_plus_target",
+    "minimum_soc_percent": 60,
+    "target_soc_percent": 80,
+    "value_eur_per_kwh": 0.2,
+    "deadline": "07:00",
+}
+
+
+def test_the_soft_target_strategy_needs_its_parameters() -> None:
+    EvChargingConfiguration.model_validate(SOFT_TARGET)
+    for missing in ("target_soc_percent", "value_eur_per_kwh", "deadline"):
+        incomplete = {k: v for k, v in SOFT_TARGET.items() if k != missing}
+        with pytest.raises(ValidationError):
+            EvChargingConfiguration.model_validate(incomplete)
+
+
+def test_the_soft_target_must_not_be_below_the_minimum() -> None:
+    with pytest.raises(ValidationError):
+        EvChargingConfiguration.model_validate(
+            {**SOFT_TARGET, "target_soc_percent": 50}
+        )

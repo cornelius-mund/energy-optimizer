@@ -180,3 +180,44 @@ def test_surplus_charging_stops_at_the_charge_limit() -> None:
     plan = solve_with(ev, pv_forecast_kw=(4.0, 4.0, 4.0, 4.0))
 
     assert sum(charged_kw(plan)) * 0.9 <= 5.0 + TOLERANCE
+
+
+def test_energy_above_the_minimum_is_charged_only_while_it_is_worth_it() -> None:
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        charge_limit_kwh=INITIAL_SOC_KWH + 7.2,
+        value_eur_per_kwh=0.20,
+    )
+
+    plan = solve_with(ev)
+
+    # A stored kWh is worth 0.20 but costs price / 0.9: 0.10 pays, 0.20 does not.
+    assert charged_kw(plan) == pytest.approx([0.0, 4.0, 0.0, 0.0], abs=TOLERANCE)
+    assert plan.objective_eur == pytest.approx(4.0 * 0.10)
+
+
+def test_a_higher_value_makes_the_next_cheapest_hour_worth_charging() -> None:
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        charge_limit_kwh=INITIAL_SOC_KWH + 7.2,
+        value_eur_per_kwh=0.25,
+    )
+
+    plan = solve_with(ev)
+
+    assert charged_kw(plan) == pytest.approx([0.0, 4.0, 4.0, 0.0], abs=TOLERANCE)
+
+
+def test_the_minimum_is_charged_even_when_the_energy_costs_more_than_it_is_worth() -> (
+    None
+):
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=3.6),
+        charge_limit_kwh=INITIAL_SOC_KWH + 7.2,
+        value_eur_per_kwh=0.01,
+    )
+
+    plan = solve_with(ev, prices=(0.30, 0.50, 0.40, 0.60))
+
+    assert charged_kw(plan) == pytest.approx([4.0, 0.0, 0.0, 0.0], abs=TOLERANCE)
+    assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
