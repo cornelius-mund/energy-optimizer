@@ -79,10 +79,13 @@ orchestration:
       enabled: true
       interval_seconds: 3600
   optimization:
-    # Enable after an optimization plan generator is available.
+    # Plans every future hour covered by prices and the PV forecast once all
+    # required sources hold current data. Add battery and ev to plan them.
     enabled: false
     required_sources:
       - household_load
+      - pv_generation
+      - electricity_prices
 
 # Optional direct PV forecast provider. The public Forecast.Solar tier requires
 # no account or API key and provides hourly forecasts for today and tomorrow.
@@ -197,6 +200,13 @@ home_assistant:
     battery_efficiency:
       value: 0.85
       unit: ratio
+    # Wear cost of each kWh the battery delivers, in EUR.
+    throughput_cost_eur_per_kwh: 0
+    # restore_initial ends every plan at least as full as it began;
+    # value_stored_energy credits the remaining energy instead, by default
+    # at the mean import price of the plan.
+    end_of_horizon: restore_initial
+    # end_of_horizon_value_eur_per_kwh: 0.25
     # Optional calculated efficiency. A configured battery_efficiency takes
     # precedence and emits a warning. Inverter values are not battery fields.
     # efficiency_calculation:
@@ -256,6 +266,41 @@ home_assistant:
     #         - operation: add
     #           entities:
     #             - {entity_id: sensor.inverter_to_ac, state_class: total_increasing, unit: kWh}
+  # Optional electric vehicle; add ev to the orchestration sources to plan it.
+  # ev:
+  #   state_of_charge: {entity_id: sensor.ev_battery_level, unit: '%'}
+  #   plugged_in: {entity_id: binary_sensor.ev_charging_cable, plugged_in_states: ['on']}
+  #   capacity_kwh: 60
+  #   minimum_charge_kw: 1.4
+  #   maximum_charge_kw: 11
+  #   charge_efficiency: 0.9
   timeout_seconds: 10
   # Optional polling health threshold; it does not limit historical retention.
   max_data_age_seconds: 7200
+
+# Optional consumer tariff on top of the market price; the export price stays
+# the market price. Without it, both directions use the market price.
+tariff:
+  grid_fee_bands:
+    - {start_hour: 0, end_hour: 7, fee_ct_per_kwh: 0.95}
+    - {start_hour: 7, end_hour: 15, fee_ct_per_kwh: 9.53}
+    - {start_hour: 15, end_hour: 20, fee_ct_per_kwh: 15.65}
+    - {start_hour: 20, end_hour: 24, fee_ct_per_kwh: 9.53}
+  supplier_surcharge_ct_per_kwh: 1.0
+  levies_ct_per_kwh: 2.946
+  concession_fee_ct_per_kwh: 1.32
+  electricity_tax_ct_per_kwh: 2.05
+  vat_rate: 0.19
+
+# auto backtests every method and plans with the smallest mean absolute error.
+load_forecast:
+  method: auto
+  backtest_days: 7
+
+# Optional EV charging wish, used when home_assistant.ev is configured.
+# ev_charging:
+#   strategy: deadline   # deadline, immediate, surplus or minimum_plus_target
+#   minimum_soc_percent: 80
+#   deadline: '07:00'
+#   weekly:
+#     monday: {minimum_soc_percent: 80, deadline: '06:30'}

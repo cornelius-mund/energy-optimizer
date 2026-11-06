@@ -227,6 +227,19 @@ class HomeAssistantBatteryConfiguration(_StrictModel):
         le=10,
         description="Wear cost of each kWh the battery delivers, in EUR",
     )
+    end_of_horizon: Literal["restore_initial", "value_stored_energy"] = Field(
+        default="restore_initial",
+        description="restore_initial ends every plan at least as full as it began; "
+        "value_stored_energy lets it end emptier when the energy is worth less "
+        "than using it now",
+    )
+    end_of_horizon_value_eur_per_kwh: float | None = Field(
+        default=None,
+        ge=0,
+        le=10,
+        description="Value of a kWh left in the battery when end_of_horizon is "
+        "value_stored_energy; defaults to the mean import price of the plan",
+    )
 
     @model_validator(mode="before")
     @classmethod

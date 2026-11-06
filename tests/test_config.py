@@ -815,3 +815,5 @@ def test_the_example_configuration_loads() -> None:
         for term in household_load.terms
         for entity in term.entities
     ] == [15, 11]
+    assert configuration.tariff is not None
+    assert configuration.load_forecast.method == "auto"

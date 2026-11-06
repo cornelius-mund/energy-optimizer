@@ -326,3 +326,75 @@ def test_the_configured_throughput_cost_makes_the_battery_stay_idle(
 
     assert stored.plan.battery_throughput_kwh == pytest.approx(0.0, abs=1e-6)
     assert stored.plan.objective_eur == pytest.approx(1.0 * 0.10 + 1.0 * 0.50)
+
+
+def _battery_configuration(**battery_settings: object) -> Configuration:
+    return Configuration.model_validate(
+        {
+            "time_resolution_minutes": 60,
+            "timezone": "UTC",
+            "grid": {"maximum_import_kw": 10, "maximum_export_kw": 10},
+            "solver": {"name": "highs", "time_limit_seconds": 60},
+            "home_assistant": {
+                "base_url": "http://homeassistant.test:8123",
+                "token": "test-token",
+                "timeout_seconds": 5,
+                "battery": {
+                    "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                    "capacity": 10,
+                    "minimum_soc": 0,
+                    "maximum_soc": 100,
+                    "maximum_charge": 3,
+                    "maximum_discharge": 1,
+                    "battery_efficiency": 1.0,
+                    **battery_settings,
+                },
+            },
+        }
+    )
+
+
+def _ending_battery_energy_kwh(
+    configuration: Configuration, store: ProviderDataStore
+) -> float:
+    stored = PlanGenerator(configuration, store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.50, 0.10]),
+            battery=battery(efficiency=1.0),
+        )
+    )
+    last_hour = stored.plan.hours[-1]
+    assert last_hour.battery is not None
+    return last_hour.battery.state_of_charge_kwh
+
+
+def test_by_default_the_plan_ends_with_the_energy_it_started_with(
+    store: ProviderDataStore,
+) -> None:
+    ending = _ending_battery_energy_kwh(_battery_configuration(), store)
+
+    assert ending == pytest.approx(5.0)
+
+
+def test_worthless_stored_energy_is_used_up_by_the_end_of_the_plan(
+    store: ProviderDataStore,
+) -> None:
+    configuration = _battery_configuration(
+        end_of_horizon="value_stored_energy", end_of_horizon_value_eur_per_kwh=0.0
+    )
+
+    ending = _ending_battery_energy_kwh(configuration, store)
+
+    assert ending == pytest.approx(3.0)
+
+
+def test_by_default_stored_energy_is_valued_at_the_mean_import_price(
+    store: ProviderDataStore,
+) -> None:
+    configuration = _battery_configuration(end_of_horizon="value_stored_energy")
+
+    ending = _ending_battery_energy_kwh(configuration, store)
+
+    assert ending == pytest.approx(7.0)

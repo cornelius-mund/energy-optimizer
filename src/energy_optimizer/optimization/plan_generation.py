@@ -65,7 +65,9 @@ PLAN_ADAPTER = TypeAdapter(PlanSnapshot)
 
 
 def battery_specification(
-    battery: BatteryData, throughput_cost_eur_per_kwh: float = 0.0
+    battery: BatteryData,
+    throughput_cost_eur_per_kwh: float = 0.0,
+    terminal_value_eur_per_kwh: float | None = None,
 ) -> BatterySpecification:
     """Split the battery round trip evenly between charging and discharging."""
     leg_efficiency = math.sqrt(battery.battery_efficiency)
@@ -73,12 +75,17 @@ def battery_specification(
         minimum_soc_kwh=battery.minimum_soc_kwh,
         maximum_soc_kwh=battery.maximum_soc_kwh,
         initial_soc_kwh=battery.initial_soc_kwh,
-        final_soc_kwh=battery.initial_soc_kwh,
+        final_soc_kwh=(
+            battery.initial_soc_kwh
+            if terminal_value_eur_per_kwh is None
+            else battery.minimum_soc_kwh
+        ),
         maximum_charge_kw=battery.maximum_charge_kw,
         maximum_discharge_kw=battery.maximum_discharge_kw,
         charge_efficiency=leg_efficiency,
         discharge_efficiency=leg_efficiency,
         throughput_cost_eur_per_kwh=throughput_cost_eur_per_kwh,
+        terminal_value_eur_per_kwh=terminal_value_eur_per_kwh or 0.0,
     )
 
 
@@ -297,6 +304,29 @@ class PlanGenerator:
         except LoadForecastError as error:
             raise PlanGenerationError(str(error)) from error
 
+    def _battery_specification(
+        self, battery: BatteryData, import_prices: tuple[float, ...]
+    ) -> BatterySpecification:
+        return battery_specification(
+            battery,
+            self._throughput_cost(),
+            self._terminal_value(battery, import_prices),
+        )
+
+    def _terminal_value(
+        self, battery: BatteryData, import_prices: tuple[float, ...]
+    ) -> float | None:
+        home_assistant = self.configuration.home_assistant
+        if home_assistant is None or home_assistant.battery is None:
+            return None
+        settings = home_assistant.battery
+        if settings.end_of_horizon != "value_stored_energy":
+            return None
+        if settings.end_of_horizon_value_eur_per_kwh is not None:
+            return settings.end_of_horizon_value_eur_per_kwh
+        mean_import_price = sum(import_prices) / len(import_prices)
+        return mean_import_price * math.sqrt(battery.battery_efficiency)
+
     def _throughput_cost(self) -> float:
         home_assistant = self.configuration.home_assistant
         if home_assistant is None or home_assistant.battery is None:
@@ -342,13 +372,12 @@ class PlanGenerator:
             max(pv_kw - consumed_kw, 0.0)
             for pv_kw, consumed_kw in zip(pv_forecast_kw, load_kw, strict=True)
         )
+        import_prices = self._import_prices(prices, hour_starts, prices_at)
         problem = PlanningProblem(
             start_time=hour_starts[0],
             load_kw=load_kw,
             pv_forecast_kw=pv_forecast_kw,
-            import_price_eur_per_kwh=self._import_prices(
-                prices, hour_starts, prices_at
-            ),
+            import_price_eur_per_kwh=import_prices,
             export_price_eur_per_kwh=tuple(
                 prices.export_price_eur_per_kwh[i] for i in prices_at
             ),
@@ -356,7 +385,7 @@ class PlanGenerator:
             maximum_export_kw=self.configuration.grid.maximum_export_kw,
             time_limit_seconds=self.configuration.solver.time_limit_seconds,
             battery=(
-                battery_specification(battery, self._throughput_cost())
+                self._battery_specification(battery, import_prices)
                 if isinstance(battery, BatteryData)
                 else None
             ),

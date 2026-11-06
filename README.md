@@ -329,8 +329,12 @@ efficiency is split evenly over charging and discharging, every kWh the battery
 delivers costs `home_assistant.battery.throughput_cost_eur_per_kwh` (default 0, the
 wear of the cells; the optimizer only cycles the battery when the price spread pays
 for it), the cost is part of `objective_eur` and reported as `degradation_cost_eur`
-and `battery_throughput_kwh`, and the plan must end with
-at least the current state of charge. Concurrent orchestration cycles are skipped
+and `battery_throughput_kwh`. By default the plan must end with
+at least the current state of charge (`end_of_horizon: restore_initial`). With
+`end_of_horizon: value_stored_energy` the plan may end emptier: energy left in the
+battery is credited with `end_of_horizon_value_eur_per_kwh` (default: the mean
+import price of the plan times the discharge efficiency), so a rolling plan keeps
+energy only while it is worth more than using it now. Concurrent orchestration cycles are skipped
 to avoid duplicate plans.
 
 ### Grid tariff
