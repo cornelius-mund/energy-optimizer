@@ -18,6 +18,7 @@ from energy_optimizer.optimization.plan_generation import (
     PlanGenerator,
     deadline_hours,
     immediate_charging,
+    pv_surplus_charging,
 )
 from energy_optimizer.providers.home_assistant_ev import (
     HomeAssistantError,
@@ -213,3 +214,19 @@ def test_immediate_charging_never_charges_an_unplugged_car() -> None:
 def test_the_deadline_strategy_requires_a_deadline() -> None:
     with pytest.raises(ValidationError):
         EvChargingConfiguration.model_validate({"minimum_soc_percent": 80})
+
+
+def test_surplus_charging_is_bounded_by_the_surplus_and_the_charge_limit() -> None:
+    car = importer(ev_responses("50", "on")).fetch(now=NOW)
+
+    specification = pv_surplus_charging(car, 36.0, (0.0, 2.0, 0.0))
+
+    assert specification.surplus_kw == (0.0, 2.0, 0.0)
+    assert specification.charge_limit_kwh == 36.0
+    assert specification.target_soc_kwh == 0.0
+
+
+def test_the_surplus_strategy_needs_neither_a_deadline_nor_a_target() -> None:
+    charging = EvChargingConfiguration.model_validate({"strategy": "surplus"})
+
+    assert charging.target_soc_percent == 100.0
