@@ -99,7 +99,19 @@ else
     printf 'SKIP %-12s gh is unavailable\n' "gh api"
 fi
 
-venv_python=".venv/bin/python"
+# uv creates .venv/bin on POSIX and .venv/Scripts (with .exe files) on Windows.
+venv_executable() {
+    for candidate in ".venv/bin/$1" ".venv/Scripts/$1.exe"; do
+        if [ -x "$candidate" ]; then
+            printf '%s
+' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+venv_python=$(venv_executable python || printf '.venv/bin/python')
 if [ ! -e "$venv_python" ]; then
     environment_problem "venv" "no .venv found; run scripts/bootstrap"
 elif ! "$venv_python" -c 'import sys' >/dev/null 2>&1; then
@@ -124,7 +136,7 @@ fi
 # The file linters run by scripts/verify are pinned in pyproject.toml and
 # installed into the virtual environment.
 for linter in actionlint hadolint yamllint shfmt shellcheck; do
-    linter_path=".venv/bin/$linter"
+    linter_path=$(venv_executable "$linter" || printf '.venv/bin/%s' "$linter")
     if [ ! -x "$linter_path" ]; then
         environment_problem "$linter" \
             "$linter is not installed; run scripts/bootstrap (or uv sync --locked --extra dev)"
