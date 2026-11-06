@@ -20,6 +20,7 @@ class PlanStatus(StrEnum):
 class BatterySpecification:
     """Technical limits and starting state of the battery.
 
+    Every kWh the battery delivers costs ``throughput_cost_eur_per_kwh`` (wear).
     The horizon must end with at least ``final_soc_kwh``; without that bound the
     cheapest plan would drain the battery for free in the last hour.
     """
@@ -32,6 +33,7 @@ class BatterySpecification:
     maximum_discharge_kw: Kilowatt
     charge_efficiency: float
     discharge_efficiency: float
+    throughput_cost_eur_per_kwh: EuroPerKilowattHour = 0.0
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,7 @@ class PlannedBatteryHour:
     charge_kw: Kilowatt
     discharge_kw: Kilowatt
     state_of_charge_kwh: KilowattHour
+    degradation_cost_eur: Euro = 0.0
 
 
 @dataclass(frozen=True)
@@ -115,7 +118,8 @@ class PlannedHour:
 class Plan:
     """A schedule exists only if the solver proved it optimal.
 
-    The objective is the import cost minus the export revenue, without the
+    The objective is the import cost minus the export revenue plus the battery
+    degradation cost, without the
     penalty the solver applies to an EV shortfall.
     """
 
@@ -123,6 +127,8 @@ class Plan:
     objective_eur: Euro | None
     hours: tuple[PlannedHour, ...]
     ev_shortfall_kwh: KilowattHour = 0.0
+    battery_throughput_kwh: KilowattHour = 0.0
+    degradation_cost_eur: Euro = 0.0
 
     def has_schedule(self) -> bool:
         return self.status is PlanStatus.OPTIMAL

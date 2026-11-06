@@ -284,3 +284,42 @@ def test_missing_provider_data_is_named(
         PlanGenerator(configuration, store)(
             snapshot(household_load=flat_history(), pv_generation=pv_forecast([0.0]))
         )
+
+
+def test_the_configured_throughput_cost_makes_the_battery_stay_idle(
+    store: ProviderDataStore,
+) -> None:
+    settings = {
+        "time_resolution_minutes": 60,
+        "timezone": "UTC",
+        "grid": {"maximum_import_kw": 10, "maximum_export_kw": 10},
+        "solver": {"name": "highs", "time_limit_seconds": 60},
+        "home_assistant": {
+            "base_url": "http://homeassistant.test:8123",
+            "token": "test-token",
+            "timeout_seconds": 5,
+            "battery": {
+                "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
+                "capacity": 10,
+                "minimum_soc": 0,
+                "maximum_soc": 100,
+                "maximum_charge": 3,
+                "maximum_discharge": 1,
+                "battery_efficiency": 1.0,
+                "throughput_cost_eur_per_kwh": 0.5,
+            },
+        },
+    }
+    generator = PlanGenerator(Configuration.model_validate(settings), store)
+
+    stored = generator(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.10, 0.50]),
+            battery=battery(efficiency=1.0),
+        )
+    )
+
+    assert stored.plan.battery_throughput_kwh == pytest.approx(0.0, abs=1e-6)
+    assert stored.plan.objective_eur == pytest.approx(1.0 * 0.10 + 1.0 * 0.50)

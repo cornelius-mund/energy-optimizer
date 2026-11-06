@@ -104,9 +104,13 @@ def _require_final_state_of_charge(
     )
 
 
-def read_battery_hour(variables: BatteryVariables, hour: int) -> PlannedBatteryHour:
+def read_battery_hour(
+    variables: BatteryVariables, hour: int, throughput_cost_eur_per_kwh: float = 0.0
+) -> PlannedBatteryHour:
+    discharge_kw = float(variables.discharge.solution.values[hour])
     return PlannedBatteryHour(
         charge_kw=float(variables.charge.solution.values[hour]),
-        discharge_kw=float(variables.discharge.solution.values[hour]),
+        discharge_kw=discharge_kw,
+        degradation_cost_eur=discharge_kw * throughput_cost_eur_per_kwh,
         state_of_charge_kwh=float(variables.state_of_charge.solution.values[hour]),
     )

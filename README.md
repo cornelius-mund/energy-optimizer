@@ -316,7 +316,11 @@ both the prices and the PV forecast, and stores the latest optimal plan, which
 satisfy is reported as `plan_status: failed` and keeps the previous plan. The load
 forecast is a baseline: the mean of the same local hour over the last seven days
 of household-load history, ignoring excluded hours. The battery round-trip
-efficiency is split evenly over charging and discharging, and the plan must end with
+efficiency is split evenly over charging and discharging, every kWh the battery
+delivers costs `home_assistant.battery.throughput_cost_eur_per_kwh` (default 0, the
+wear of the cells; the optimizer only cycles the battery when the price spread pays
+for it), the cost is part of `objective_eur` and reported as `degradation_cost_eur`
+and `battery_throughput_kwh`, and the plan must end with
 at least the current state of charge. Concurrent orchestration cycles are skipped
 to avoid duplicate plans.
 

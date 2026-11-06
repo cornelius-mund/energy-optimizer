@@ -221,6 +221,12 @@ class HomeAssistantBatteryConfiguration(_StrictModel):
     maximum_discharge: BatteryConfigurationValue
     battery_efficiency: BatteryConfigurationValue | None = None
     efficiency_calculation: HomeAssistantBatteryEfficiencyConfiguration | None = None
+    throughput_cost_eur_per_kwh: float = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="Wear cost of each kWh the battery delivers, in EUR",
+    )
 
     @model_validator(mode="before")
     @classmethod

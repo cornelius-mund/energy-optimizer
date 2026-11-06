@@ -33,7 +33,10 @@ price.
 An optional `battery` object adds a battery to the plan. It contains `capacity_kwh`,
 `initial_soc_percent`, `minimum_soc_percent`, `maximum_soc_percent`,
 `maximum_charge_kw`, `maximum_discharge_kw`, `charge_efficiency`, and
-`discharge_efficiency` (ratios in (0, 1]), and optionally `final_soc_percent`. The
+`discharge_efficiency` (ratios in (0, 1]), and optionally `final_soc_percent` and
+`throughput_cost_eur_per_kwh` (wear cost of each kWh the battery delivers, default 0;
+it is part of `objective_eur` and reported as `degradation_cost_eur` and
+`battery_throughput_kwh`). The
 initial and final state of charge must lie within the minimum and maximum, otherwise
 the request is rejected with 422. The model keeps the state of charge within the
 band, applies the efficiencies when charging (stored = charged × efficiency) and

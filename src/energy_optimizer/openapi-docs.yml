@@ -1852,6 +1852,16 @@ components:
           - type: 'null'
           title: Objective Eur
           description: Import cost minus export revenue of the optimal plan in EUR
+        battery_throughput_kwh:
+          type: number
+          title: Battery Throughput Kwh
+          description: Energy the battery delivers over the plan in kWh
+          default: 0
+        degradation_cost_eur:
+          type: number
+          title: Degradation Cost Eur
+          description: Battery wear cost over the plan in EUR, part of the objective
+          default: 0
         ev_shortfall_kwh:
           type: number
           title: Ev Shortfall Kwh
@@ -1904,6 +1914,16 @@ components:
           - type: 'null'
           title: Objective Eur
           description: Import cost minus export revenue of the optimal plan in EUR
+        battery_throughput_kwh:
+          type: number
+          title: Battery Throughput Kwh
+          description: Energy the battery delivers over the plan in kWh
+          default: 0
+        degradation_cost_eur:
+          type: number
+          title: Degradation Cost Eur
+          description: Battery wear cost over the plan in EUR, part of the objective
+          default: 0
         ev_shortfall_kwh:
           type: number
           title: Ev Shortfall Kwh
@@ -1945,6 +1965,11 @@ components:
         state_of_charge_percent:
           type: number
           title: State Of Charge Percent
+        degradation_cost_eur:
+          type: number
+          title: Degradation Cost Eur
+          description: Battery wear cost of the hour in EUR
+          default: 0
       additionalProperties: false
       type: object
       required:
@@ -2090,6 +2115,13 @@ components:
           exclusiveMinimum: 0.0
           title: Discharge Efficiency
           description: Ratio of drawn energy that is delivered
+        throughput_cost_eur_per_kwh:
+          type: number
+          maximum: 10.0
+          minimum: 0.0
+          title: Throughput Cost Eur Per Kwh
+          description: Wear cost of each kWh the battery delivers in EUR
+          default: 0
       additionalProperties: false
       type: object
       required:

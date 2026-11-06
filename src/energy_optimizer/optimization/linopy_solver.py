@@ -157,6 +157,12 @@ def _minimize_net_cost(
         problem.export_price_eur_per_kwh, hours
     )
     objective = (import_cost - export_revenue).sum()
+    if variables.battery is not None:
+        assert problem.battery is not None
+        objective = objective + (
+            problem.battery.throughput_cost_eur_per_kwh
+            * variables.battery.discharge.sum()
+        )
     if variables.ev is not None:
         objective = objective + SHORTFALL_PENALTY_EUR_PER_KWH * variables.ev.shortfall
         assert problem.ev is not None
@@ -200,7 +206,11 @@ def _read_plan(
             battery=(
                 None
                 if variables.battery is None
-                else read_battery_hour(variables.battery, hour)
+                else read_battery_hour(
+                    variables.battery,
+                    hour,
+                    _throughput_cost(problem),
+                )
             ),
             ev=None if variables.ev is None else read_ev_hour(variables.ev, hour),
         )
@@ -209,9 +219,18 @@ def _read_plan(
     return Plan(
         status=PlanStatus.OPTIMAL,
         objective_eur=sum(
-            hour.import_cost_eur - hour.export_revenue_eur for hour in hours
+            hour.import_cost_eur
+            - hour.export_revenue_eur
+            + (hour.battery.degradation_cost_eur if hour.battery else 0.0)
+            for hour in hours
         ),
         hours=hours,
+        battery_throughput_kwh=sum(
+            hour.battery.discharge_kw for hour in hours if hour.battery
+        ),
+        degradation_cost_eur=sum(
+            hour.battery.degradation_cost_eur for hour in hours if hour.battery
+        ),
         ev_shortfall_kwh=_shortfall_kwh(variables),
     )
 
@@ -220,6 +239,12 @@ def _shortfall_kwh(variables: _GridAndPvVariables) -> float:
     if variables.ev is None:
         return 0.0
     return max(float(variables.ev.shortfall.solution.item()), 0.0)
+
+
+def _throughput_cost(problem: PlanningProblem) -> float:
+    return (
+        0.0 if problem.battery is None else problem.battery.throughput_cost_eur_per_kwh
+    )
 
 
 def _objective_value(model: Model) -> float:
