@@ -10,12 +10,15 @@ import pytest
 
 from energy_optimizer.config import Configuration
 from energy_optimizer.optimization import PlanStatus
+from energy_optimizer.optimization.load_forecast import (
+    LoadForecastError,
+    seven_day_mean_forecast,
+)
 from energy_optimizer.optimization.plan_generation import (
     PLAN_ADAPTER,
     PLAN_KEY,
     PlanGenerationError,
     PlanGenerator,
-    load_forecast_kw,
 )
 from energy_optimizer.orchestration import ProviderDataSnapshot
 from energy_optimizer.providers.interfaces import (
@@ -133,7 +136,7 @@ def test_the_load_forecast_is_the_mean_of_the_same_hour_over_the_last_seven_days
     recent_days_kw = [float(hour) + day for day in range(7) for hour in range(24)]
     history = household_load(older_day_kw + recent_days_kw, start)
 
-    forecast = load_forecast_kw(
+    forecast = seven_day_mean_forecast(
         history,
         [datetime(2026, 3, 9, 5, tzinfo=UTC), datetime(2026, 3, 9, 6, tzinfo=UTC)],
         ZoneInfo("UTC"),
@@ -148,7 +151,7 @@ def test_excluded_hours_do_not_contribute_to_the_load_forecast() -> None:
     values[24 + 5] = 4.0
     history = household_load(values, datetime(2026, 3, 3, tzinfo=UTC))
 
-    forecast = load_forecast_kw(
+    forecast = seven_day_mean_forecast(
         history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("UTC")
     )
 
@@ -161,8 +164,8 @@ def test_an_hour_of_day_without_any_sample_cannot_be_forecast() -> None:
         values[day * 24 + 5] = None
     history = household_load(values, datetime(2026, 3, 3, tzinfo=UTC))
 
-    with pytest.raises(PlanGenerationError, match="local hour 5"):
-        load_forecast_kw(
+    with pytest.raises(LoadForecastError, match="local hour 5"):
+        seven_day_mean_forecast(
             history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("UTC")
         )
 
@@ -171,7 +174,7 @@ def test_the_forecast_uses_the_local_hour_of_day() -> None:
     values = [float(hour) for _ in range(7) for hour in range(24)]
     history = household_load(values, datetime(2026, 3, 3, tzinfo=UTC))
 
-    forecast = load_forecast_kw(
+    forecast = seven_day_mean_forecast(
         history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("Europe/Berlin")
     )
 

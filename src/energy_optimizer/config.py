@@ -762,6 +762,19 @@ class TariffConfiguration(_StrictModel):
         return net_ct * (1 + self.vat_rate) / 100
 
 
+class LoadForecastConfiguration(_StrictModel):
+    """How the household load of the planning horizon is forecast."""
+
+    method: Literal["auto", "seven_day_mean", "weekday_profile"] = Field(
+        default="auto",
+        description=(
+            "`auto` backtests every method on the last days of history and uses the "
+            "one with the smallest mean absolute error"
+        ),
+    )
+    backtest_days: int = Field(default=7, ge=1, le=28)
+
+
 class Configuration(_StrictModel):
     """Validated settings needed to start the service."""
 
@@ -777,6 +790,9 @@ class Configuration(_StrictModel):
     forecast_solar: ForecastSolarConfiguration | None = None
     awattar: AwattarConfiguration | None = None
     tariff: TariffConfiguration | None = None
+    load_forecast: LoadForecastConfiguration = Field(
+        default_factory=LoadForecastConfiguration
+    )
     ev_charging: EvChargingConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
     orchestration: OrchestrationConfiguration | None = None

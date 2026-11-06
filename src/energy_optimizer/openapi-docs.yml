@@ -1824,6 +1824,25 @@ components:
       - latest_observation_at
       title: HouseholdLoadResponse
       description: Response returned after household-load data passes validation.
+    LoadForecastResponse:
+      properties:
+        method:
+          type: string
+          title: Method
+        mean_absolute_error_kw:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Mean Absolute Error Kw
+          description: Backtest error of the method in kW; null if it could not be
+            tested
+      additionalProperties: false
+      type: object
+      required:
+      - method
+      - mean_absolute_error_kw
+      title: LoadForecastResponse
+      description: How the household load of the plan was forecast.
     OptimizationResponse:
       properties:
         status:
@@ -1939,6 +1958,10 @@ components:
           format: date-time
           title: Created At
           description: When the provider snapshot was taken
+        load_forecast:
+          anyOf:
+          - $ref: '#/components/schemas/LoadForecastResponse'
+          - type: 'null'
       additionalProperties: false
       type: object
       required:

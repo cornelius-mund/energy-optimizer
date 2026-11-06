@@ -2,7 +2,6 @@
 
 import logging
 import math
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
@@ -16,10 +15,14 @@ from energy_optimizer.control.ev_controller import (
     merge_schedule,
 )
 from energy_optimizer.optimization.linopy_solver import LinopyPlanSolver
+from energy_optimizer.optimization.load_forecast import (
+    LoadForecast,
+    LoadForecastError,
+    forecast_load,
+)
 from energy_optimizer.optimization.problem import (
     BatterySpecification,
     EvSpecification,
-    Kilowatt,
     Plan,
     PlanningProblem,
 )
@@ -36,7 +39,6 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
 logger = logging.getLogger(__name__)
 
-LOAD_FORECAST_DAYS = 7
 SURPLUS_CHARGING_VALUE_EUR_PER_KWH = 1.0
 ONE_HOUR = timedelta(hours=1)
 PLAN_KEY = ProviderDataKey("optimization-plan", "energy-optimizer", "current")
@@ -55,37 +57,11 @@ class PlanSnapshot:
     battery_capacity_kwh: float | None
     plan: Plan
     ev_capacity_kwh: float | None = None
+    load_forecast_method: str | None = None
+    load_forecast_mae_kw: float | None = None
 
 
 PLAN_ADAPTER = TypeAdapter(PlanSnapshot)
-
-
-def load_forecast_kw(
-    history: HouseholdLoadData, hour_starts: list[datetime], time_zone: ZoneInfo
-) -> tuple[Kilowatt, ...]:
-    """Forecast each hour as the mean of that local hour over the last seven days.
-
-    This is a deliberately simple baseline; hours excluded from the history do
-    not contribute and an hour of day without any sample is an error.
-    """
-    history_end = history.start_time + ONE_HOUR * len(history.load_kw)
-    window_start = history_end - timedelta(days=LOAD_FORECAST_DAYS)
-    samples_by_hour: dict[int, list[float]] = defaultdict(list)
-    for index, load_kw in enumerate(history.load_kw):
-        hour_start = history.start_time + ONE_HOUR * index
-        if load_kw is not None and hour_start >= window_start:
-            samples_by_hour[hour_start.astimezone(time_zone).hour].append(load_kw)
-    forecast: list[Kilowatt] = []
-    for hour_start in hour_starts:
-        samples = samples_by_hour.get(hour_start.astimezone(time_zone).hour)
-        if not samples:
-            raise PlanGenerationError(
-                "the household-load history has no sample for local hour "
-                f"{hour_start.astimezone(time_zone).hour} in the last "
-                f"{LOAD_FORECAST_DAYS} days"
-            )
-        forecast.append(math.fsum(samples) / len(samples))
-    return tuple(forecast)
 
 
 def battery_specification(
@@ -259,7 +235,7 @@ class PlanGenerator:
         self.solver = solver or LinopyPlanSolver()
 
     def __call__(self, snapshot: ProviderDataSnapshot) -> PlanSnapshot:
-        problem = self.planning_problem(snapshot)
+        problem, forecast = self._build(snapshot)
         plan = self.solver.solve(problem)
         if not plan.has_schedule():
             raise PlanGenerationError(
@@ -274,6 +250,8 @@ class PlanGenerator:
                 battery.capacity_kwh if isinstance(battery, BatteryData) else None
             ),
             plan=plan,
+            load_forecast_method=forecast.method,
+            load_forecast_mae_kw=forecast.mean_absolute_error_kw,
             ev_capacity_kwh=(
                 ev.capacity_kwh if isinstance(ev, EvData) and problem.ev else None
             ),
@@ -304,6 +282,21 @@ class PlanGenerator:
             for price, start in zip(market, hour_starts, strict=True)
         )
 
+    def _load_forecast(
+        self, load: HouseholdLoadData, hour_starts: list[datetime]
+    ) -> LoadForecast:
+        settings = self.configuration.load_forecast
+        try:
+            return forecast_load(
+                load,
+                hour_starts,
+                ZoneInfo(self.configuration.timezone),
+                settings.method,
+                settings.backtest_days,
+            )
+        except LoadForecastError as error:
+            raise PlanGenerationError(str(error)) from error
+
     def _throughput_cost(self) -> float:
         home_assistant = self.configuration.home_assistant
         if home_assistant is None or home_assistant.battery is None:
@@ -323,6 +316,11 @@ class PlanGenerator:
         self.store.save(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER, schedule)
 
     def planning_problem(self, snapshot: ProviderDataSnapshot) -> PlanningProblem:
+        return self._build(snapshot)[0]
+
+    def _build(
+        self, snapshot: ProviderDataSnapshot
+    ) -> tuple[PlanningProblem, LoadForecast]:
         load = _required(snapshot, "household_load", HouseholdLoadData)
         pv = _required(snapshot, "pv_generation", PvGenerationData)
         prices = _required(snapshot, "electricity_prices", ElectricityPriceData)
@@ -334,9 +332,8 @@ class PlanGenerator:
             )
         price_index = {start: i for i, start in enumerate(prices.timestamps)}
         prices_at = [price_index[start] for start in hour_starts]
-        load_kw = load_forecast_kw(
-            load, hour_starts, ZoneInfo(self.configuration.timezone)
-        )
+        forecast = self._load_forecast(load, hour_starts)
+        load_kw = forecast.load_kw
         pv_forecast_kw = tuple(
             pv.generation_kw[int((start - pv.start_time) / ONE_HOUR)]
             for start in hour_starts
@@ -345,7 +342,7 @@ class PlanGenerator:
             max(pv_kw - consumed_kw, 0.0)
             for pv_kw, consumed_kw in zip(pv_forecast_kw, load_kw, strict=True)
         )
-        return PlanningProblem(
+        problem = PlanningProblem(
             start_time=hour_starts[0],
             load_kw=load_kw,
             pv_forecast_kw=pv_forecast_kw,
@@ -365,6 +362,7 @@ class PlanGenerator:
             ),
             ev=self._ev(snapshot, hour_starts, surplus_kw),
         )
+        return problem, forecast
 
     def _ev(
         self,
