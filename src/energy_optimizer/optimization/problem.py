@@ -22,7 +22,10 @@ class BatterySpecification:
 
     Every kWh the battery delivers costs ``throughput_cost_eur_per_kwh`` (wear).
     The horizon must end with at least ``final_soc_kwh``; without that bound the
-    cheapest plan would drain the battery for free in the last hour.
+    cheapest plan would drain the battery for free in the last hour. Energy left
+    in the battery at the end of the horizon is credited with
+    ``terminal_value_eur_per_kwh``, so a rolling plan keeps energy only while
+    it is worth more than using it now.
     """
 
     minimum_soc_kwh: KilowattHour
@@ -34,6 +37,7 @@ class BatterySpecification:
     charge_efficiency: float
     discharge_efficiency: float
     throughput_cost_eur_per_kwh: EuroPerKilowattHour = 0.0
+    terminal_value_eur_per_kwh: EuroPerKilowattHour = 0.0
 
 
 @dataclass(frozen=True)

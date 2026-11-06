@@ -163,6 +163,10 @@ def _minimize_net_cost(
             problem.battery.throughput_cost_eur_per_kwh
             * variables.battery.discharge.sum()
         )
+        final_state_kwh = variables.battery.state_of_charge.loc[hours[-1]]
+        objective = (
+            objective - problem.battery.terminal_value_eur_per_kwh * final_state_kwh
+        )
     if variables.ev is not None:
         objective = objective + SHORTFALL_PENALTY_EUR_PER_KWH * variables.ev.shortfall
         assert problem.ev is not None
