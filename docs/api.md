@@ -606,6 +606,30 @@ validated `scenario_kind` and request ID. Forecast responses with unavailable
 data also emit a `WARNING` diagnostic; the request ID links that diagnostic to
 the request log without recording query payloads or provider credentials.
 
+### Plan view
+
+The Plan tab shows the latest plan from `GET /plan` (see [Current plan](#current-plan))
+and has no range controls: the plan always covers the future hours for which prices
+and the PV forecast exist. It is marked as an "Optimization plan" so that it is not
+mistaken for historic actuals or forecast inputs.
+
+- **Summary:** solver status, objective, import cost, export revenue, planned hours,
+  the plan range (end exclusive), when the data snapshot was taken, battery wear
+  cost, EV shortfall at the deadline, and the load forecast method with its backtest
+  error, each only when the plan has it.
+- **Table:** one row per planned hour in the dashboard time zone with load, PV, grid
+  import and export in kW, battery charge, discharge and state of charge when a
+  battery was planned, EV charge power and state of charge when a car was planned,
+  and the net cost of the hour in EUR (a negative value is a revenue).
+- **States:** before the first plan the tab says that no plan exists (HTTP 404);
+  other failures (for example HTTP 503 without persistence) are shown as an error
+  message. Only optimal plans are stored, so infeasible or time-limited solves never
+  replace the shown plan; the solver status field therefore reads `optimal`.
+- **Small screens:** the table scrolls inside its own container and the tab bar wraps.
+
+Not shown yet: a chart of the schedule, solve time and diagnostics (planned with the
+explainable-schedule issues).
+
 ## Excluded hours
 
 An hour of Home Assistant history is imported only if every data point that

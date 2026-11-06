@@ -34,13 +34,15 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert 'aria-controls="dashboard-panel"' in document
     assert 'id="point-tooltip"' in document
     assert 'id="excluded-tab"' in document
+    assert 'id="plan-tab"' in document
+    assert 'id="plan-table"' in document
     assert 'id="excluded-content"' in document
     assert 'id="excluded-table"' in document
     assert "No hours were excluded in this window." in document
 
     styles = (FRONTEND / "styles.css").read_text(encoding="utf-8")
     assert ".dashboard-grid[hidden] { display: none; }" in styles
-    assert ".excluded-grid[hidden] { display: none; }" in styles
+    assert ".excluded-grid[hidden], .plan-grid[hidden] { display: none; }" in styles
 
 
 def test_dashboard_gives_each_chart_its_own_legend_beside_it() -> None:
