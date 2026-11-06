@@ -710,3 +710,9 @@ class OptimizationResponse(_StrictModel):
         description="Import cost minus export revenue of the optimal plan in EUR"
     )
     schedule: list[PlannedHourResponse]
+
+
+class PlanSnapshotResponse(OptimizationResponse):
+    """The latest plan stored by the orchestration cycle."""
+
+    created_at: datetime = Field(description="When the provider snapshot was taken")

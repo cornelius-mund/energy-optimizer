@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -118,18 +119,13 @@ def data_directory(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return tmp_path_factory.mktemp("e2e") / "provider-data"
 
 
-@pytest.fixture(scope="session")
-def base_url(data_directory: Path) -> Iterator[str]:
-    """Run the production package entry point and return where it listens.
-
-    Playwright resolves the relative URLs that pages open against this address.
-    """
-    root = data_directory.parent
+@contextmanager
+def running_service(configuration: dict[str, Any], root: Path) -> Iterator[str]:
+    """Run the production package entry point and yield where it listens."""
+    root.mkdir(parents=True, exist_ok=True)
     configuration_path = root / "config.yaml"
     # JSON is valid YAML, so the service reads it like any other configuration.
-    configuration_path.write_text(
-        json.dumps(_configuration(data_directory)), encoding="utf-8"
-    )
+    configuration_path.write_text(json.dumps(configuration), encoding="utf-8")
     port = _free_port()
     url = f"http://127.0.0.1:{port}"
     project = Path(__file__).parents[2]
@@ -162,6 +158,16 @@ def base_url(data_directory: Path) -> Iterator[str]:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def base_url(data_directory: Path) -> Iterator[str]:
+    """Run the service with seeded data and return where it listens.
+
+    Playwright resolves the relative URLs that pages open against this address.
+    """
+    with running_service(_configuration(data_directory), data_directory.parent) as url:
+        yield url
 
 
 def _delete_files(directory: Path) -> None:

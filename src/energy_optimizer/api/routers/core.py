@@ -10,6 +10,7 @@ from energy_optimizer.api.schemas import (
     PlannedBatteryResponse,
     PlannedHourResponse,
     PlanningBatteryRequest,
+    PlanSnapshotResponse,
 )
 from energy_optimizer.config import Configuration
 from energy_optimizer.optimization import (
@@ -20,6 +21,7 @@ from energy_optimizer.optimization import (
     PlanningProblem,
     PlanSolver,
 )
+from energy_optimizer.optimization.plan_generation import PLAN_ADAPTER, PLAN_KEY
 
 router = APIRouter()
 PLAN_SOLVER: PlanSolver = LinopyPlanSolver()
@@ -102,34 +104,62 @@ def _optimization_response(
         interval_minutes=request.interval_minutes,
         hours=len(request.load_kw),
         objective_eur=plan.objective_eur,
-        schedule=[
-            PlannedHourResponse(
-                start_time=hour.start_time,
-                load_kw=hour.load_kw,
-                pv_generation_kw=hour.pv_generation_kw,
-                pv_self_consumption_kw=hour.pv_self_consumption_kw,
-                pv_curtailment_kw=hour.pv_curtailment_kw,
-                grid_import_kw=hour.grid_import_kw,
-                grid_export_kw=hour.grid_export_kw,
-                import_cost_eur=hour.import_cost_eur,
-                export_revenue_eur=hour.export_revenue_eur,
-                battery=_planned_battery(request.battery, hour.battery),
-            )
-            for hour in plan.hours
-        ],
+        schedule=_planned_hours(
+            plan, request.battery.capacity_kwh if request.battery else None
+        ),
+    )
+
+
+def _planned_hours(
+    plan: Plan, battery_capacity_kwh: float | None
+) -> list[PlannedHourResponse]:
+    return [
+        PlannedHourResponse(
+            start_time=hour.start_time,
+            load_kw=hour.load_kw,
+            pv_generation_kw=hour.pv_generation_kw,
+            pv_self_consumption_kw=hour.pv_self_consumption_kw,
+            pv_curtailment_kw=hour.pv_curtailment_kw,
+            grid_import_kw=hour.grid_import_kw,
+            grid_export_kw=hour.grid_export_kw,
+            import_cost_eur=hour.import_cost_eur,
+            export_revenue_eur=hour.export_revenue_eur,
+            battery=_planned_battery(battery_capacity_kwh, hour.battery),
+        )
+        for hour in plan.hours
+    ]
+
+
+@router.get("/plan", response_model=PlanSnapshotResponse)
+def current_plan(http_request: Request) -> PlanSnapshotResponse:
+    """Return the latest plan that the orchestration cycle stored."""
+    store = http_request.app.state.provider_data_store
+    if store is None:
+        raise HTTPException(
+            status_code=503, detail="provider data persistence is not configured"
+        )
+    stored = store.load(PLAN_KEY, PLAN_ADAPTER)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="no plan has been created yet")
+    return PlanSnapshotResponse(
+        created_at=stored.created_at,
+        status=stored.plan.status.value,
+        start_time=stored.start_time,
+        interval_minutes=60,
+        hours=len(stored.plan.hours),
+        objective_eur=stored.plan.objective_eur,
+        schedule=_planned_hours(stored.plan, stored.battery_capacity_kwh),
     )
 
 
 def _planned_battery(
-    battery: PlanningBatteryRequest | None, planned: PlannedBatteryHour | None
+    capacity_kwh: float | None, planned: PlannedBatteryHour | None
 ) -> PlannedBatteryResponse | None:
-    if battery is None or planned is None:
+    if capacity_kwh is None or planned is None:
         return None
     return PlannedBatteryResponse(
         charge_kw=planned.charge_kw,
         discharge_kw=planned.discharge_kw,
         state_of_charge_kwh=planned.state_of_charge_kwh,
-        state_of_charge_percent=planned.state_of_charge_kwh
-        / battery.capacity_kwh
-        * 100,
+        state_of_charge_percent=planned.state_of_charge_kwh / capacity_kwh * 100,
     )

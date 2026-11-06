@@ -12,6 +12,7 @@ from fastapi import FastAPI
 
 from energy_optimizer.config import ConfigurationError, load_configuration
 from energy_optimizer.logging_config import configure_logging
+from energy_optimizer.optimization.plan_generation import PlanGenerator
 from energy_optimizer.orchestration import build_configured_orchestrator
 from energy_optimizer.storage import ProviderDataStore
 
@@ -84,8 +85,11 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
                 configuration.orchestration is not None
                 and configuration.orchestration.enabled,
             )
+            store = application.state.provider_data_store
             application.state.orchestrator = build_configured_orchestrator(
-                configuration, application.state.provider_data_store
+                configuration,
+                store,
+                PlanGenerator(configuration, store) if store is not None else None,
             )
             logger.info(
                 "event=service_orchestrator_built component=orchestration "

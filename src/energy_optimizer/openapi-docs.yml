@@ -42,6 +42,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /plan:
+    get:
+      summary: Current Plan
+      description: Return the latest plan that the orchestration cycle stored.
+      operationId: current_plan_plan_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanSnapshotResponse'
   /api/v1/appliances:
     get:
       summary: Appliances
@@ -1859,6 +1871,56 @@ components:
 
 
         The schedule is present only when the solver proved the plan optimal.'
+    PlanSnapshotResponse:
+      properties:
+        status:
+          type: string
+          enum:
+          - optimal
+          - infeasible
+          - time_limit
+          title: Status
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        interval_minutes:
+          type: integer
+          const: 60
+          title: Interval Minutes
+        hours:
+          type: integer
+          maximum: 168.0
+          minimum: 1.0
+          title: Hours
+        objective_eur:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Objective Eur
+          description: Import cost minus export revenue of the optimal plan in EUR
+        schedule:
+          items:
+            $ref: '#/components/schemas/PlannedHourResponse'
+          type: array
+          title: Schedule
+        created_at:
+          type: string
+          format: date-time
+          title: Created At
+          description: When the provider snapshot was taken
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      - start_time
+      - interval_minutes
+      - hours
+      - objective_eur
+      - schedule
+      - created_at
+      title: PlanSnapshotResponse
+      description: The latest plan stored by the orchestration cycle.
     PlannedBatteryResponse:
       properties:
         charge_kw:

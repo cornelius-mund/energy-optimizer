@@ -306,11 +306,19 @@ directory, and start it again.
 Electricity-price collection also records every retrieved price hour in a
 separate `electricity-price-history` record (see [`docs/api.md`](docs/api.md#series)).
 
-Automatic plan generation is disabled until an optimization plan generator is
-configured. Once enabled, a refresh triggers planning only when all required
-sources have current, valid data; the plan generator receives one coherent
-`ProviderDataSnapshot`. Concurrent orchestration cycles are skipped to avoid
-duplicate plans.
+Automatic plan generation runs when `orchestration.optimization.enabled` is true
+and persistence is configured. A refresh triggers planning only when all required
+sources have current, valid data. Require `household_load`, `pv_generation` and
+`electricity_prices`; add `battery` to plan its dispatch. The plan generator
+receives one coherent `ProviderDataSnapshot`, plans every future hour covered by
+both the prices and the PV forecast, and stores the latest optimal plan, which
+`GET /plan` returns (404 before the first plan). A snapshot the solver cannot
+satisfy is reported as `plan_status: failed` and keeps the previous plan. The load
+forecast is a baseline: the mean of the same local hour over the last seven days
+of household-load history, ignoring excluded hours. The battery round-trip
+efficiency is split evenly over charging and discharging, and the plan must end with
+at least the current state of charge. Concurrent orchestration cycles are skipped
+to avoid duplicate plans.
 
 ### Home Assistant measured PV history
 
