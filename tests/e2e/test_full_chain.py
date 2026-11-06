@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from e2e.conftest import _configuration, running_service
+from energy_optimizer.config import TariffConfiguration
 from fake_world import (
     BATTERY_SOC_ENTITY,
     BATTERY_SOC_PERCENT,
@@ -30,6 +31,19 @@ INITIAL_SOC_KWH = BATTERY_CAPACITY_KWH * BATTERY_SOC_PERCENT / 100
 MINIMUM_SOC_KWH = 1.0
 TOLERANCE = 1e-5
 PLAN_TIMEOUT_SECONDS = 90
+TARIFF = {
+    "grid_fee_bands": [
+        {"start_hour": 0, "end_hour": 7, "fee_ct_per_kwh": 0.95},
+        {"start_hour": 7, "end_hour": 15, "fee_ct_per_kwh": 9.53},
+        {"start_hour": 15, "end_hour": 20, "fee_ct_per_kwh": 15.65},
+        {"start_hour": 20, "end_hour": 24, "fee_ct_per_kwh": 9.53},
+    ],
+    "supplier_surcharge_ct_per_kwh": 1.0,
+    "levies_ct_per_kwh": 2.946,
+    "concession_fee_ct_per_kwh": 1.32,
+    "electricity_tax_ct_per_kwh": 2.05,
+    "vat_rate": 0.19,
+}
 PLANNING_SOURCES = ["household_load", "pv_generation", "electricity_prices", "battery"]
 
 
@@ -66,6 +80,7 @@ def _chain_configuration(world_url: str, data_directory: Path) -> dict[str, Any]
     del home_assistant["grid_import"], home_assistant["grid_export"]
     configuration["forecast_solar"]["base_url"] = world_url
     configuration["awattar"] = {"base_url": f"{world_url}/awattar"}
+    configuration["tariff"] = TARIFF
     configuration["orchestration"] = {
         "enabled": True,
         "sources": {
@@ -95,6 +110,16 @@ def _wait_for_plan(service_url: str) -> dict[str, Any]:
             return plan
         time.sleep(0.5)
     raise AssertionError("the service did not create a plan in time")
+
+
+def _market_price(hour: dict[str, Any]) -> float:
+    return market_price_eur_per_mwh(_hour_of_day(hour)) / 1000
+
+
+def _gross_price(hour: dict[str, Any]) -> float:
+    return TariffConfiguration.model_validate(TARIFF).import_price_eur_per_kwh(
+        _market_price(hour), _hour_of_day(hour)
+    )
 
 
 def _hour_of_day(hour: dict[str, Any]) -> int:
@@ -162,19 +187,33 @@ def test_the_battery_dispatch_respects_its_limits_and_buys_cheap_energy(
 
     discharged = [h for h in schedule if h["battery"]["discharge_kw"] > TOLERANCE]
     assert discharged
-    assert all(market_price_eur_per_mwh(_hour_of_day(h)) >= 150 for h in discharged)
+    cheapest_gross = min(_gross_price(h) for h in schedule)
+    assert all(_gross_price(h) > cheapest_gross for h in discharged)
 
 
-def test_the_plan_costs_less_than_buying_everything_at_the_market(
+def test_imports_are_priced_with_the_grid_tariff_and_exports_at_the_market(
+    chain: tuple[str, FakeWorld],
+) -> None:
+    schedule = _wait_for_plan(chain[0])["schedule"]
+
+    for hour in schedule:
+        assert hour["import_cost_eur"] == pytest.approx(
+            hour["grid_import_kw"] * _gross_price(hour), abs=1e-6
+        )
+        assert hour["export_revenue_eur"] == pytest.approx(
+            hour["grid_export_kw"] * _market_price(hour), abs=1e-6
+        )
+
+
+def test_the_plan_costs_less_than_buying_everything_at_the_tariff(
     chain: tuple[str, FakeWorld],
 ) -> None:
     plan = _wait_for_plan(chain[0])
     schedule = plan["schedule"]
 
     unplanned_cost = sum(
-        market_price_eur_per_mwh(_hour_of_day(h))
-        / 1000
-        * (h["load_kw"] - pv_kw(_hour_of_day(h)))
+        max(h["load_kw"] - pv_kw(_hour_of_day(h)), 0) * _gross_price(h)
+        - max(pv_kw(_hour_of_day(h)) - h["load_kw"], 0) * _market_price(h)
         for h in schedule
     )
     planned_cost = sum(h["import_cost_eur"] - h["export_revenue_eur"] for h in schedule)

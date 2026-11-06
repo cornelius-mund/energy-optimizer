@@ -510,6 +510,72 @@ class OrchestrationConfiguration(_StrictModel):
         return self
 
 
+class GridFeeBandConfiguration(_StrictModel):
+    """A grid fee that applies from ``start_hour`` up to ``end_hour`` local time."""
+
+    start_hour: int = Field(ge=0, le=23)
+    end_hour: int = Field(ge=1, le=24)
+    fee_ct_per_kwh: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "GridFeeBandConfiguration":
+        if self.end_hour <= self.start_hour:
+            raise ValueError("a grid fee band must end after it starts")
+        return self
+
+
+class TariffConfiguration(_StrictModel):
+    """Turns the net exchange price into the price on the electricity bill.
+
+    The gross import price is ``(market price + grid fee of the local hour + fixed
+    components) * (1 + vat_rate)``. All amounts are net, in ct/kWh.
+    """
+
+    grid_fee_bands: list[GridFeeBandConfiguration] = Field(min_length=1)
+    supplier_surcharge_ct_per_kwh: float = Field(default=0, ge=0)
+    levies_ct_per_kwh: float = Field(default=0, ge=0)
+    concession_fee_ct_per_kwh: float = Field(default=0, ge=0)
+    electricity_tax_ct_per_kwh: float = Field(default=0, ge=0)
+    vat_rate: float = Field(default=0, ge=0, lt=1)
+
+    @model_validator(mode="after")
+    def validate_bands_cover_the_day(self) -> "TariffConfiguration":
+        covered = [0] * 24
+        for band in self.grid_fee_bands:
+            for hour in range(band.start_hour, band.end_hour):
+                covered[hour] += 1
+        if any(count != 1 for count in covered):
+            raise ValueError(
+                "grid_fee_bands must cover every hour of the day exactly once"
+            )
+        return self
+
+    def grid_fee_ct_per_kwh(self, local_hour: int) -> float:
+        return next(
+            band.fee_ct_per_kwh
+            for band in self.grid_fee_bands
+            if band.start_hour <= local_hour < band.end_hour
+        )
+
+    def fixed_components_ct_per_kwh(self) -> float:
+        return (
+            self.supplier_surcharge_ct_per_kwh
+            + self.levies_ct_per_kwh
+            + self.concession_fee_ct_per_kwh
+            + self.electricity_tax_ct_per_kwh
+        )
+
+    def import_price_eur_per_kwh(
+        self, market_price_eur_per_kwh: float, local_hour: int
+    ) -> float:
+        net_ct = (
+            market_price_eur_per_kwh * 100
+            + self.grid_fee_ct_per_kwh(local_hour)
+            + self.fixed_components_ct_per_kwh()
+        )
+        return net_ct * (1 + self.vat_rate) / 100
+
+
 class Configuration(_StrictModel):
     """Validated settings needed to start the service."""
 
@@ -524,6 +590,7 @@ class Configuration(_StrictModel):
     appliances: dict[str, ApplianceConfiguration] = Field(default_factory=dict)
     forecast_solar: ForecastSolarConfiguration | None = None
     awattar: AwattarConfiguration | None = None
+    tariff: TariffConfiguration | None = None
     persistence: PersistenceConfiguration | None = None
     orchestration: OrchestrationConfiguration | None = None
 

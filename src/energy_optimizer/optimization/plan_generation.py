@@ -144,6 +144,22 @@ class PlanGenerator:
         )
         return stored
 
+    def _import_prices(
+        self,
+        prices: ElectricityPriceData,
+        hour_starts: list[datetime],
+        prices_at: list[int],
+    ) -> tuple[float, ...]:
+        market = [prices.import_price_eur_per_kwh[i] for i in prices_at]
+        tariff = self.configuration.tariff
+        if tariff is None:
+            return tuple(market)
+        time_zone = ZoneInfo(self.configuration.timezone)
+        return tuple(
+            tariff.import_price_eur_per_kwh(price, start.astimezone(time_zone).hour)
+            for price, start in zip(market, hour_starts, strict=True)
+        )
+
     def planning_problem(self, snapshot: ProviderDataSnapshot) -> PlanningProblem:
         load = _required(snapshot, "household_load", HouseholdLoadData)
         pv = _required(snapshot, "pv_generation", PvGenerationData)
@@ -165,8 +181,8 @@ class PlanGenerator:
                 pv.generation_kw[int((start - pv.start_time) / ONE_HOUR)]
                 for start in hour_starts
             ),
-            import_price_eur_per_kwh=tuple(
-                prices.import_price_eur_per_kwh[i] for i in prices_at
+            import_price_eur_per_kwh=self._import_prices(
+                prices, hour_starts, prices_at
             ),
             export_price_eur_per_kwh=tuple(
                 prices.export_price_eur_per_kwh[i] for i in prices_at

@@ -320,6 +320,31 @@ efficiency is split evenly over charging and discharging, and the plan must end 
 at least the current state of charge. Concurrent orchestration cycles are skipped
 to avoid duplicate plans.
 
+### Grid tariff
+
+aWATTar delivers the net exchange price. Configure an optional `tariff` to plan with
+the price on the bill instead: `grid_fee_bands` (local hours, `start_hour` inclusive,
+`end_hour` exclusive, together covering the day exactly once, with `fee_ct_per_kwh`),
+`supplier_surcharge_ct_per_kwh`, `levies_ct_per_kwh`, `concession_fee_ct_per_kwh`,
+`electricity_tax_ct_per_kwh` and `vat_rate`, all net. The import price of an hour is
+`(market price + grid fee of the local hour + fixed components) * (1 + vat_rate)`;
+the export price stays the market price. Without `tariff` the plan uses the market
+price for both directions. Example (section 14a module 3, Westnetz):
+
+```yaml
+tariff:
+  grid_fee_bands:
+    - {start_hour: 0, end_hour: 7, fee_ct_per_kwh: 0.95}
+    - {start_hour: 7, end_hour: 15, fee_ct_per_kwh: 9.53}
+    - {start_hour: 15, end_hour: 20, fee_ct_per_kwh: 15.65}
+    - {start_hour: 20, end_hour: 24, fee_ct_per_kwh: 9.53}
+  supplier_surcharge_ct_per_kwh: 1.0
+  levies_ct_per_kwh: 2.946
+  concession_fee_ct_per_kwh: 1.32
+  electricity_tax_ct_per_kwh: 2.05
+  vat_rate: 0.19
+```
+
 ### Home Assistant measured PV history
 
 Configure `home_assistant.pv_generation` as an energy aggregation of cumulative
