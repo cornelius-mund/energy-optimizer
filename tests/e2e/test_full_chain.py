@@ -301,3 +301,34 @@ def test_the_car_is_charged_to_its_target_before_the_deadline_in_cheap_hours(
     )
     average_price = sum(_gross_price(h) for h in before_deadline) / deadline_index
     assert average_charging_price < average_price
+
+
+@pytest.fixture(scope="module")
+def immediate_chain(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, FakeWorld]]:
+    root = tmp_path_factory.mktemp("immediate-chain")
+    with running_fake_world() as (world_url, world):
+        configuration = _chain_configuration(world_url, root / "provider-data")
+        configuration["ev_charging"] = {
+            "strategy": "immediate",
+            "minimum_soc_percent": EV_TARGET_PERCENT,
+        }
+        with running_service(configuration, root) as service_url:
+            yield service_url, world
+
+
+def test_the_immediate_strategy_charges_at_full_power_from_the_first_hour(
+    immediate_chain: tuple[str, FakeWorld],
+) -> None:
+    plan = _wait_for_plan(immediate_chain[0])
+    charged_kw = [hour["ev"]["charge_kw"] for hour in plan["schedule"]]
+    needed_kwh = EV_CAPACITY_KWH * (EV_TARGET_PERCENT - EV_SOC_PERCENT) / 100
+    full_power_hours = int(needed_kwh / EV_EFFICIENCY // EV_MAXIMUM_CHARGE_KW)
+
+    assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=TOLERANCE)
+    assert charged_kw[:full_power_hours] == pytest.approx(
+        [EV_MAXIMUM_CHARGE_KW] * full_power_hours
+    )
+    assert sum(charged_kw) * EV_EFFICIENCY == pytest.approx(needed_kwh)
+    assert all(kw == pytest.approx(0.0, abs=TOLERANCE) for kw in charged_kw[6:])

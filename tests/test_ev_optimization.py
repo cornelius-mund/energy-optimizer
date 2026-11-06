@@ -135,3 +135,16 @@ def ev_soc_kwh(plan: Plan, hour: int) -> float:
     ev = plan.hours[hour].ev
     assert ev is not None
     return ev.state_of_charge_kwh
+
+
+def test_a_fixed_charge_schedule_is_followed_whatever_the_prices() -> None:
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=7.2),
+        fixed_charge_kw=(4.0, 4.0, 0.0, 0.0),
+    )
+
+    plan = solve_with(ev)
+
+    assert charged_kw(plan) == pytest.approx([4.0, 4.0, 0.0, 0.0], abs=TOLERANCE)
+    assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
+    assert plan.objective_eur == pytest.approx(4.0 * 0.30 + 4.0 * 0.10)

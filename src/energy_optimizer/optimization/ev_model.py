@@ -31,10 +31,15 @@ def add_ev(
         ],
         index=hours,
     )
+    fixed = specification.fixed_charge_kw
     variables = EvVariables(
         charge=model.add_variables(
-            lower=0,
-            upper=specification.maximum_charge_kw * can_charge,
+            lower=0 if fixed is None else pandas.Series(fixed, index=hours),
+            upper=(
+                specification.maximum_charge_kw * can_charge
+                if fixed is None
+                else pandas.Series(fixed, index=hours)
+            ),
             coords=[hours],
             name="ev_charge_kw",
         ),
@@ -46,9 +51,10 @@ def add_ev(
         ),
         shortfall=model.add_variables(lower=0, name="ev_shortfall_kwh"),
     )
-    _limit_power_to_the_charger_range(
-        model, hours, specification, variables, can_charge
-    )
+    if fixed is None:
+        _limit_power_to_the_charger_range(
+            model, hours, specification, variables, can_charge
+        )
     _add_state_of_charge_dynamics(model, hours, specification, variables)
     _require_target_at_deadline(model, hours, specification, variables)
     return variables

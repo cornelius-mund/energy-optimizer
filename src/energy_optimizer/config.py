@@ -368,10 +368,24 @@ class HomeAssistantEvConfiguration(_StrictModel):
 class EvChargingConfiguration(_StrictModel):
     """What the owner wants from the car: a state of charge at a local time."""
 
-    minimum_soc_percent: float = Field(gt=0, le=100)
-    deadline: time = Field(
-        description="Local time of day by which the car must hold the state of charge"
+    strategy: Literal["deadline", "immediate"] = "deadline"
+    minimum_soc_percent: float = Field(
+        gt=0,
+        le=100,
+        description="Target state of charge; with `immediate` the car charges to it",
     )
+    deadline: time | None = Field(
+        default=None,
+        description="Local time of day by which the car must hold the state of charge",
+    )
+
+    @model_validator(mode="after")
+    def validate_deadline(self) -> "EvChargingConfiguration":
+        if self.strategy == "deadline" and self.deadline is None:
+            raise ValueError(
+                "ev_charging.deadline is required for the deadline strategy"
+            )
+        return self
 
 
 class HomeAssistantConfiguration(_StrictModel):

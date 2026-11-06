@@ -364,7 +364,12 @@ ev_charging:
   deadline: "07:00"          # local time, see `timezone`
 ```
 
-The strategy is `deadline`: the car must hold `minimum_soc_percent` at the next
+Strategies (`ev_charging.strategy`): `deadline` (default) and `immediate`. With
+`immediate` the car charges at full power from the first hour while plugged in until
+`minimum_soc_percent` is stored (the last hour is rounded up to the charger minimum);
+no deadline is needed and the rest of the plan is optimized around that fixed load.
+
+The `deadline` strategy: the car must hold `minimum_soc_percent` at the next
 local `deadline`. The plan charges it in the cheapest hours before then, using PV
 surplus first because exporting it pays less than importing costs. Charging is
 planned only while the car is plugged in (the current plug state is assumed for the

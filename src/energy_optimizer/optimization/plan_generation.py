@@ -115,12 +115,50 @@ def deadline_hours(
     return hours_until if hours_until <= len(hour_starts) else None
 
 
+def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecification:
+    """Charge at full power from now on until the target is stored.
+
+    The last hour is rounded up to the charger minimum, as a wall box would, but
+    never beyond the capacity of the car.
+    """
+    schedule: list[float] = []
+    stored_kwh = ev.state_of_charge_kwh
+    for _ in range(hours):
+        missing_kwh = min(target_kwh, ev.capacity_kwh) - stored_kwh
+        wanted_kw = missing_kwh / ev.charge_efficiency
+        room_kw = (ev.capacity_kwh - stored_kwh) / ev.charge_efficiency
+        power_kw = (
+            0.0
+            if not ev.plugged_in or missing_kwh <= 1e-9
+            else min(
+                ev.maximum_charge_kw, max(ev.minimum_charge_kw, wanted_kw), room_kw
+            )
+        )
+        schedule.append(power_kw)
+        stored_kwh += power_kw * ev.charge_efficiency
+    return EvSpecification(
+        capacity_kwh=ev.capacity_kwh,
+        initial_soc_kwh=ev.state_of_charge_kwh,
+        target_soc_kwh=target_kwh,
+        deadline_hours=hours,
+        plugged_in=(ev.plugged_in,) * hours,
+        minimum_charge_kw=ev.minimum_charge_kw,
+        maximum_charge_kw=ev.maximum_charge_kw,
+        charge_efficiency=ev.charge_efficiency,
+        fixed_charge_kw=tuple(schedule),
+    )
+
+
 def ev_specification(
     ev: EvData,
     charging: EvChargingConfiguration,
     hour_starts: list[datetime],
     time_zone: ZoneInfo,
 ) -> EvSpecification | None:
+    target_kwh = charging.minimum_soc_percent / 100 * ev.capacity_kwh
+    if charging.strategy == "immediate":
+        return immediate_charging(ev, target_kwh, len(hour_starts))
+    assert charging.deadline is not None
     hours_until_deadline = deadline_hours(charging.deadline, hour_starts, time_zone)
     if hours_until_deadline is None:
         logger.warning(

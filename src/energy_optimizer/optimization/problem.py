@@ -42,6 +42,8 @@ class EvSpecification:
     ``target_soc_kwh`` by then. A charger delivers either nothing or a power
     between its minimum and maximum. A target that cannot be reached is not an
     error: the plan charges as much as possible and reports the shortfall.
+    A ``fixed_charge_kw`` schedule replaces the choice of hours and power; the
+    rest of the plan is optimized around it.
     """
 
     capacity_kwh: KilowattHour
@@ -52,6 +54,7 @@ class EvSpecification:
     minimum_charge_kw: Kilowatt
     maximum_charge_kw: Kilowatt
     charge_efficiency: float
+    fixed_charge_kw: tuple[Kilowatt, ...] | None = None
 
 
 @dataclass(frozen=True)
