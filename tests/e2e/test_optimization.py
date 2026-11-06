@@ -53,6 +53,39 @@ def test_the_running_service_exports_pv_surplus_and_curtails_it_at_negative_pric
     assert body["objective_eur"] == pytest.approx(-0.10)
 
 
+def test_the_running_service_schedules_the_battery_and_keeps_its_state_of_charge(
+    e2e_api: httpx.Client,
+) -> None:
+    request = {
+        **DAY_AHEAD_REQUEST,
+        "load_kw": [2.0, 2.0],
+        "pv_generation_kw": [0.0, 0.0],
+        "import_price_eur_per_kwh": [0.10, 0.50],
+        "export_price_eur_per_kwh": [0.05, 0.05],
+        "battery": {
+            "capacity_kwh": 10.0,
+            "initial_soc_percent": 50.0,
+            "minimum_soc_percent": 10.0,
+            "maximum_soc_percent": 90.0,
+            "maximum_charge_kw": 3.0,
+            "maximum_discharge_kw": 2.0,
+            "charge_efficiency": 0.9,
+            "discharge_efficiency": 0.8,
+        },
+    }
+
+    response = e2e_api.post("/optimize", json=request)
+
+    body = response.json()
+    assert body["status"] == "optimal"
+    charging_hour, discharging_hour = (hour["battery"] for hour in body["schedule"])
+    assert charging_hour["charge_kw"] == pytest.approx(2.5 / 0.9)
+    assert charging_hour["state_of_charge_kwh"] == pytest.approx(7.5)
+    assert discharging_hour["discharge_kw"] == pytest.approx(2.0)
+    assert discharging_hour["state_of_charge_percent"] == pytest.approx(50.0)
+    assert body["objective_eur"] == pytest.approx((2.0 + 2.5 / 0.9) * 0.10)
+
+
 def test_the_running_service_reports_a_load_above_the_grid_limit(
     e2e_api: httpx.Client,
 ) -> None:

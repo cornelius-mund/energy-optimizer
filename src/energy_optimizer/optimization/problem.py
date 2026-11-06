@@ -5,6 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 
 type Kilowatt = float
+type KilowattHour = float
 type Euro = float
 type EuroPerKilowattHour = float
 
@@ -13,6 +14,24 @@ class PlanStatus(StrEnum):
     OPTIMAL = "optimal"
     INFEASIBLE = "infeasible"
     TIME_LIMIT = "time_limit"
+
+
+@dataclass(frozen=True)
+class BatterySpecification:
+    """Technical limits and starting state of the battery.
+
+    The horizon must end with at least ``final_soc_kwh``; without that bound the
+    cheapest plan would drain the battery for free in the last hour.
+    """
+
+    minimum_soc_kwh: KilowattHour
+    maximum_soc_kwh: KilowattHour
+    initial_soc_kwh: KilowattHour
+    final_soc_kwh: KilowattHour
+    maximum_charge_kw: Kilowatt
+    maximum_discharge_kw: Kilowatt
+    charge_efficiency: float
+    discharge_efficiency: float
 
 
 @dataclass(frozen=True)
@@ -27,9 +46,17 @@ class PlanningProblem:
     maximum_import_kw: Kilowatt
     maximum_export_kw: Kilowatt
     time_limit_seconds: float
+    battery: BatterySpecification | None = None
 
     def hours(self) -> int:
         return len(self.load_kw)
+
+
+@dataclass(frozen=True)
+class PlannedBatteryHour:
+    charge_kw: Kilowatt
+    discharge_kw: Kilowatt
+    state_of_charge_kwh: KilowattHour
 
 
 @dataclass(frozen=True)
@@ -43,6 +70,7 @@ class PlannedHour:
     grid_export_kw: Kilowatt
     import_cost_eur: Euro
     export_revenue_eur: Euro
+    battery: PlannedBatteryHour | None = None
 
 
 @dataclass(frozen=True)

@@ -19,6 +19,47 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class PlanningBatteryRequest(_StrictModel):
+    """Technical limits and starting state of the battery to schedule."""
+
+    capacity_kwh: float = Field(gt=0, le=10_000, description="Usable capacity in kWh")
+    initial_soc_percent: float = Field(ge=0, le=100)
+    minimum_soc_percent: float = Field(ge=0, le=100)
+    maximum_soc_percent: float = Field(ge=0, le=100)
+    final_soc_percent: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Required final state of charge; the initial one if omitted",
+    )
+    maximum_charge_kw: float = Field(gt=0, le=1000)
+    maximum_discharge_kw: float = Field(gt=0, le=1000)
+    charge_efficiency: float = Field(
+        gt=0, le=1, description="Ratio of charged energy that is stored"
+    )
+    discharge_efficiency: float = Field(
+        gt=0, le=1, description="Ratio of drawn energy that is delivered"
+    )
+
+    @model_validator(mode="after")
+    def validate_state_of_charge_band(self) -> "PlanningBatteryRequest":
+        """Require the initial and final state of charge inside the band."""
+        final = (
+            self.initial_soc_percent
+            if self.final_soc_percent is None
+            else self.final_soc_percent
+        )
+        band = (self.minimum_soc_percent, self.maximum_soc_percent)
+        if band[0] > band[1]:
+            raise ValueError("minimum_soc_percent must not exceed maximum_soc_percent")
+        for name, value in (("initial", self.initial_soc_percent), ("final", final)):
+            if not band[0] <= value <= band[1]:
+                raise ValueError(
+                    f"{name} state of charge must lie within the minimum and maximum"
+                )
+        return self
+
+
 class HourlyOptimizationRequest(_StrictModel):
     """Validated hourly inputs accepted by the optimization boundary."""
 
@@ -38,6 +79,9 @@ class HourlyOptimizationRequest(_StrictModel):
     export_price_eur_per_kwh: list[
         Annotated[float, Field(description="Grid export price in EUR/kWh")]
     ] = Field(min_length=1, max_length=168)
+    battery: PlanningBatteryRequest | None = Field(
+        default=None, description="Battery to schedule; omit to plan without one"
+    )
 
     @model_validator(mode="after")
     def validate_horizon(self) -> "HourlyOptimizationRequest":
@@ -622,6 +666,15 @@ class GridFlowResponse(_StrictModel):
     latest_observation_at: datetime
 
 
+class PlannedBatteryResponse(_StrictModel):
+    """Battery power and state of charge at the end of one scheduled hour."""
+
+    charge_kw: float
+    discharge_kw: float
+    state_of_charge_kwh: float
+    state_of_charge_percent: float
+
+
 class PlannedHourResponse(_StrictModel):
     """One scheduled hour of the optimized plan."""
 
@@ -638,6 +691,9 @@ class PlannedHourResponse(_StrictModel):
     grid_export_kw: float = Field(description="Power fed into the grid in kW")
     import_cost_eur: float = Field(description="Import cost of the hour in EUR")
     export_revenue_eur: float = Field(description="Export revenue of the hour in EUR")
+    battery: PlannedBatteryResponse | None = Field(
+        description="Battery dispatch; null when the request had no battery"
+    )
 
 
 class OptimizationResponse(_StrictModel):

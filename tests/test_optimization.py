@@ -8,6 +8,7 @@ from hypothesis import strategies as strategies
 from linopy import Model
 
 from energy_optimizer.optimization import (
+    BatterySpecification,
     LinopyPlanSolver,
     Plan,
     PlanningProblem,
@@ -28,6 +29,7 @@ def problem(
     export_price_eur_per_kwh: tuple[float, ...] | None = None,
     maximum_import_kw: float = MAXIMUM_IMPORT_KW,
     maximum_export_kw: float = MAXIMUM_EXPORT_KW,
+    battery: BatterySpecification | None = None,
 ) -> PlanningProblem:
     hours = len(load_kw)
     return PlanningProblem(
@@ -39,6 +41,7 @@ def problem(
         maximum_import_kw=maximum_import_kw,
         maximum_export_kw=maximum_export_kw,
         time_limit_seconds=30,
+        battery=battery,
     )
 
 

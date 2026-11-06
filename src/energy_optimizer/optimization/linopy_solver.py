@@ -5,8 +5,13 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 import pandas
-from linopy import Model, Variable
+from linopy import LinearExpression, Model, Variable
 
+from energy_optimizer.optimization.battery_model import (
+    BatteryVariables,
+    add_battery,
+    read_battery_hour,
+)
 from energy_optimizer.optimization.problem import (
     Plan,
     PlannedHour,
@@ -33,6 +38,7 @@ class _GridAndPvVariables:
     grid_import: Variable
     grid_export: Variable
     pv_used: Variable
+    battery: BatteryVariables | None
 
 
 class LinopyPlanSolver:
@@ -57,6 +63,11 @@ def _add_variables(
     model: Model, hours: pandas.RangeIndex, problem: PlanningProblem
 ) -> _GridAndPvVariables:
     return _GridAndPvVariables(
+        battery=(
+            None
+            if problem.battery is None
+            else add_battery(model, hours, problem.battery)
+        ),
         grid_import=model.add_variables(
             lower=0,
             upper=problem.maximum_import_kw,
@@ -102,9 +113,25 @@ def _add_energy_balance(
     model: Model, variables: _GridAndPvVariables, load_kw: pandas.Series
 ) -> None:
     model.add_constraints(
-        variables.pv_used + variables.grid_import == load_kw + variables.grid_export,
+        _supplied_kw(variables) == _consumed_kw(variables, load_kw),
         name="energy_balance",
     )
+
+
+def _supplied_kw(variables: _GridAndPvVariables) -> LinearExpression:
+    supplied_kw = variables.pv_used + variables.grid_import
+    if variables.battery is not None:
+        supplied_kw = supplied_kw + variables.battery.discharge
+    return supplied_kw
+
+
+def _consumed_kw(
+    variables: _GridAndPvVariables, load_kw: pandas.Series
+) -> LinearExpression:
+    consumed_kw = variables.grid_export + load_kw
+    if variables.battery is not None:
+        consumed_kw = consumed_kw + variables.battery.charge
+    return consumed_kw
 
 
 def _minimize_net_cost(
@@ -154,6 +181,11 @@ def _read_plan(
             * problem.import_price_eur_per_kwh[hour],
             export_revenue_eur=float(exported_kw[hour])
             * problem.export_price_eur_per_kwh[hour],
+            battery=(
+                None
+                if variables.battery is None
+                else read_battery_hour(variables.battery, hour)
+            ),
         )
         for hour in range(problem.hours())
     )
