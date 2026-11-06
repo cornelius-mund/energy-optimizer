@@ -627,8 +627,17 @@ class PlannedHourResponse(_StrictModel):
 
     start_time: datetime
     load_kw: float = Field(description="Mandatory household load in kW")
-    grid_import_kw: float = Field(description="Energy drawn from the grid in kW")
+    pv_generation_kw: float = Field(description="PV power that is actually used in kW")
+    pv_self_consumption_kw: float = Field(
+        description="PV power that supplies the household load in kW"
+    )
+    pv_curtailment_kw: float = Field(
+        description="Forecast PV power that is not generated in kW"
+    )
+    grid_import_kw: float = Field(description="Power drawn from the grid in kW")
+    grid_export_kw: float = Field(description="Power fed into the grid in kW")
     import_cost_eur: float = Field(description="Import cost of the hour in EUR")
+    export_revenue_eur: float = Field(description="Export revenue of the hour in EUR")
 
 
 class OptimizationResponse(_StrictModel):
@@ -642,6 +651,6 @@ class OptimizationResponse(_StrictModel):
     interval_minutes: Literal[60]
     hours: int = Field(ge=1, le=168)
     objective_eur: float | None = Field(
-        description="Total import cost of the optimal plan in EUR"
+        description="Import cost minus export revenue of the optimal plan in EUR"
     )
     schedule: list[PlannedHourResponse]

@@ -30,6 +30,29 @@ def test_the_running_service_returns_an_optimal_schedule(e2e_api: httpx.Client) 
     )
 
 
+def test_the_running_service_exports_pv_surplus_and_curtails_it_at_negative_prices(
+    e2e_api: httpx.Client,
+) -> None:
+    sunny_day = {
+        **DAY_AHEAD_REQUEST,
+        "load_kw": [2.0, 2.0],
+        "pv_generation_kw": [3.0, 3.0],
+        "import_price_eur_per_kwh": [0.30, 0.30],
+        "export_price_eur_per_kwh": [0.10, -0.05],
+    }
+
+    response = e2e_api.post("/optimize", json=sunny_day)
+
+    body = response.json()
+    assert body["status"] == "optimal"
+    exporting_hour, curtailing_hour = body["schedule"]
+    assert exporting_hour["grid_export_kw"] == pytest.approx(1.0)
+    assert exporting_hour["pv_curtailment_kw"] == pytest.approx(0.0, abs=1e-6)
+    assert curtailing_hour["grid_export_kw"] == pytest.approx(0.0, abs=1e-6)
+    assert curtailing_hour["pv_curtailment_kw"] == pytest.approx(1.0)
+    assert body["objective_eur"] == pytest.approx(-0.10)
+
+
 def test_the_running_service_reports_a_load_above_the_grid_limit(
     e2e_api: httpx.Client,
 ) -> None:

@@ -6,8 +6,8 @@ history uses the shared Home Assistant counter-history pipeline, also available
 for arbitrary energy sources such as PV. See the
 [appliance reference](docs/api.md#appliances-and-general-energy-history) and
 `config.example.yaml`. `POST /optimize` calculates the cheapest schedule for the
-household load supplied from the grid; PV, export, battery, and appliance
-scheduling are not implemented yet.
+household load with PV self-consumption, grid import and export, and curtailment;
+battery and appliance scheduling are not implemented yet.
 
 An open-source web service for optimizing the energy usage of a single-family
 house. It optimizes the interaction between household electrical load,

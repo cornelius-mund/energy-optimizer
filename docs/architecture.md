@@ -5,8 +5,8 @@ vertical slices. Package names may evolve as the energy and asset models become
 better understood. `appliances.py` defines general electrical capabilities and
 household accounting. Energy history uses shared Home Assistant history needs
 and counter aggregation for appliances, household load, and arbitrary sources.
-`POST /optimize` solves the household-load schedule; PV, export, battery, and
-appliance scheduling are not implemented yet.
+`POST /optimize` solves the household-load schedule with PV and grid exchange;
+battery and appliance scheduling are not implemented yet.
 The `application` and `domain` layers named below are
 boundaries without a package of their own.
 
