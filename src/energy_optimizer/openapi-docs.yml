@@ -21,7 +21,7 @@ paths:
   /optimize:
     post:
       summary: Optimize
-      description: Validate hourly inputs; schedule optimization is not implemented.
+      description: Calculate the cheapest schedule that supplies the household load.
       operationId: optimize_optimize_post
       requestBody:
         content:
@@ -1811,7 +1811,10 @@ components:
       properties:
         status:
           type: string
-          const: validated
+          enum:
+          - optimal
+          - infeasible
+          - time_limit
           title: Status
         start_time:
           type: string
@@ -1826,6 +1829,17 @@ components:
           maximum: 168.0
           minimum: 1.0
           title: Hours
+        objective_eur:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Objective Eur
+          description: Total import cost of the optimal plan in EUR
+        schedule:
+          items:
+            $ref: '#/components/schemas/PlannedHourResponse'
+          type: array
+          title: Schedule
       additionalProperties: false
       type: object
       required:
@@ -1833,8 +1847,40 @@ components:
       - start_time
       - interval_minutes
       - hours
+      - objective_eur
+      - schedule
       title: OptimizationResponse
-      description: Response returned after an hourly request passes API validation.
+      description: 'Plan calculated for a validated hourly request.
+
+
+        The schedule is present only when the solver proved the plan optimal.'
+    PlannedHourResponse:
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        load_kw:
+          type: number
+          title: Load Kw
+          description: Mandatory household load in kW
+        grid_import_kw:
+          type: number
+          title: Grid Import Kw
+          description: Energy drawn from the grid in kW
+        import_cost_eur:
+          type: number
+          title: Import Cost Eur
+          description: Import cost of the hour in EUR
+      additionalProperties: false
+      type: object
+      required:
+      - start_time
+      - load_kw
+      - grid_import_kw
+      - import_cost_eur
+      title: PlannedHourResponse
+      description: One scheduled hour of the optimized plan.
     PvGenerationRequest:
       properties:
         schema_version:

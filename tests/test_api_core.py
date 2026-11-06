@@ -12,19 +12,50 @@ def test_health_returns_service_status_and_version(client: TestClient) -> None:
     assert response.json() == {"status": "ok", "version": "0.1.0"}
 
 
-def test_optimize_accepts_a_valid_hourly_request(
+def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
     client: TestClient, valid_request: dict[str, object]
 ) -> None:
     with client:
         response = client.post("/optimize", json=valid_request)
 
     assert response.status_code == 200
-    assert response.json() == {
-        "status": "validated",
+    body = response.json()
+    assert body == {
+        "status": "optimal",
         "start_time": "2026-01-01T00:00:00Z",
         "interval_minutes": 60,
         "hours": 2,
+        "objective_eur": pytest.approx(0.61),
+        "schedule": [
+            {
+                "start_time": "2026-01-01T00:00:00Z",
+                "load_kw": 1.2,
+                "grid_import_kw": pytest.approx(1.2),
+                "import_cost_eur": pytest.approx(0.36),
+            },
+            {
+                "start_time": "2026-01-01T01:00:00Z",
+                "load_kw": 1.0,
+                "grid_import_kw": pytest.approx(1.0),
+                "import_cost_eur": pytest.approx(0.25),
+            },
+        ],
     }
+
+
+def test_optimize_reports_a_load_above_the_import_limit_as_infeasible(
+    client: TestClient, valid_request: dict[str, object]
+) -> None:
+    with client:
+        response = client.post(
+            "/optimize", json={**valid_request, "load_kw": [1.2, 10.5]}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "infeasible"
+    assert body["objective_eur"] is None
+    assert body["schedule"] == []
 
 
 @pytest.mark.parametrize(

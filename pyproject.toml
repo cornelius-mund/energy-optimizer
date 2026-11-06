@@ -16,6 +16,8 @@ dependencies = [
     "tzdata; sys_platform == 'win32'",
     "PyYAML>=6.0,<7.0",
     "uvicorn[standard]>=0.54,<1.0",
+    "linopy>=0.10.1",
+    "highspy>=1.15.1",
 ]
 
 [project.optional-dependencies]
@@ -58,4 +60,9 @@ mypy_path = "src"
 testpaths = ["tests"]
 markers = [
     "e2e: browser end-to-end tests requiring Playwright browsers",
+]
+
+[dependency-groups]
+dev = [
+    "pandas-stubs>=3.1.0.261029",
 ]
