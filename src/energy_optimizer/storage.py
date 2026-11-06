@@ -329,17 +329,23 @@ class ProviderDataStore:
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
             os.replace(temporary_path, path)
-            directory_fd = os.open(self.directory, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            self._sync_directory()
         except OSError as error:
             temporary_path.unlink(missing_ok=True)
             raise ProviderDataStoreError(
                 f"could not atomically write normalized provider data to {path}: "
                 f"{error}"
             ) from error
+
+    def _sync_directory(self) -> None:
+        """Make a completed rename durable; Windows cannot open directories."""
+        if os.name == "nt":
+            return
+        directory_fd = os.open(self.directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
 
     @staticmethod
     def _append(path: Path, payload: bytes) -> None:

@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 import re
+import stat
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -197,7 +199,7 @@ def test_store_logs_invalid_primary_and_backup_recovery_with_counts(
 ) -> None:
     store.save(KEY, ADAPTER, household_load_data(START, [1.0, 2.0]))
     primary, _ = paths(tmp_path)
-    primary.write_text("invalid\n", encoding="utf-8")
+    primary.write_bytes(b"invalid\n")
 
     with caplog.at_level(logging.INFO, logger="energy_optimizer"):
         recovered = store.load(KEY, ADAPTER)
@@ -264,6 +266,25 @@ def test_store_rejects_unrecoverable_invalid_state(store: ProviderDataStore) -> 
 
     with pytest.raises(ProviderDataStoreError, match="invalid and cannot be recovered"):
         store.load(KEY, ADAPTER)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot sync a directory")
+def test_atomic_write_syncs_the_directory_after_the_rename(
+    store: ProviderDataStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced_directory_flags: list[bool] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(file_descriptor: int) -> None:
+        file_mode = os.fstat(file_descriptor).st_mode
+        synced_directory_flags.append(stat.S_ISDIR(file_mode))
+        real_fsync(file_descriptor)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+
+    store._atomic_write(tmp_path / "payload.json", b"{}")
+
+    assert synced_directory_flags == [False, True]
 
 
 def test_invalid_write_does_not_replace_existing_data(store: ProviderDataStore) -> None:

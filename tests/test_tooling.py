@@ -20,6 +20,8 @@ DOCKERFILE = REPOSITORY / "Dockerfile"
 LINTER_CONFIGURATION = (".yamllint", ".hadolint.yaml", ".editorconfig")
 LINT_STEPS = ("workflows", "dockerfile", "yaml", "shell")
 LINTERS = ("actionlint", "hadolint", "yamllint", "shfmt", "shellcheck")
+BASH = shutil.which("bash") or "bash"
+POSIX_SHELL = shutil.which("sh") or "sh"
 
 CLEAN_FILES = {
     ".github/workflows/ci.yml": (
@@ -49,7 +51,7 @@ _run = partial(subprocess.run, capture_output=True, text=True, check=False)
 
 
 def _verify(*arguments: str) -> subprocess.CompletedProcess[str]:
-    return _run([str(VERIFY), *arguments], timeout=30)
+    return _run([BASH, str(VERIFY), *arguments], timeout=30)
 
 
 def _verify_in_scratch_repository(
@@ -69,17 +71,25 @@ def _verify_in_scratch_repository(
     for relative_path, content in {**CLEAN_FILES, **files}.items():
         target = root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        target.write_text(content, encoding="utf-8", newline="\n")
     # Run the linters of the interpreter's environment, not ambient copies.
     environment = os.environ.copy()
     interpreter_directory = str(Path(sys.executable).parent)
     environment["PATH"] = os.pathsep.join([interpreter_directory, environment["PATH"]])
     return _run(
-        [str(root / "scripts" / "verify"), *steps],
+        [BASH, str(root / "scripts" / "verify"), *steps],
         cwd=root,
         env=environment,
         timeout=60,
     )
+
+
+_BASE_PATH = (str(Path(POSIX_SHELL).parent), "/usr/bin", "/bin")
+
+
+def _system_environment() -> dict[str, str]:
+    """Variables a Windows process needs to start; empty elsewhere."""
+    return {name: os.environ[name] for name in ("SYSTEMROOT",) if name in os.environ}
 
 
 def _preflight_with_linters(
@@ -95,18 +105,23 @@ def _preflight_with_linters(
     shutil.copy(PREFLIGHT, root / "scripts" / "preflight")
     stubs = tmp_path / "stubs"
     stubs.mkdir()
-    (stubs / "gh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (stubs / "gh").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8", newline="\n")
     (stubs / "gh").chmod(0o755)
     linter_directory = root / ".venv" / "bin"
     linter_directory.mkdir(parents=True)
     for name in installed:
-        (linter_directory / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (linter_directory / name).write_text(
+            "#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n"
+        )
         (linter_directory / name).chmod(0o755)
 
     result = _run(
-        [str(root / "scripts" / "preflight"), *arguments],
+        [POSIX_SHELL, str(root / "scripts" / "preflight"), *arguments],
         cwd=root,
-        env={"PATH": f"{stubs}:/usr/bin:/bin"},
+        env={
+            **_system_environment(),
+            "PATH": os.pathsep.join([str(stubs), *_BASE_PATH]),
+        },
         timeout=60,
     )
     lines: dict[str, tuple[str, str]] = {}
