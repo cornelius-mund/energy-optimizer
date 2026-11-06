@@ -392,6 +392,38 @@ charges as much as possible and reports `ev_shortfall_kwh` instead of failing. A
 deadline beyond the planning horizon is not planned yet. The plan hours carry an
 `ev` object with `charge_kw`, `state_of_charge_kwh` and `state_of_charge_percent`.
 
+#### Controlling the wall box
+
+Planning only shows what to do. To execute the plan, add an opt-in `control` block
+to `home_assistant.ev`:
+
+```yaml
+home_assistant:
+  ev:
+    control:
+      enabled: true
+      set_power:                       # Home Assistant service that limits the charge power
+        service: number.set_value
+        entity_id: number.easee_charger_dynamic_limit
+        data_field: value              # default
+        unit: A                        # A (default), W or kW
+        phases: 3                      # used to convert kW to A
+        voltage: 230
+      enable_entity_id: switch.easee_charger_enabled   # optional: pause and resume
+      max_plan_age_seconds: 7200
+      poll_interval_seconds: 30
+```
+
+Every `poll_interval_seconds` the service looks up the planned power of the running
+hour and sends the command only when it changed: `homeassistant.turn_on` plus the
+power for charging, `homeassistant.turn_off` for a pause (without
+`enable_entity_id` the limit is set to 0). A plan starts at the next full hour, so
+the running hour comes from the most recent earlier plan that covers it; the hours
+of all plans are kept in an EV schedule. If no plan covers the hour or the schedule
+is older than `max_plan_age_seconds`, the charger is handed back to its own
+behaviour once (enabled at `maximum_charge_kw`). A rejected command is logged and
+retried at the next run.
+
 ### Home Assistant measured PV history
 
 Configure `home_assistant.pv_generation` as an energy aggregation of cumulative

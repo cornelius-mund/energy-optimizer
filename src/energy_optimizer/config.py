@@ -346,6 +346,32 @@ class HomeAssistantEvPlugConfiguration(_StrictModel):
     plugged_in_states: list[str] = Field(default_factory=lambda: ["on"], min_length=1)
 
 
+class HomeAssistantEvServiceConfiguration(_StrictModel):
+    """A Home Assistant service call that sets the charge power of the wall box."""
+
+    service: str = Field(pattern=r"^[a-z_]+\.[a-z0-9_]+$")
+    entity_id: str = Field(min_length=1, max_length=255)
+    data_field: str = Field(default="value", min_length=1)
+    unit: Literal["A", "W", "kW"] = "A"
+    phases: int = Field(default=3, ge=1, le=3)
+    voltage: float = Field(default=230, gt=0)
+
+
+class HomeAssistantEvControlConfiguration(_StrictModel):
+    """Opt-in execution of the plan on the wall box.
+
+    Without a plan for the running hour, or with a plan older than
+    ``max_plan_age_seconds``, the charger is handed back to its own behaviour:
+    enabled at the maximum power.
+    """
+
+    enabled: bool = False
+    set_power: HomeAssistantEvServiceConfiguration
+    enable_entity_id: str | None = Field(default=None, min_length=1, max_length=255)
+    max_plan_age_seconds: float = Field(default=7200, gt=0)
+    poll_interval_seconds: float = Field(default=30, gt=0)
+
+
 class HomeAssistantEvConfiguration(_StrictModel):
     """The car's state of charge and plug state in Home Assistant plus its charger."""
 
@@ -355,6 +381,7 @@ class HomeAssistantEvConfiguration(_StrictModel):
     minimum_charge_kw: float = Field(gt=0)
     maximum_charge_kw: float = Field(gt=0)
     charge_efficiency: float = Field(default=0.9, gt=0, le=1)
+    control: HomeAssistantEvControlConfiguration | None = None
 
     @model_validator(mode="after")
     def validate_units_and_power(self) -> "HomeAssistantEvConfiguration":

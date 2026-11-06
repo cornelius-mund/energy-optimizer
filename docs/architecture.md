@@ -34,6 +34,8 @@ src/energy_optimizer/
 │   ├── linopy_solver.py      # linopy and HiGHS implementation of the port
 │   ├── ev_model.py           # EV charging constraints
 │   └── plan_generation.py    # Snapshot to planning problem, solve, persist the plan
+├── control/
+│   └── ev_controller.py      # Applies the planned EV power through Home Assistant
 ├── orchestration.py          # Scheduled provider retrieval and plan triggers
 ├── providers/
 │   ├── interfaces.py         # Provider-independent normalized data models

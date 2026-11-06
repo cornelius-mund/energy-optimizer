@@ -102,6 +102,15 @@ def _chain_configuration(world_url: str, data_directory: Path) -> dict[str, Any]
         "minimum_charge_kw": EV_MINIMUM_CHARGE_KW,
         "maximum_charge_kw": EV_MAXIMUM_CHARGE_KW,
         "charge_efficiency": EV_EFFICIENCY,
+        "control": {
+            "enabled": True,
+            "set_power": {
+                "service": "number.set_value",
+                "entity_id": "number.easee_dynamic_limit",
+            },
+            "enable_entity_id": "switch.easee_enabled",
+            "poll_interval_seconds": 1,
+        },
     }
     configuration["ev_charging"] = {
         "minimum_soc_percent": EV_TARGET_PERCENT,
@@ -413,3 +422,26 @@ def test_the_soft_target_charges_cheap_hours_above_the_minimum_but_never_beyond_
         if _gross_price(h) >= worth_it
     )
     assert expensive_stored_kwh <= minimum_kwh - initial_kwh + TOLERANCE
+
+
+def test_the_running_service_hands_the_charger_back_while_no_plan_covers_the_hour(
+    chain: tuple[str, FakeWorld],
+) -> None:
+    service_url, world = chain
+    _wait_for_plan(service_url)
+    deadline = time.monotonic() + 10
+    while not world.service_calls and time.monotonic() < deadline:
+        time.sleep(0.2)
+
+    # The first plan starts at the next full hour, so the running hour is not
+    # planned yet and the charger keeps its own behaviour: enabled at full power.
+    assert world.service_calls[:2] == [
+        ("homeassistant.turn_on", {"entity_id": "switch.easee_enabled"}),
+        (
+            "number.set_value",
+            {
+                "entity_id": "number.easee_dynamic_limit",
+                "value": round(EV_MAXIMUM_CHARGE_KW * 1000 / (3 * 230)),
+            },
+        ),
+    ]
