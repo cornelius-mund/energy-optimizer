@@ -309,8 +309,9 @@ Electricity-price collection also records every retrieved price hour in a
 separate `electricity-price-history` record (see [`docs/api.md`](docs/api.md#series)).
 
 Automatic plan generation runs when `orchestration.optimization.enabled` is true
-and persistence is configured. A refresh triggers planning only when all required
-sources have current, valid data. Require `household_load`, `pv_generation` and
+and persistence is configured. Every cycle in which at least one required source
+refreshed creates a plan, provided every required source holds current, valid
+data, whether refreshed now or restored from persistence after a restart. Require `household_load`, `pv_generation` and
 `electricity_prices`; add `battery` to plan its dispatch. The plan generator
 receives one coherent `ProviderDataSnapshot`, plans every future hour covered by
 both the prices and the PV forecast, and stores the latest optimal plan, which

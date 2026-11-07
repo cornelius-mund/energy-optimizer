@@ -347,6 +347,107 @@ def test_complete_fresh_refresh_creates_one_plan_snapshot(tmp_path: Path) -> Non
     assert provider_data.load_kw == (3.5,)
 
 
+def named_registration(
+    name: str, refreshes: Callable[[datetime], bool], store: ProviderDataStore
+) -> ProviderRegistration:
+    """A persisted load-shaped source with new data only when ``refreshes(now)``."""
+    key = ProviderDataKey("household-load", name, f"sensor.{name}")
+    return ProviderRegistration(
+        name=name,
+        data_type="household-load",
+        adapter=ADAPTER,
+        plan=lambda now, _: (
+            plan_without_needs(lambda: data(now, source=name))
+            if refreshes(now)
+            else None
+        ),
+        is_fresh=lambda value, now: (
+            isinstance(value, HouseholdLoadData)
+            and value.latest_observation_at >= now - timedelta(minutes=90)
+        ),
+        load=lambda: store.load(key, ADAPTER),
+    )
+
+
+def two_source_orchestrator(
+    tmp_path: Path, plans: PlanRecorder, hourly_refreshes: Callable[[datetime], bool]
+) -> ProviderOrchestrator:
+    """Plan from an hourly history source and a source polled every five minutes."""
+    store = ProviderDataStore(tmp_path)
+    return ProviderOrchestrator(
+        OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "hourly": DataSourceScheduleConfiguration(interval_seconds=3600),
+                "live": DataSourceScheduleConfiguration(interval_seconds=300),
+            },
+            optimization=OptimizationTriggerConfiguration(
+                enabled=True, required_sources=["hourly", "live"]
+            ),
+        ),
+        [
+            named_registration("hourly", hourly_refreshes, store),
+            named_registration("live", lambda _: True, store),
+        ],
+        store,
+        plan_generator=plans,
+    )
+
+
+def test_a_refresh_of_one_required_source_plans_with_the_others_still_fresh(
+    tmp_path: Path,
+) -> None:
+    plans = PlanRecorder()
+    orchestrator = two_source_orchestrator(tmp_path, plans, lambda _: True)
+    orchestrator.run_due(START)
+
+    cycle = orchestrator.run_due(START + timedelta(minutes=5))
+
+    assert cycle.plan_status == "created"
+    assert len(plans) == 2
+    assert plans[1].data["hourly"] == plans[0].data["hourly"]
+
+
+def test_a_restart_plans_with_restored_data_that_has_nothing_new_to_fetch(
+    tmp_path: Path,
+) -> None:
+    two_source_orchestrator(tmp_path, PlanRecorder(), lambda _: True).run_due(START)
+    plans = PlanRecorder()
+    restarted = two_source_orchestrator(tmp_path, plans, lambda _: False)
+
+    cycle = restarted.run_due(START + timedelta(minutes=10))
+
+    assert cycle.plan_status == "created"
+    assert len(plans) == 1
+
+
+def test_no_plan_while_a_required_source_never_delivered_data(
+    tmp_path: Path,
+) -> None:
+    plans = PlanRecorder()
+    orchestrator = two_source_orchestrator(tmp_path, plans, lambda _: False)
+
+    cycle = orchestrator.run_due(START)
+
+    assert cycle.plan_status == "not-ready"
+    assert cycle.plan_error == "a required source has no data yet"
+    assert plans == []
+
+
+def test_a_restored_required_source_that_is_too_old_blocks_the_plan(
+    tmp_path: Path,
+) -> None:
+    two_source_orchestrator(tmp_path, PlanRecorder(), lambda _: True).run_due(START)
+    plans = PlanRecorder()
+    restarted = two_source_orchestrator(tmp_path, plans, lambda _: False)
+
+    cycle = restarted.run_due(START + timedelta(hours=3))
+
+    assert cycle.plan_status == "not-ready"
+    assert cycle.plan_error == "required source data is stale"
+    assert plans == []
+
+
 def test_plan_generation_failure_is_reported(tmp_path: Path) -> None:
     def generate(_: ProviderDataSnapshot) -> object:
         raise RuntimeError("solver unavailable")

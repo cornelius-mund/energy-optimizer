@@ -498,12 +498,20 @@ class ProviderOrchestrator:
                 len(required & blocked_sources),
             )
             return "not-ready", "a required source failed or returned stale data"
-        if not required.issubset(fresh_data):
+        if not required & fresh_data.keys():
+            logger.info(
+                "event=optimization_skipped component=orchestration operation=plan "
+                "reason=no_required_source_refreshed"
+            )
+            return "not-ready", "no required source was refreshed in this cycle"
+        missing_sources = required - latest_data.keys()
+        if missing_sources:
             logger.warning(
                 "event=optimization_skipped component=orchestration operation=plan "
-                "reason=required_source_not_refreshed"
+                "reason=required_source_missing source_count=%s",
+                len(missing_sources),
             )
-            return "not-ready", "not all required sources refreshed successfully"
+            return "not-ready", "a required source has no data yet"
         if self.plan_generator is None:
             logger.warning(
                 "event=optimization_unavailable component=orchestration operation=plan "
