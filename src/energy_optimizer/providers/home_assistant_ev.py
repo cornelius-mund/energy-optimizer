@@ -66,9 +66,9 @@ class HomeAssistantEvImporter:
             unit="kWh",
             source=SourceMetadata(provider="home-assistant", entity_id=EV_SOURCE_ID),
             retrieved_at=retrieved_at,
-            latest_observation_at=min(
-                soc_record["timestamp"], plug_record["timestamp"]
-            ),
+            # Home Assistant keeps an unchanged value without a new timestamp, so a
+            # valid state is current at the moment it is read.
+            latest_observation_at=retrieved_at,
         )
         if not 0 <= data.state_of_charge_kwh <= data.capacity_kwh:
             raise HomeAssistantError(

@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -121,7 +121,7 @@ def test_fetch_normalizes_battery_state_and_capabilities() -> None:
     assert data.battery_efficiency == 0.85
     assert data.source.entity_id == "battery"
     assert data.retrieved_at == START
-    assert data.latest_observation_at == OBSERVED_AT
+    assert data.latest_observation_at == START
 
 
 def test_fetch_reads_values_from_attributes_and_reuses_one_state_request() -> None:
@@ -191,7 +191,7 @@ def test_fetch_uses_constants_without_requesting_static_entities() -> None:
     assert data.maximum_charge_kw == 4
     assert data.maximum_discharge_kw == 4
     assert data.battery_efficiency == 0.85
-    assert data.latest_observation_at == OBSERVED_AT
+    assert data.latest_observation_at == START
 
 
 def test_fetch_allows_unavailable_entity_state_when_all_values_use_attributes() -> None:
@@ -303,9 +303,9 @@ def test_fetch_does_not_return_partial_data_when_one_entity_fails() -> None:
     assert calls == 2
 
 
-def test_freshness_uses_the_oldest_mapped_observation() -> None:
+def test_an_unchanged_valid_value_is_current_when_it_is_read() -> None:
     responses = standard_payloads(
-        payload("sensor.battery_capacity", 10, "2026-01-01T03:00:00+00:00")
+        payload("sensor.battery_capacity", 10, "2025-12-30T03:00:00+00:00")
     )
     provider, client = importer(
         httpx.MockTransport(serve(responses)), max_data_age_seconds=7200
@@ -313,8 +313,9 @@ def test_freshness_uses_the_oldest_mapped_observation() -> None:
     with client:
         data = provider.fetch(now=START)
 
-    assert data.latest_observation_at == datetime(2026, 1, 1, 3, tzinfo=timezone.utc)
-    assert not provider.is_fresh(data, now=START)
+    assert data.latest_observation_at == START
+    assert provider.is_fresh(data, now=START)
+    assert not provider.is_fresh(data, now=START + timedelta(hours=3))
 
 
 def test_fetch_requires_timezone_aware_retrieval_time() -> None:

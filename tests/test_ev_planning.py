@@ -107,6 +107,24 @@ def test_the_importer_converts_the_state_of_charge_and_reads_the_plug() -> None:
     assert data.charge_efficiency == 0.9
 
 
+def test_a_state_of_charge_that_has_not_changed_for_days_is_current() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        entity = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "entity_id": entity,
+                "state": "95" if entity == "sensor.ev_soc" else "on",
+                "last_updated": (NOW - timedelta(days=2)).isoformat(),
+                "attributes": {},
+            },
+        )
+
+    data = importer(httpx.MockTransport(handle)).fetch(now=NOW)
+
+    assert data.latest_observation_at == NOW
+
+
 def test_a_cable_that_is_off_means_the_car_is_not_plugged_in() -> None:
     assert importer(ev_responses(cable="off")).fetch(now=NOW).plugged_in is False
 

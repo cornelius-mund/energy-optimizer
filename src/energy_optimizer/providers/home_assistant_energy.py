@@ -507,6 +507,10 @@ def normalize_counter_history(
                 energy[hour_index(effective_start, observation.timestamp)] += step_kwh
         last = observation
         latest_observation = observation.timestamp
+    if not gap and last is not None:
+        # Home Assistant records only changes; a counter whose last state is
+        # valid still holds that value at the end of the requested window.
+        latest_observation = max(latest_observation, end)
     if gap:
         exclude_span(
             gap_start,
