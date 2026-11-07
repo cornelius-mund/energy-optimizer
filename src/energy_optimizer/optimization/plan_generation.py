@@ -27,7 +27,10 @@ from energy_optimizer.optimization.problem import (
     PlanningProblem,
 )
 from energy_optimizer.optimization.solver import PlanSolver
-from energy_optimizer.orchestration import ProviderDataSnapshot
+from energy_optimizer.orchestration import (
+    ExpectedPlanningError,
+    ProviderDataSnapshot,
+)
 from energy_optimizer.providers.interfaces import (
     BatteryData,
     ElectricityPriceData,
@@ -44,7 +47,7 @@ ONE_HOUR = timedelta(hours=1)
 PLAN_KEY = ProviderDataKey("optimization-plan", "energy-optimizer", "current")
 
 
-class PlanGenerationError(RuntimeError):
+class PlanGenerationError(ExpectedPlanningError):
     """Raised when the snapshot cannot produce a stored optimal plan."""
 
 

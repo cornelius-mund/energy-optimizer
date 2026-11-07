@@ -129,6 +129,10 @@ class OrchestrationCycle:
     plan_error: str | None = None
 
 
+class ExpectedPlanningError(RuntimeError):
+    """A plan that the inputs cannot support; logged without a traceback."""
+
+
 class OrchestrationError(RuntimeError):
     """Raised when orchestration configuration cannot be composed safely."""
 
@@ -540,12 +544,14 @@ class ProviderOrchestrator:
             self.plan_generator(snapshot)
         except Exception as error:
             message = str(error) or error.__class__.__name__
-            logger.error(
+            expected = isinstance(error, ExpectedPlanningError)
+            logger.log(
+                logging.WARNING if expected else logging.ERROR,
                 "event=optimization_plan_failed component=orchestration "
                 "operation=plan error_type=%s error=%s",
                 error.__class__.__name__,
                 message,
-                exc_info=True,
+                exc_info=not expected,
             )
             return "failed", message
         logger.info(
