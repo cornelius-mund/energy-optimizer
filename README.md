@@ -514,7 +514,10 @@ Configure the Home Assistant URL, bearer token, the household-load energy
 aggregation, and request timeout under `home_assistant` in `config.yaml`; the
 example configuration adds a household meter and subtracts an EV meter. An
 optional `max_data_age_seconds` setting enables a polling health check
-(`is_fresh(data)`); it does not invalidate historical data. The token is a secret
+(`is_fresh(data)`); it does not invalidate historical data. Home Assistant stores
+only changes, so a value that is still valid counts as current when it is read: a
+live state (battery, EV) at the retrieval time, an energy counter up to the end of
+the requested window. Only unavailable or invalid states make a source stale. The token is a secret
 and must not be committed to source control. The normalized aggregate is
 persisted and exposed under the single source identity
 `home-assistant/household_load`, so storage, freshness evaluation, and

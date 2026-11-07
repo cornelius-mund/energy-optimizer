@@ -91,7 +91,6 @@ class HomeAssistantBatteryImporter:
         state_of_charge = self._convert_soc(
             "state_of_charge", configuration.state_of_charge, records, capacity
         )
-        latest_observation_at = min(record["timestamp"] for record in records.values())
         data = BatteryData(
             schema_version="1",
             start_time=retrieved_at,
@@ -118,14 +117,16 @@ class HomeAssistantBatteryImporter:
                 provider="home-assistant", entity_id=BATTERY_SOURCE_ID
             ),
             retrieved_at=retrieved_at,
-            latest_observation_at=latest_observation_at,
+            # Home Assistant keeps an unchanged value without a new timestamp, so a
+            # valid state is current at the moment it is read.
+            latest_observation_at=retrieved_at,
         )
         _validate(data)
         logger.info(
             "event=provider_fetch_succeeded component=home_assistant operation=fetch "
             "data_type=battery entity_count=%s latest_observation_at=%s",
             len(records),
-            latest_observation_at,
+            data.latest_observation_at,
         )
         return data
 

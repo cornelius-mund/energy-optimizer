@@ -367,7 +367,7 @@ def test_fetch_fails_without_returning_partial_data_when_one_channel_fails() -> 
     assert calls == 2
 
 
-def test_freshness_uses_the_oldest_channel_observation() -> None:
+def test_a_channel_that_became_unavailable_is_only_as_fresh_as_its_last_value() -> None:
     data = build_grid_flow(
         respond_by_entity(
             {
@@ -377,15 +377,28 @@ def test_freshness_uses_the_oldest_channel_observation() -> None:
                     ("01:00", "0.5"),
                     ("02:00", "1"),
                     ("03:00", "1.5"),
-                    ("03:30", "2"),
+                    ("03:30", "unavailable"),
                 ),
             }
         )
     )
 
-    assert data.latest_observation_at == hour(3) + timedelta(minutes=30)
+    assert data.latest_observation_at == hour(3)
     provider = HomeAssistantGridFlowImporter(configuration(max_data_age_seconds=90))
     assert not provider.is_fresh(data, now=NOW)
+
+
+def test_a_counter_that_stopped_changing_is_current_until_the_window_end() -> None:
+    data = build_grid_flow(
+        respond_by_entity(
+            {
+                ENTITY_ID: standard_readings(),
+                EXPORT_ENTITY_ID: readings(("00:00", "0"), ("01:00", "0.5")),
+            }
+        )
+    )
+
+    assert data.latest_observation_at == END
 
 
 def test_fetch_rejects_instantaneous_power_channel() -> None:
