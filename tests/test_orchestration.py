@@ -32,6 +32,7 @@ from energy_optimizer.exclusions import (
     HourExclusion,
 )
 from energy_optimizer.orchestration import (
+    ExpectedPlanningError,
     OrchestrationError,
     PlanGenerator,
     ProviderDataSnapshot,
@@ -460,6 +461,41 @@ def test_plan_generation_failure_is_reported(tmp_path: Path) -> None:
 
     assert cycle.plan_status == "failed"
     assert cycle.plan_error == "solver unavailable"
+
+
+@pytest.mark.parametrize(
+    ("error", "level", "traceback_logged"),
+    [
+        pytest.param(
+            ExpectedPlanningError("no forecast"), logging.WARNING, False, id="expected"
+        ),
+        pytest.param(RuntimeError("solver crashed"), logging.ERROR, True, id="bug"),
+    ],
+)
+def test_only_an_unexpected_planning_failure_is_logged_with_a_traceback(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    level: int,
+    traceback_logged: bool,
+) -> None:
+    def generate(_: ProviderDataSnapshot) -> object:
+        raise error
+
+    orchestrator = orchestrator_for(
+        tmp_path, plan_generator=generate, optimization_enabled=True
+    )
+
+    with caplog.at_level(logging.INFO, logger="energy_optimizer.orchestration"):
+        orchestrator.run_due(START)
+
+    failures = [
+        record
+        for record in caplog.records
+        if "optimization_plan_failed" in record.getMessage()
+    ]
+    assert [record.levelno for record in failures] == [level]
+    assert bool(failures[0].exc_info) is traceback_logged
 
 
 def test_restarted_orchestrator_loads_persisted_data(tmp_path: Path) -> None:

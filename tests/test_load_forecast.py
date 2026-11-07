@@ -1,5 +1,6 @@
 """Load forecast methods and the backtest that chooses between them."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -8,6 +9,7 @@ import pytest
 
 from energy_optimizer.config import Configuration
 from energy_optimizer.optimization.load_forecast import (
+    FILLED_PROFILE,
     SEVEN_DAY_MEAN,
     WEEKDAY_PROFILE,
     LoadForecastError,
@@ -176,3 +178,31 @@ def test_the_plan_uses_the_forecast_method_that_the_configuration_selects(
     assert planning_load(tmp_path, SEVEN_DAY_MEAN) == pytest.approx(
         ((5 * WEEKDAY_KW + 2 * WEEKEND_KW) / 7,) * 6
     )
+
+
+def test_an_hour_excluded_every_day_is_filled_from_its_neighbouring_hours() -> None:
+    hourly_load_kw = [1.0] * 24
+    hourly_load_kw[18] = 2.0
+    hourly_load_kw[20] = 4.0
+    days = 14
+    history = replace(
+        weekly_history(days=days),
+        load_kw=tuple(
+            None if hour % 24 == 19 else hourly_load_kw[hour % 24]
+            for hour in range(days * 24)
+        ),
+    )
+
+    forecast = forecast_load(history, day_hours(history, 0), UTC_ZONE)
+
+    assert forecast.method == FILLED_PROFILE
+    assert forecast.mean_absolute_error_kw is None
+    assert forecast.load_kw[19] == pytest.approx(3.0)
+    assert forecast.load_kw[18] == pytest.approx(2.0)
+
+
+def test_a_history_without_any_valid_hour_cannot_be_forecast() -> None:
+    history = replace(weekly_history(days=2), load_kw=(None,) * 48)
+
+    with pytest.raises(LoadForecastError, match="no valid sample"):
+        forecast_load(history, day_hours(history, 0), UTC_ZONE)

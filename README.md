@@ -324,8 +324,11 @@ them and the one with the smallest mean absolute error wins. Methods are
 `weekday_profile` (the same local hour on the same kind of day, weekday or weekend,
 over the last 28 days; at least two samples per hour). Excluded hours never
 contribute. If the best method cannot forecast the planned hours the next one is
-tried; if none can, planning fails with an explicit error and keeps the previous
-plan. `GET /plan` reports the method and its backtest error as `load_forecast`. The battery round-trip
+tried; if none can, `filled_profile` takes over: the mean of each local hour over
+the last 28 days, and an hour of day without any valid sample gets the mean of
+its nearest hours (logged as `load_forecast_gaps_filled`). Only a history without
+any valid hour fails planning; that failure keeps the previous plan and is logged
+as one warning without a traceback. `GET /plan` reports the method and its backtest error as `load_forecast`. The battery round-trip
 efficiency is split evenly over charging and discharging, every kWh the battery
 delivers costs `home_assistant.battery.throughput_cost_eur_per_kwh` (default 0, the
 wear of the cells; the optimizer only cycles the battery when the price spread pays

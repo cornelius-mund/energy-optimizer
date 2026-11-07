@@ -17,6 +17,7 @@ ONE_HOUR = timedelta(hours=1)
 HOURS_PER_DAY = 24
 SEVEN_DAY_MEAN = "seven_day_mean"
 WEEKDAY_PROFILE = "weekday_profile"
+FILLED_PROFILE = "filled_profile"
 AUTO = "auto"
 SEVEN_DAY_WINDOW = 7
 WEEKDAY_PROFILE_WINDOW = 28
@@ -109,6 +110,61 @@ def weekday_profile_forecast(
     return tuple(forecast)
 
 
+def _circular_hour_distance(first: int, second: int) -> int:
+    difference = abs(first - second)
+    return min(difference, HOURS_PER_DAY - difference)
+
+
+def _fill_from_neighbouring_hours(means: dict[int, float]) -> dict[int, float]:
+    """Give every hour of day without a sample the mean of its nearest hours."""
+    filled = dict(means)
+    for hour in range(HOURS_PER_DAY):
+        if hour in means:
+            continue
+        nearest_distance = min(_circular_hour_distance(hour, known) for known in means)
+        nearest = [
+            means[known]
+            for known in means
+            if _circular_hour_distance(hour, known) == nearest_distance
+        ]
+        filled[hour] = math.fsum(nearest) / len(nearest)
+    return filled
+
+
+def filled_profile_forecast(
+    history: HouseholdLoadData, hour_starts: list[datetime], time_zone: ZoneInfo
+) -> tuple[Kilowatt, ...]:
+    """Mean of the same local hour over four weeks, gaps from neighbouring hours.
+
+    The last resort when no backtested method can forecast every planned hour:
+    an hour of day without any valid sample (for example one that is excluded
+    every day) must not stop planning.
+    """
+    samples_by_hour: dict[int, list[float]] = defaultdict(list)
+    for hour_start, load_kw in _recent_samples(history, WEEKDAY_PROFILE_WINDOW):
+        samples_by_hour[hour_start.astimezone(time_zone).hour].append(load_kw)
+    if not samples_by_hour:
+        raise LoadForecastError(
+            f"the household-load history has no valid sample in the last "
+            f"{WEEKDAY_PROFILE_WINDOW} days"
+        )
+    means = {
+        hour: math.fsum(samples) / len(samples)
+        for hour, samples in samples_by_hour.items()
+    }
+    missing_hours = sorted(set(range(HOURS_PER_DAY)) - means.keys())
+    if missing_hours:
+        logger.warning(
+            "event=load_forecast_gaps_filled component=optimization operation=plan "
+            "missing_local_hours=%s",
+            ",".join(str(hour) for hour in missing_hours),
+        )
+    profile = _fill_from_neighbouring_hours(means)
+    return tuple(
+        profile[hour_start.astimezone(time_zone).hour] for hour_start in hour_starts
+    )
+
+
 FORECASTERS: dict[str, Forecaster] = {
     SEVEN_DAY_MEAN: seven_day_mean_forecast,
     WEEKDAY_PROFILE: weekday_profile_forecast,
@@ -184,4 +240,12 @@ def forecast_load(
         )
         return LoadForecast(chosen, load_kw, mean_error)
     assert failure is not None
-    raise failure
+    logger.warning(
+        "event=load_forecast_fallback component=optimization operation=plan "
+        "method=%s reason=%s",
+        FILLED_PROFILE,
+        failure,
+    )
+    return LoadForecast(
+        FILLED_PROFILE, filled_profile_forecast(history, hour_starts, time_zone), None
+    )
