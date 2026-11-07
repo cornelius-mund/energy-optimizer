@@ -366,14 +366,34 @@ class HomeAssistantEvPlugConfiguration(_StrictModel):
 
 
 class HomeAssistantEvServiceConfiguration(_StrictModel):
-    """A Home Assistant service call that sets the charge power of the wall box."""
+    """A Home Assistant service call that sets the charge power of the wall box.
+
+    The call targets either an entity (``number.set_value``) or a device, as
+    integrations such as Easee expect (``easee.set_charger_dynamic_limit``).
+    ``extra_data`` is sent with every call, for example a ``time_to_live`` after
+    which the wall box drops the limit if the service stops.
+    """
 
     service: str = Field(pattern=r"^[a-z_]+\.[a-z0-9_]+$")
-    entity_id: str = Field(min_length=1, max_length=255)
+    entity_id: str | None = Field(default=None, min_length=1, max_length=255)
+    device_id: str | None = Field(default=None, min_length=1, max_length=255)
     data_field: str = Field(default="value", min_length=1)
+    extra_data: dict[str, str | int | float] = Field(default_factory=dict)
     unit: Literal["A", "W", "kW"] = "A"
     phases: int = Field(default=3, ge=1, le=3)
     voltage: float = Field(default=230, gt=0)
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "HomeAssistantEvServiceConfiguration":
+        if (self.entity_id is None) == (self.device_id is None):
+            raise ValueError("set_power needs exactly one of entity_id or device_id")
+        return self
+
+    def target(self) -> dict[str, str]:
+        if self.device_id is not None:
+            return {"device_id": self.device_id}
+        assert self.entity_id is not None
+        return {"entity_id": self.entity_id}
 
 
 class HomeAssistantEvControlConfiguration(_StrictModel):

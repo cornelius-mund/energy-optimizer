@@ -168,7 +168,11 @@ class EvController:
     ) -> None:
         self._call(
             target.service,
-            {"entity_id": target.entity_id, target.data_field: self._value(power_kw)},
+            {
+                **target.extra_data,
+                **target.target(),
+                target.data_field: self._value(power_kw),
+            },
         )
 
     def _value(self, power_kw: float) -> float:

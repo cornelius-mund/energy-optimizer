@@ -6,8 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from energy_optimizer.config import HomeAssistantConfiguration
+from energy_optimizer.config import (
+    HomeAssistantConfiguration,
+    HomeAssistantEvServiceConfiguration,
+)
 from energy_optimizer.control.ev_controller import (
     EV_SCHEDULE_ADAPTER,
     EV_SCHEDULE_KEY,
@@ -163,6 +167,43 @@ def test_the_power_is_expressed_in_the_unit_of_the_service(
         SET_VALUE,
         {"entity_id": LIMIT_ENTITY, "value": pytest.approx(expected)},
     )
+
+
+def test_a_device_service_gets_the_device_and_the_extra_data(
+    world: tuple[str, FakeWorld], store: ProviderDataStore
+) -> None:
+    url, fake = world
+    save_schedule(store, (11.0,))
+    set_power = {
+        "service": "easee.set_charger_dynamic_limit",
+        "device_id": "charger-device",
+        "data_field": "current",
+        "extra_data": {"time_to_live": 60},
+        "phases": 3,
+    }
+
+    controller(
+        url, store, [NOON], set_power=set_power, enable_entity_id=None
+    ).apply_due()
+
+    assert fake.service_calls == [
+        (
+            "easee.set_charger_dynamic_limit",
+            {"time_to_live": 60, "device_id": "charger-device", "current": 16},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [{}, {"entity_id": LIMIT_ENTITY, "device_id": "charger-device"}],
+    ids=["no-target", "two-targets"],
+)
+def test_the_power_service_needs_exactly_one_target(target: dict[str, str]) -> None:
+    with pytest.raises(ValidationError, match="exactly one of entity_id or device_id"):
+        HomeAssistantEvServiceConfiguration.model_validate(
+            {"service": SET_VALUE, **target}
+        )
 
 
 def test_without_a_switch_a_pause_sets_the_limit_to_zero(

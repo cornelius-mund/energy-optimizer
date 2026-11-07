@@ -452,6 +452,26 @@ home_assistant:
       poll_interval_seconds: 30
 ```
 
+Integrations that address the charger as a device, such as Easee, take a
+`device_id` instead of `entity_id` (exactly one of them is required).
+`extra_data` is sent with every call; a `time_to_live` makes the wall box drop the
+limit on its own if this service stops:
+
+```yaml
+      set_power:
+        service: easee.set_charger_dynamic_limit
+        device_id: 0123456789abcdef0123456789abcdef   # Settings > Devices > Easee charger
+        data_field: current
+        unit: A
+        phases: 3
+        extra_data: {time_to_live: 60}             # minutes
+```
+
+With Easee, a dynamic limit of 0 A pauses charging, so `enable_entity_id` is not
+needed. Use the wall box status sensor as `plugged_in` (for example
+`plugged_in_states: [awaiting_start, charging, completed, ready_to_charge]`); a
+locked cable alone does not mean a car is connected.
+
 Every `poll_interval_seconds` the service looks up the planned power of the running
 hour and sends the command only when it changed: `homeassistant.turn_on` plus the
 power for charging, `homeassistant.turn_off` for a pause (without
