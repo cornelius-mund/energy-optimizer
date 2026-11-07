@@ -1,4 +1,4 @@
-"""A fake Home Assistant, aWATTar and Forecast.Solar behind real HTTP.
+"""A fake Home Assistant, aWATTar, Forecast.Solar and Open-Meteo behind HTTP.
 
 The world is deterministic in absolute time: every quantity is a function of the
 UTC hour of day, so a test can recompute what the service must have read no matter
@@ -42,6 +42,17 @@ def market_price_eur_per_mwh(hour_of_day: int) -> float:
 
 def pv_kw(hour_of_day: int) -> float:
     return SUN_WATT_HOURS / 1000 if 10 <= hour_of_day < 16 else 0.0
+
+
+def plane_irradiance_w_per_m2(hour_of_day: int, tilt_degrees: float) -> float:
+    """Rise by 100 W/m² per daylight hour; steep planes catch half of it.
+
+    Neighbouring hours differ, so a value assigned to the wrong hour shows.
+    """
+    if not 10 <= hour_of_day < 16:
+        return 0.0
+    roof_irradiance = 100.0 * (hour_of_day - 9)
+    return roof_irradiance / 2 if tilt_degrees > 45 else roof_irradiance
 
 
 def _floor_hour(moment: datetime) -> datetime:
@@ -123,6 +134,24 @@ class FakeWorld:
             "message": {"info": {"timezone": "UTC"}},
         }
 
+    def irradiance(self, tilt_degrees: float) -> dict[str, Any]:
+        """Answer like Open-Meteo: each value labelled with its hour's end."""
+        today = _floor_hour(datetime.now(timezone.utc)).replace(hour=0)
+        hour_starts = [today + ONE_HOUR * hour for hour in range(48)]
+        return {
+            "utc_offset_seconds": 0,
+            "hourly": {
+                "time": [
+                    (start + ONE_HOUR).strftime("%Y-%m-%dT%H:%M")
+                    for start in hour_starts
+                ],
+                "global_tilted_irradiance": [
+                    plane_irradiance_w_per_m2(start.hour, tilt_degrees)
+                    for start in hour_starts
+                ],
+            },
+        }
+
 
 def _handler(world: FakeWorld) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -169,6 +198,8 @@ def _handler(world: FakeWorld) -> type[BaseHTTPRequestHandler]:
                 self._reply(200, world.prices(start, end))
             elif url.path.startswith("/estimate/"):
                 self._reply(200, world.forecast())
+            elif url.path == "/v1/forecast":
+                self._reply(200, world.irradiance(float(query["tilt"][0])))
             else:
                 self._reply(404, {"message": "not found"})
 

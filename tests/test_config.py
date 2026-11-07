@@ -15,6 +15,7 @@ from energy_optimizer.config import (
     HomeAssistantBatteryEntityConfiguration,
     HomeAssistantConfiguration,
     HomeAssistantEnergyEntityConfiguration,
+    OpenMeteoPvConfiguration,
     load_configuration,
 )
 from home_assistant_fixtures import aggregate_settings
@@ -708,6 +709,76 @@ def test_load_configuration_returns_forecast_solar_settings(tmp_path: Path) -> N
     assert configuration.forecast_solar.pv_generation_source_id == "pv_generation"
 
 
+WEST_PLANE: dict[str, object] = {
+    "name": "West",
+    "tilt_degrees": 22,
+    "azimuth_degrees": 90,
+    "peak_power_kw": 9,
+}
+OPEN_METEO_PV = {
+    "latitude": 52.52,
+    "longitude": 13.41,
+    "planes": [
+        WEST_PLANE,
+        {
+            "name": "Facade",
+            "tilt_degrees": 80,
+            "azimuth_degrees": 0,
+            "peak_power_kw": 1,
+        },
+    ],
+    "performance_factor": 0.73,
+}
+
+
+def test_load_configuration_returns_open_meteo_pv_settings(tmp_path: Path) -> None:
+    document = VALID_CONFIGURATION + dump(open_meteo_pv=OPEN_METEO_PV)
+
+    configuration = load(tmp_path, document)
+
+    open_meteo = configuration.open_meteo_pv
+    assert open_meteo is not None
+    assert open_meteo.base_url.host == "api.open-meteo.com"
+    assert [plane.name for plane in open_meteo.planes] == ["West", "Facade"]
+    assert open_meteo.performance_factor == pytest.approx(0.73)
+    assert open_meteo.forecast_days == 2
+    assert open_meteo.pv_generation_source_id == "pv_generation"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "location"),
+    [
+        ({"planes": []}, "open_meteo_pv.planes"),
+        ({"performance_factor": 0}, "open_meteo_pv.performance_factor"),
+        ({"forecast_days": 0}, "open_meteo_pv.forecast_days"),
+        (
+            {"planes": [{**WEST_PLANE, "azimuth_degrees": 270}]},
+            "open_meteo_pv.planes.0.azimuth_degrees",
+        ),
+        (
+            {"planes": [{**WEST_PLANE, "peak_power_kw": 0}]},
+            "open_meteo_pv.planes.0.peak_power_kw",
+        ),
+    ],
+)
+def test_load_configuration_rejects_invalid_open_meteo_pv_settings(
+    tmp_path: Path, overrides: dict[str, object], location: str
+) -> None:
+    document = VALID_CONFIGURATION + dump(open_meteo_pv={**OPEN_METEO_PV, **overrides})
+
+    with pytest.raises(ConfigurationError, match=location):
+        load(tmp_path, document)
+
+
+def test_load_configuration_rejects_two_pv_forecast_providers(tmp_path: Path) -> None:
+    document = VALID_CONFIGURATION + dump(
+        forecast_solar=FORECAST_SOLAR, open_meteo_pv=OPEN_METEO_PV
+    )
+
+    with pytest.raises(ConfigurationError, match="only one PV forecast provider"):
+        load(tmp_path, document)
+
+
 def test_load_configuration_returns_awattar_settings(tmp_path: Path) -> None:
     configuration = load(
         tmp_path, VALID_CONFIGURATION + dump(awattar={"timeout_seconds": 5})
@@ -817,3 +888,21 @@ def test_the_example_configuration_loads() -> None:
     ] == [15, 11]
     assert configuration.tariff is not None
     assert configuration.load_forecast.method == "auto"
+
+
+def test_the_commented_open_meteo_example_is_a_valid_alternative() -> None:
+    """The example keeps open_meteo_pv commented out because only one PV
+    forecast provider may be active; uncommented it must still be valid."""
+    example = Path(__file__).parents[1] / "config.example.yaml"
+    lines = example.read_text(encoding="utf-8").splitlines()
+    first = lines.index("# open_meteo_pv:")
+    uncommented_lines = []
+    for line in lines[first:]:
+        if not line.startswith("# ") or line == "# ":
+            break
+        uncommented_lines.append(line.removeprefix("# "))
+
+    section = yaml.safe_load("\n".join(uncommented_lines))["open_meteo_pv"]
+
+    open_meteo = OpenMeteoPvConfiguration.model_validate(section)
+    assert len(open_meteo.planes) == 3

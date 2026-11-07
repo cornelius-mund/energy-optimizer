@@ -20,9 +20,11 @@ from energy_optimizer.config import (
     ForecastSolarConfiguration,
     GridConfiguration,
     HomeAssistantConfiguration,
+    OpenMeteoPvConfiguration,
     OptimizationTriggerConfiguration,
     OrchestrationConfiguration,
     PersistenceConfiguration,
+    PvPlaneConfiguration,
     SolverConfiguration,
 )
 from energy_optimizer.exclusions import (
@@ -744,6 +746,9 @@ def test_configured_forecast_solar_orchestrator_persists_forecast(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeForecastSolarImporter(FakeImporter):
+        provider = "forecast.solar"
+        minimum_interval_seconds = 300
+
         def fetch(
             self, start_time: datetime, *_: object, now: datetime | None = None
         ) -> PvGenerationData:
@@ -762,7 +767,10 @@ def test_configured_forecast_solar_orchestrator_persists_forecast(
                 expires_at=start + timedelta(hours=24),
             )
 
-    patch_importer(monkeypatch, "ForecastSolarImporter", FakeForecastSolarImporter)
+    monkeypatch.setattr(
+        "energy_optimizer.providers.pv_forecast.ForecastSolarImporter",
+        FakeForecastSolarImporter,
+    )
     store = ProviderDataStore(tmp_path)
     runtime = runtime_configuration(
         tmp_path, "pv_generation", 300, forecast_solar=FORECAST_SOLAR
@@ -773,6 +781,68 @@ def test_configured_forecast_solar_orchestrator_persists_forecast(
     assert cycle.provider_runs[0].source == "pv_generation"
     assert cycle.provider_runs[0].status == "success"
     assert load_persisted(store, PV_KEY, PV_ADAPTER).generation_kw == (1.0,)
+
+
+OPEN_METEO_PV = OpenMeteoPvConfiguration(
+    latitude=52.52,
+    longitude=13.41,
+    planes=[
+        PvPlaneConfiguration(
+            name="West", tilt_degrees=22, azimuth_degrees=90, peak_power_kw=8
+        )
+    ],
+    performance_factor=0.75,
+)
+OPEN_METEO_PV_KEY = ProviderDataKey("pv-generation", "open-meteo", "pv_generation")
+
+
+def test_configured_open_meteo_orchestrator_persists_forecast_under_its_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeOpenMeteoPvImporter(FakeImporter):
+        provider = "open-meteo"
+        minimum_interval_seconds = 300
+
+        def fetch(
+            self, start_time: datetime, *_: object, now: datetime | None = None
+        ) -> PvGenerationData:
+            when = now or start_time
+            return PvGenerationData(
+                schema_version="1",
+                start_time=start_time,
+                interval_minutes=60,
+                generation_kw=(2.5,),
+                unit="kW",
+                source=SourceMetadata(provider="open-meteo", entity_id="pv_generation"),
+                retrieved_at=when,
+                expires_at=start_time + timedelta(hours=24),
+            )
+
+    monkeypatch.setattr(
+        "energy_optimizer.providers.pv_forecast.OpenMeteoPvImporter",
+        FakeOpenMeteoPvImporter,
+    )
+    store = ProviderDataStore(tmp_path)
+    runtime = runtime_configuration(
+        tmp_path, "pv_generation", 300, open_meteo_pv=OPEN_METEO_PV
+    )
+
+    cycle = configured(runtime, store).run_due(START)
+
+    assert cycle.provider_runs[0].status == "success"
+    persisted = load_persisted(store, OPEN_METEO_PV_KEY, PV_ADAPTER)
+    assert persisted.generation_kw == (2.5,)
+
+
+def test_configured_open_meteo_orchestrator_rejects_fast_polling(
+    tmp_path: Path,
+) -> None:
+    runtime = runtime_configuration(
+        tmp_path, "pv_generation", 299, open_meteo_pv=OPEN_METEO_PV
+    )
+
+    with pytest.raises(OrchestrationError, match="300 seconds for the open-meteo"):
+        build_configured_orchestrator(runtime, ProviderDataStore(tmp_path))
 
 
 def grid_flow_configuration(tmp_path: Path) -> Configuration:

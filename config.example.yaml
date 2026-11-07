@@ -99,6 +99,23 @@ forecast_solar:
   timeout_seconds: 10
   max_data_age_seconds: 7200
 
+# Alternative to forecast_solar for an array spread over several roof faces;
+# configure only one of the two. Open-Meteo needs no account or API key and is
+# asked once per plane for plane-of-array irradiance. Azimuth: 0 south,
+# -90 east, 90 west, 180 north. performance_factor scales nameplate power to
+# measured AC output (calibrate it from measured production, see README).
+# open_meteo_pv:
+#   latitude: 52.52
+#   longitude: 13.41
+#   performance_factor: 0.8
+#   planes:
+#     - {name: West roof, tilt_degrees: 22, azimuth_degrees: 90, peak_power_kw: 6}
+#     - {name: East roof, tilt_degrees: 22, azimuth_degrees: -90, peak_power_kw: 4}
+#     - {name: South facade, tilt_degrees: 80, azimuth_degrees: 0, peak_power_kw: 1.2}
+#   forecast_days: 2
+#   timeout_seconds: 10
+#   max_data_age_seconds: 7200
+
 # Optional German EPEX Spot market prices from aWATTar. No API key is required.
 # Values are wholesale EUR/MWh converted to the normalized EUR/kWh contract. Each
 # request asks for the current hour up to 48 hours ahead, which reaches the next

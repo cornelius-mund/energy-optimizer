@@ -43,6 +43,8 @@ src/energy_optimizer/
 │   ├── http.py               # Shared bounded JSON HTTP requests
 │   ├── awattar.py            # German aWATTar EPEX Spot price importer
 │   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast importer
+│   ├── open_meteo_pv.py      # Multi-plane Open-Meteo PV forecast importer
+│   ├── pv_forecast.py        # Selects the configured PV forecast provider
 │   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── home_assistant.py     # Household-load Home Assistant composition
 │   ├── home_assistant_history.py # Shared once-per-cycle Home Assistant history import
@@ -384,6 +386,15 @@ replace the previous forecast, unlike append-friendly household-load history. Th
 free public tier is limited to one plane, hourly resolution, and today plus the
 following day; polling is configured by orchestration so the public rate limit is
 respected.
+
+The Open-Meteo PV importer is an alternative provider slice for arrays with
+several roof faces. It requests plane-of-array irradiance once per configured
+plane, shifts each end-of-interval label to its hour start, sums irradiance
+times nameplate power over the planes that all cover an hour, and scales the
+result by one calibrated performance factor. It produces the same
+`PvGenerationData` under provider `open-meteo`. `providers/pv_forecast.py`
+selects the importer of the one configured PV forecast provider and its storage
+key, so orchestration and the forecast dashboard stay provider-neutral.
 
 The historic household-load read endpoint (`GET /api/v1/historic/household-load`)
 queries this normalized store rather than exposing files. It accepts a

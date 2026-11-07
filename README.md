@@ -518,6 +518,43 @@ The public tier is free for private use, supports one plane, hourly resolution,
 and today plus the following day. Configure polling conservatively to respect
 the public rate limit of 12 requests per IP per rolling hour.
 
+### Open-Meteo multi-plane PV forecast
+
+`OpenMeteoPvImporter` forecasts PV production for an array spread over several
+roof faces. Configure the `open_meteo_pv` section of
+[`config.example.yaml`](config.example.yaml) with the location, one entry per
+plane (`tilt_degrees`, `azimuth_degrees`, nameplate `peak_power_kw`) and a
+`performance_factor`. Azimuth uses the same convention as Forecast.Solar: `0`
+south, `-90` east, `90` west and `180` north. Configure either
+`forecast_solar` or `open_meteo_pv`, not both; the service refuses to start
+otherwise.
+
+Open-Meteo answers one tilt and azimuth per request, so each plane is one
+request for `global_tilted_irradiance`. The hourly forecast is
+
+```text
+generation_kw = performance_factor * sum(irradiance_w_per_m2 / 1000 * peak_power_kw)
+```
+
+Open-Meteo labels an hourly value with the end of the hour it was averaged
+over; the importer assigns it to the hour that starts one hour earlier. An hour
+counts only when every plane reports it, and a requested hour without
+irradiance, a non-UTC response, malformed values, HTTP errors and timeouts are
+provider errors. The forecast covers `forecast_days` days (default 2, today and
+tomorrow) and is stored under provider `open-meteo` with the same
+`pv_generation` source and dashboard series as Forecast.Solar.
+
+`performance_factor` turns nameplate power into measured AC power: inverter,
+cable, temperature and shading losses plus any bias of the irradiance
+forecast. Calibrate it once from measured production as the least-squares
+ratio of measured hourly AC energy to the unscaled sum above over the same
+hours, using Open-Meteo's historical forecast API
+(`historical-forecast-api.open-meteo.com`) so the factor matches the forecast
+irradiance the service uses. Fit only hours after the last change to the
+array. Forecast.Solar's estimates are not interchangeable here: for the same
+plane and hours they can be about half of Open-Meteo irradiance times nameplate
+power, so a factor fitted against one provider does not hold for the other.
+
 ### Home Assistant household-load importer
 
 `HomeAssistantLoadImporter` is a reusable provider adapter for Home Assistant's
