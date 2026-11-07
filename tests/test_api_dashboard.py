@@ -29,6 +29,14 @@ forecast_solar:
   azimuth_degrees: 0
   peak_power_kw: 8
 """
+OPEN_METEO_PV_CONFIGURATION = """\
+open_meteo_pv:
+  latitude: 52.52
+  longitude: 13.41
+  performance_factor: 0.75
+  planes:
+    - {name: West, tilt_degrees: 22, azimuth_degrees: 90, peak_power_kw: 8}
+"""
 AWATTAR_CONFIGURATION = "awattar: {}\n"
 BATTERY_EFFICIENCY = BatteryEfficiencyData(
     schema_version="1",
@@ -74,10 +82,13 @@ def save_battery_efficiency(store: ProviderDataStore, **changes: Any) -> None:
 
 
 def save_pv_generation(
-    store: ProviderDataStore, start_hours: int, expires_hours: int
+    store: ProviderDataStore,
+    start_hours: int,
+    expires_hours: int,
+    provider: str = "forecast.solar",
 ) -> None:
     store.save(
-        ProviderDataKey("pv-generation", "forecast.solar", "pv_generation"),
+        ProviderDataKey("pv-generation", provider, "pv_generation"),
         TypeAdapter(PvGenerationData),
         PvGenerationData(
             schema_version="1",
@@ -85,7 +96,7 @@ def save_pv_generation(
             interval_minutes=60,
             generation_kw=(1.0, 2.0),
             unit="kW",
-            source=SourceMetadata(provider="forecast.solar", entity_id="pv_generation"),
+            source=SourceMetadata(provider=provider, entity_id="pv_generation"),
             retrieved_at=START,
             expires_at=hours_after_start(expires_hours),
         ),
@@ -212,6 +223,19 @@ def test_forecast_dashboard_returns_pv_series_and_metadata(
     assert body["status"] in {"validated", "stale"}
     assert len(body["series"]) == 1
     assert body["series"][0]["scenario_kind"] == "forecast"
+    assert body["series"][0]["values"] == [1.0, 2.0]
+
+
+def test_forecast_dashboard_returns_the_open_meteo_pv_series(
+    persistence_configuration: Path, store: ProviderDataStore
+) -> None:
+    append_configuration(persistence_configuration, OPEN_METEO_PV_CONFIGURATION)
+    save_pv_generation(store, start_hours=0, expires_hours=3, provider="open-meteo")
+    save_pv_generation(store, start_hours=1, expires_hours=3)
+
+    body = get_dashboard_data("forecast", window_hours=2)
+
+    assert len(body["series"]) == 1
     assert body["series"][0]["values"] == [1.0, 2.0]
 
 

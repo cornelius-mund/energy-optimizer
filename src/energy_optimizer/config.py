@@ -643,6 +643,46 @@ class ForecastSolarConfiguration(_StrictModel):
         return PV_GENERATION_SOURCE_ID
 
 
+class PvPlaneConfiguration(_StrictModel):
+    """One roof face whose modules share tilt and orientation."""
+
+    name: str = Field(min_length=1)
+    tilt_degrees: float = Field(ge=0, le=90)
+    azimuth_degrees: float = Field(
+        ge=-180,
+        le=180,
+        description="0 is south, -90 east, 90 west and -180 or 180 north",
+    )
+    peak_power_kw: float = Field(gt=0, description="Module nameplate power in kWp")
+
+
+class OpenMeteoPvConfiguration(_StrictModel):
+    """PV forecast from Open-Meteo plane-of-array irradiance for each roof face."""
+
+    model_config = ConfigDict(validate_default=True)
+
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    planes: list[PvPlaneConfiguration] = Field(min_length=1)
+    performance_factor: float = Field(
+        gt=0,
+        le=2,
+        description=(
+            "Measured AC energy divided by irradiance times nameplate power; "
+            "covers inverter, temperature, shading and irradiance bias"
+        ),
+    )
+    forecast_days: int = Field(default=2, ge=1, le=16)
+    base_url: AnyHttpUrl = AnyHttpUrl("https://api.open-meteo.com")
+    timeout_seconds: float = Field(default=10, gt=0, le=120)
+    max_data_age_seconds: float | None = Field(default=7200, gt=0)
+
+    @property
+    def pv_generation_source_id(self) -> str:
+        """Return the stable identity for this installation's forecast."""
+        return PV_GENERATION_SOURCE_ID
+
+
 class AwattarConfiguration(_StrictModel):
     """German aWATTar market-data request and freshness settings."""
 
@@ -821,6 +861,7 @@ class Configuration(_StrictModel):
     home_assistant: HomeAssistantConfiguration | None = None
     appliances: dict[str, ApplianceConfiguration] = Field(default_factory=dict)
     forecast_solar: ForecastSolarConfiguration | None = None
+    open_meteo_pv: OpenMeteoPvConfiguration | None = None
     awattar: AwattarConfiguration | None = None
     tariff: TariffConfiguration | None = None
     load_forecast: LoadForecastConfiguration = Field(
@@ -848,6 +889,11 @@ class Configuration(_StrictModel):
             and self.persistence is None
         ):
             raise ValueError("persistence is required when orchestration is enabled")
+        if self.forecast_solar is not None and self.open_meteo_pv is not None:
+            raise ValueError(
+                "configure only one PV forecast provider: "
+                "forecast_solar or open_meteo_pv"
+            )
         histories = self.home_assistant.energy_history if self.home_assistant else {}
 
         for key in (*self.appliances, *histories):

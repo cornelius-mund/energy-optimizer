@@ -29,11 +29,14 @@ from energy_optimizer.api.schemas import (
 )
 from energy_optimizer.api.series import align_hourly_values
 from energy_optimizer.providers.awattar import AwattarImporter
-from energy_optimizer.providers.forecast_solar import ForecastSolarImporter
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     ElectricityPriceData,
     PvGenerationData,
+)
+from energy_optimizer.providers.pv_forecast import (
+    configured_pv_forecast_importer,
+    pv_forecast_key,
 )
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStoreError
 
@@ -366,22 +369,17 @@ def _forecast_dashboard_data(
 
     series: list[DashboardSeries] = []
     diagnostics: list[str] = []
-    if configuration.forecast_solar is not None:
-        key = ProviderDataKey(
-            data_type="pv-generation",
-            provider="forecast.solar",
-            entity_id=configuration.forecast_solar.pv_generation_source_id,
-        )
+    pv_importer = configured_pv_forecast_importer(configuration)
+    if pv_importer is not None:
         try:
-            data = store.load(key, PV_GENERATION_ADAPTER)
+            data = store.load(pv_forecast_key(pv_importer), PV_GENERATION_ADAPTER)
         except ProviderDataStoreError:
             data = None
             diagnostics.append("PV forecast data is invalid and could not be recovered")
         if data is None:
             diagnostics.append("PV forecast data is unavailable")
         else:
-            importer = ForecastSolarImporter(configuration.forecast_solar)
-            freshness: Freshness = "fresh" if importer.is_fresh(data) else "stale"
+            freshness: Freshness = "fresh" if pv_importer.is_fresh(data) else "stale"
             series.append(_pv_dashboard_series(data, start, end, freshness))
 
     if configuration.awattar is not None:

@@ -32,6 +32,9 @@ class ForecastSolarError(RuntimeError):
 class ForecastSolarImporter:
     """Fetch and normalize the free public Forecast.Solar forecast."""
 
+    provider = "forecast.solar"
+    minimum_interval_seconds = FORECAST_SOLAR_MIN_INTERVAL_SECONDS
+
     def __init__(
         self,
         configuration: ForecastSolarConfiguration,
@@ -198,7 +201,7 @@ def _normalize(
         generation_kw=tuple(energy / 1000 for energy in energy_watt_hours),
         unit="kW",
         source=SourceMetadata(
-            provider="forecast.solar", entity_id=PV_GENERATION_SOURCE_ID
+            provider=ForecastSolarImporter.provider, entity_id=PV_GENERATION_SOURCE_ID
         ),
         retrieved_at=retrieved,
         expires_at=end,

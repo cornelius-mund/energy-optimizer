@@ -20,10 +20,6 @@ from energy_optimizer.config import (
 from energy_optimizer.exclusions import exclusion_summary
 from energy_optimizer.history_merge import HISTORY_RETENTION_HOURS, merge_price_history
 from energy_optimizer.providers.awattar import AwattarImporter
-from energy_optimizer.providers.forecast_solar import (
-    FORECAST_SOLAR_MIN_INTERVAL_SECONDS,
-    ForecastSolarImporter,
-)
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
@@ -61,6 +57,10 @@ from energy_optimizer.providers.interfaces import (
     HouseholdLoadData,
     PvGenerationData,
     SourceMetadata,
+)
+from energy_optimizer.providers.pv_forecast import (
+    configured_pv_forecast_importer,
+    pv_forecast_key,
 )
 from energy_optimizer.storage import (
     ProviderDataKey,
@@ -717,24 +717,21 @@ def _build_household_load_registration(
 def _build_pv_generation_registration(
     configuration: Configuration, sources: _Sources, store: ProviderDataStore
 ) -> ProviderRegistration | None:
-    forecast_solar = configuration.forecast_solar
-    if forecast_solar is None or "pv_generation" not in sources:
+    importer = configured_pv_forecast_importer(configuration)
+    if importer is None or "pv_generation" not in sources:
         return None
 
     schedule = sources["pv_generation"]
     if (
         schedule.enabled
-        and schedule.interval_seconds < FORECAST_SOLAR_MIN_INTERVAL_SECONDS
+        and schedule.interval_seconds < importer.minimum_interval_seconds
     ):
         raise OrchestrationError(
             "pv_generation polling interval must be at least "
-            f"{FORECAST_SOLAR_MIN_INTERVAL_SECONDS} seconds for the "
-            "Forecast.Solar public rate limit"
+            f"{importer.minimum_interval_seconds} seconds for the "
+            f"{importer.provider} rate limit"
         )
-    importer = ForecastSolarImporter(forecast_solar)
-    key = ProviderDataKey(
-        "pv-generation", "forecast.solar", forecast_solar.pv_generation_source_id
-    )
+    key = pv_forecast_key(importer)
 
     def fetch(now: datetime) -> PvGenerationData:
         start_time = now.replace(minute=0, second=0, microsecond=0)

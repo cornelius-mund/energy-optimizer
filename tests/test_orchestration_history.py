@@ -940,6 +940,9 @@ def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_re
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeForecastSolarImporter(FakeImporter):
+        provider = "forecast.solar"
+        minimum_interval_seconds = 300
+
         def fetch(
             self, start_time: datetime, *, now: datetime | None = None
         ) -> PvGenerationData:
@@ -975,7 +978,7 @@ def test_a_cycle_with_only_forecast_and_price_sources_makes_no_home_assistant_re
             )
 
     monkeypatch.setattr(
-        "energy_optimizer.orchestration.ForecastSolarImporter",
+        "energy_optimizer.providers.pv_forecast.ForecastSolarImporter",
         FakeForecastSolarImporter,
     )
     monkeypatch.setattr(
