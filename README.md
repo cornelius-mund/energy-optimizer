@@ -336,8 +336,10 @@ for it), the cost is part of `objective_eur` and reported as `degradation_cost_e
 and `battery_throughput_kwh`. By default the plan must end with
 at least the current state of charge (`end_of_horizon: restore_initial`). With
 `end_of_horizon: value_stored_energy` the plan may end emptier: energy left in the
-battery is credited with `end_of_horizon_value_eur_per_kwh` (default: the mean
-import price of the plan times the discharge efficiency), so a rolling plan keeps
+battery is credited with `end_of_horizon_value_eur_per_kwh` (default: the cheapest
+import price of the plan times the discharge efficiency, what refilling it
+costs at best; a higher value would make the plan charge from the grid only to
+end full), so a rolling plan keeps
 energy only while it is worth more than using it now. Concurrent orchestration cycles are skipped
 to avoid duplicate plans.
 

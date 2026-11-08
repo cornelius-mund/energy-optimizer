@@ -390,11 +390,42 @@ def test_worthless_stored_energy_is_used_up_by_the_end_of_the_plan(
     assert ending == pytest.approx(3.0)
 
 
-def test_by_default_stored_energy_is_valued_at_the_mean_import_price(
+def test_by_default_the_battery_is_not_charged_from_the_grid_to_end_full(
     store: ProviderDataStore,
 ) -> None:
     configuration = _battery_configuration(end_of_horizon="value_stored_energy")
 
-    ending = _ending_battery_energy_kwh(configuration, store)
+    stored = PlanGenerator(configuration, store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.10, 0.50]),
+            battery=battery(efficiency=0.81),
+        )
+    )
 
-    assert ending == pytest.approx(7.0)
+    cheap_hour, expensive_hour = stored.plan.hours
+    assert cheap_hour.battery is not None and expensive_hour.battery is not None
+    assert cheap_hour.battery.charge_kw == pytest.approx(0.0, abs=1e-6)
+    assert expensive_hour.battery.discharge_kw == pytest.approx(1.0)
+
+
+def test_by_default_pv_that_would_be_exported_cheaply_is_still_stored(
+    store: ProviderDataStore,
+) -> None:
+    configuration = _battery_configuration(end_of_horizon="value_stored_energy")
+    cheap_export = replace(prices([0.30, 0.40]), export_price_eur_per_kwh=(0.02, 0.02))
+
+    stored = PlanGenerator(configuration, store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([3.0, 0.0]),
+            electricity_prices=cheap_export,
+            battery=battery(efficiency=0.81),
+        )
+    )
+
+    sunny_hour = stored.plan.hours[0]
+    assert sunny_hour.battery is not None
+    assert sunny_hour.battery.charge_kw == pytest.approx(2.0)
+    assert sunny_hour.grid_export_kw == pytest.approx(0.0, abs=1e-6)

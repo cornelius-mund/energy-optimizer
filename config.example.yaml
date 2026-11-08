@@ -221,7 +221,7 @@ home_assistant:
     throughput_cost_eur_per_kwh: 0
     # restore_initial ends every plan at least as full as it began;
     # value_stored_energy credits the remaining energy instead, by default
-    # at the mean import price of the plan.
+    # at the cheapest import price of the plan.
     end_of_horizon: restore_initial
     # end_of_horizon_value_eur_per_kwh: 0.25
     # Optional calculated efficiency. A configured battery_efficiency takes
