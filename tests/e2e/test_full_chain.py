@@ -20,6 +20,8 @@ from fake_world import (
     HOME_ASSISTANT_TOKEN,
     HOUSEHOLD_ENERGY_ENTITY,
     FakeWorld,
+    ev_history_soc_percent,
+    ev_plugged_in_share,
     forecast_price_eur_per_mwh,
     household_load_kw,
     market_price_eur_per_mwh,
@@ -530,3 +532,84 @@ def test_forecast_prices_extend_the_plan_beyond_the_published_day_ahead_prices(
             market_eur_per_mwh / 1000, starts.hour
         )
         assert hour["import_cost_eur"] == pytest.approx(expected_cost, abs=TOLERANCE)
+
+
+DAILY_MINIMUM_PERCENT = 30.0
+MORNING_HOUR = 7
+
+
+@pytest.fixture(scope="module")
+def daily_chain(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, FakeWorld]]:
+    root = tmp_path_factory.mktemp("daily-chain")
+    with running_fake_world() as (world_url, world):
+        configuration = _chain_configuration(world_url, root / "provider-data")
+        del configuration["forecast_solar"]
+        configuration["open_meteo_pv"] = {
+            "latitude": 52.52,
+            "longitude": 13.41,
+            "planes": [
+                {
+                    "name": "South roof",
+                    "tilt_degrees": 30,
+                    "azimuth_degrees": 0,
+                    "peak_power_kw": 5,
+                }
+            ],
+            "performance_factor": 0.8,
+            "forecast_days": WEEK_PV_FORECAST_DAYS,
+            "base_url": world_url,
+        }
+        configuration["epex_predictor"] = {"base_url": world_url}
+        configuration["influxdb"] = {"base_url": world_url, "history_days": 14}
+        configuration["ev_charging"] = {"strategy": "daily_minimum"}
+        sources = configuration["orchestration"]["sources"]
+        sources["electricity_price_forecast"] = {"interval_seconds": 600}
+        sources["ev_history"] = {"interval_seconds": 600}
+        with running_service(configuration, root) as service_url:
+            yield service_url, world
+
+
+def _wait_for_daily_plan(service_url: str) -> dict[str, Any]:
+    deadline = time.monotonic() + PLAN_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        plan = _wait_for_plan(service_url)
+        if any(hour["ev"]["consumption_kwh"] > 0 for hour in plan["schedule"]):
+            return plan
+        time.sleep(0.5)
+    raise AssertionError("the plan never used the learned driving pattern")
+
+
+def test_every_morning_keeps_the_daily_minimum_with_the_learned_driving(
+    daily_chain: tuple[str, FakeWorld],
+) -> None:
+    service_url, world = daily_chain
+
+    plan = _wait_for_daily_plan(service_url)
+
+    assert world.influx_queries
+    schedule = plan["schedule"]
+    mornings = [
+        hour
+        for hour in schedule
+        if datetime.fromisoformat(hour["start_time"]).hour == MORNING_HOUR - 1
+    ]
+    assert len(mornings) >= 2
+    for hour in mornings:
+        assert hour["ev"]["state_of_charge_percent"] >= DAILY_MINIMUM_PERCENT - 1e-4
+    away = [hour for hour in schedule[24:] if not hour["ev"]["expected_plugged_in"]]
+    assert away
+    assert all(
+        ev_plugged_in_share(datetime.fromisoformat(hour["start_time"]).hour) == 0.0
+        for hour in away
+    )
+    assert all(hour["ev"]["charge_kw"] == pytest.approx(0.0, abs=1e-6) for hour in away)
+    learned_kwh_per_day = (
+        (ev_history_soc_percent(MORNING_HOUR - 1) - ev_history_soc_percent(12))
+        / 100
+        * EV_CAPACITY_KWH
+    )
+    driving = [hour["ev"]["consumption_kwh"] for hour in schedule]
+    assert max(driving) == pytest.approx(learned_kwh_per_day, rel=1e-6)
+    assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=1e-6)

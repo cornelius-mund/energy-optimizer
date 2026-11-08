@@ -34,7 +34,11 @@ def _stamp(moment: datetime) -> str:
 
 
 def _hour(
-    index: int, *, battery: bool = True, electric_vehicle: bool = True
+    index: int,
+    *,
+    battery: bool = True,
+    electric_vehicle: bool = True,
+    away: bool = False,
 ) -> PlannedHour:
     return PlannedHour(
         start_time=FIRST_HOUR + timedelta(hours=index),
@@ -47,7 +51,16 @@ def _hour(
         import_cost_eur=0.5 * (index + 1),
         export_revenue_eur=0.0,
         battery=PlannedBatteryHour(0.0, 0.5, 4.0 - index) if battery else None,
-        ev=PlannedEvHour(4.0, 31.5 + 3.6 * index) if electric_vehicle else None,
+        ev=(
+            PlannedEvHour(
+                4.0,
+                31.5 + 3.6 * index,
+                plugged_in=not away,
+                consumption_kwh=12.5 if away else 0.0,
+            )
+            if electric_vehicle
+            else None
+        ),
     )
 
 
@@ -57,9 +70,15 @@ def _save_plan(
     battery: bool = True,
     electric_vehicle: bool = True,
     price_forecast_from: datetime | None = None,
+    away_hour: int | None = None,
 ) -> None:
     hours = tuple(
-        _hour(index, battery=battery, electric_vehicle=electric_vehicle)
+        _hour(
+            index,
+            battery=battery,
+            electric_vehicle=electric_vehicle,
+            away=index == away_hour,
+        )
         for index in range(PLAN_HOURS)
     )
     store.save(
@@ -246,3 +265,31 @@ def test_a_plan_with_published_prices_only_has_no_price_column(
     expect(page.locator("#plan-head")).not_to_contain_text("Price")
     expect(page.locator("#plan-summary")).not_to_contain_text("Forecast prices")
     expect(page.locator("#plan-price-attribution")).to_be_hidden()
+
+
+def test_the_learned_presence_and_driving_of_the_car_are_shown(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store, away_hour=1)
+
+    _open_plan(page)
+
+    head = page.locator("#plan-head")
+    expect(head).to_contain_text("EV at home")
+    expect(head).to_contain_text("EV driving (kWh)")
+    away_cells = page.locator("#plan-rows tr").nth(1).locator("td")
+    expect(away_cells.nth(10)).to_have_text("no")
+    expect(away_cells.nth(11)).to_have_text("12.5")
+    expect(page.locator("#plan-rows tr").nth(0).locator("td").nth(10)).to_have_text(
+        "yes"
+    )
+
+
+def test_a_car_that_is_always_home_and_never_drives_has_no_presence_columns(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-head")).not_to_contain_text("EV at home")

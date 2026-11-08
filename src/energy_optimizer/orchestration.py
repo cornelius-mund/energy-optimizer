@@ -81,7 +81,9 @@ EV_HISTORY_SOURCE = "ev_history"
 # completed are corrected.
 EV_HISTORY_REFRESH_OVERLAP = timedelta(days=2)
 # Optional plan inputs extend a plan when they are current but never block one.
-OPTIONAL_PLAN_SOURCES = frozenset({ELECTRICITY_PRICE_FORECAST_SOURCE})
+OPTIONAL_PLAN_SOURCES = frozenset(
+    {ELECTRICITY_PRICE_FORECAST_SOURCE, EV_HISTORY_SOURCE}
+)
 
 RunStatus = Literal["success", "failed", "stale", "skipped"]
 PlanStatus = Literal["disabled", "not-ready", "unavailable", "created", "failed"]

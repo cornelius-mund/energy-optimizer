@@ -14,6 +14,13 @@ from energy_optimizer.control.ev_controller import (
     EV_SCHEDULE_KEY,
     merge_schedule,
 )
+from energy_optimizer.optimization.ev_patterns import (
+    NO_PATTERNS,
+    EvPatterns,
+    driving_consumption,
+    expected_plugged_in,
+    learn_ev_patterns,
+)
 from energy_optimizer.optimization.linopy_solver import LinopyPlanSolver
 from energy_optimizer.optimization.load_forecast import (
     LoadForecast,
@@ -35,6 +42,7 @@ from energy_optimizer.providers.interfaces import (
     BatteryData,
     ElectricityPriceData,
     EvData,
+    EvHistoryData,
     HouseholdLoadData,
     PvGenerationData,
 )
@@ -182,13 +190,68 @@ def pv_surplus_charging(
     )
 
 
+def morning_minimums(
+    charging: EvChargingConfiguration,
+    hour_starts: list[datetime],
+    time_zone: ZoneInfo,
+    capacity_kwh: float,
+) -> tuple[tuple[int, float], ...]:
+    """The minimum of every morning inside the plan, as (hours until then, kWh)."""
+    targets = charging.day_targets()
+    first_hour = hour_starts[0].astimezone(time_zone)
+    last_day = (hour_starts[-1] + ONE_HOUR).astimezone(time_zone).date()
+    minimums = []
+    day = first_hour.date()
+    while day <= last_day:
+        target = targets.get(day.weekday())
+        if target is not None:
+            percent, morning = target
+            moment = datetime.combine(day, morning, tzinfo=time_zone)
+            count = hours_until(moment, hour_starts) if moment > first_hour else None
+            if count is not None and count >= 1:
+                minimums.append((count, percent / 100 * capacity_kwh))
+        day += timedelta(days=1)
+    return tuple(minimums)
+
+
+def daily_minimum_charging(
+    ev: EvData,
+    charging: EvChargingConfiguration,
+    hour_starts: list[datetime],
+    time_zone: ZoneInfo,
+    patterns: EvPatterns,
+) -> EvSpecification:
+    """Charge on the cheapest days while every morning keeps its minimum; the
+    car is expected home and driving as its learned weekly pattern says.
+    """
+    local_hours = [start.astimezone(time_zone) for start in hour_starts]
+    plugged_in = expected_plugged_in(patterns, local_hours, ev.plugged_in)
+    return EvSpecification(
+        capacity_kwh=ev.capacity_kwh,
+        initial_soc_kwh=ev.state_of_charge_kwh,
+        target_soc_kwh=0.0,
+        deadline_hours=len(hour_starts),
+        plugged_in=plugged_in,
+        minimum_charge_kw=ev.minimum_charge_kw,
+        maximum_charge_kw=ev.maximum_charge_kw,
+        charge_efficiency=ev.charge_efficiency,
+        consumption_kwh=driving_consumption(patterns, local_hours, plugged_in),
+        morning_minimums=morning_minimums(
+            charging, hour_starts, time_zone, ev.capacity_kwh
+        ),
+    )
+
+
 def ev_specification(
     ev: EvData,
     charging: EvChargingConfiguration,
     hour_starts: list[datetime],
     time_zone: ZoneInfo,
     surplus_kw: tuple[float, ...],
+    patterns: EvPatterns = NO_PATTERNS,
 ) -> EvSpecification | None:
+    if charging.strategy == "daily_minimum":
+        return daily_minimum_charging(ev, charging, hour_starts, time_zone, patterns)
     limit_kwh = charging.limit_soc_percent / 100 * ev.capacity_kwh
     if charging.strategy == "surplus":
         return pv_surplus_charging(ev, limit_kwh, surplus_kw)
@@ -474,12 +537,15 @@ class PlanGenerator:
         charging = self.configuration.ev_charging
         if not isinstance(ev, EvData) or charging is None:
             return None
+        time_zone = ZoneInfo(self.configuration.timezone)
+        history = snapshot.data.get("ev_history")
+        patterns = (
+            learn_ev_patterns(history, ev.capacity_kwh, time_zone)
+            if isinstance(history, EvHistoryData)
+            else NO_PATTERNS
+        )
         return ev_specification(
-            ev,
-            charging,
-            hour_starts,
-            ZoneInfo(self.configuration.timezone),
-            surplus_kw,
+            ev, charging, hour_starts, time_zone, surplus_kw, patterns
         )
 
 

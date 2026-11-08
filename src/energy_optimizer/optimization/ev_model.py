@@ -19,6 +19,7 @@ class EvVariables:
     charge: Variable
     state_of_charge: Variable
     shortfall: Variable
+    missing_energy: Variable
 
 
 def add_ev(
@@ -50,6 +51,9 @@ def add_ev(
             name="ev_soc_kwh",
         ),
         shortfall=model.add_variables(lower=0, name="ev_shortfall_kwh"),
+        missing_energy=model.add_variables(
+            lower=0, coords=[hours], name="ev_missing_energy_kwh"
+        ),
     )
     if fixed is None:
         _limit_power_to_the_charger_range(
@@ -57,6 +61,7 @@ def add_ev(
         )
     _add_state_of_charge_dynamics(model, hours, specification, variables)
     _require_target_at_deadline(model, hours, specification, variables)
+    _require_morning_minimums(model, hours, specification, variables)
     return variables
 
 
@@ -97,15 +102,38 @@ def _add_state_of_charge_dynamics(
     specification: EvSpecification,
     variables: EvVariables,
 ) -> None:
+    """Driving draws ``consumption_kwh``; ``missing_energy`` is what the car
+    would have to get elsewhere (penalized), so driving never makes the plan
+    infeasible.
+    """
     initial_state = pandas.Series(0.0, index=hours)
     initial_state.iloc[0] = specification.initial_soc_kwh
+    consumption = pandas.Series(
+        specification.consumption_kwh or 0.0, index=hours, dtype=float
+    )
     model.add_constraints(
         variables.state_of_charge
         == variables.state_of_charge.shift({HOUR_DIMENSION: 1}).fillna(0)
         + initial_state
-        + variables.charge * specification.charge_efficiency,
+        + variables.charge * specification.charge_efficiency
+        - consumption
+        + variables.missing_energy,
         name="ev_state_of_charge_dynamics",
     )
+
+
+def _require_morning_minimums(
+    model: Model,
+    hours: pandas.RangeIndex,
+    specification: EvSpecification,
+    variables: EvVariables,
+) -> None:
+    for hours_until_morning, minimum_kwh in specification.morning_minimums:
+        morning_hour = hours[hours_until_morning - 1]
+        model.add_constraints(
+            variables.state_of_charge.loc[morning_hour] >= minimum_kwh,
+            name=f"ev_morning_minimum_{morning_hour}",
+        )
 
 
 def _require_target_at_deadline(
@@ -125,8 +153,21 @@ def _require_target_at_deadline(
     )
 
 
-def read_ev_hour(variables: EvVariables, hour: int) -> PlannedEvHour:
+def read_ev_hour(
+    variables: EvVariables, specification: EvSpecification, hour: int
+) -> PlannedEvHour:
+    consumption = specification.consumption_kwh
     return PlannedEvHour(
         charge_kw=float(variables.charge.solution.values[hour]),
         state_of_charge_kwh=float(variables.state_of_charge.solution.values[hour]),
+        plugged_in=specification.plugged_in[hour],
+        consumption_kwh=0.0 if consumption is None else consumption[hour],
     )
+
+
+def shortfall_kwh(variables: EvVariables) -> float:
+    """Energy missing at the deadline plus energy missing for driving or a
+    morning minimum."""
+    at_deadline = float(variables.shortfall.solution.item())
+    for_driving = float(variables.missing_energy.solution.sum())
+    return max(at_deadline + for_driving, 0.0)

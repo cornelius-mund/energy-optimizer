@@ -650,6 +650,12 @@
         ["EV charge (kW)", (hour) => planNumber(hour.ev && hour.ev.charge_kw)],
         ["EV state (%)", (hour) => planNumber(hour.ev && hour.ev.state_of_charge_percent, 1)],
       );
+      if (schedule.some((hour) => hour.ev && (!hour.ev.expected_plugged_in || hour.ev.consumption_kwh > 0))) {
+        columns.push(
+          ["EV at home", (hour) => (hour.ev ? (hour.ev.expected_plugged_in ? "yes" : "no") : "–")],
+          ["EV driving (kWh)", (hour) => planNumber(hour.ev && hour.ev.consumption_kwh, 1)],
+        );
+      }
     }
     columns.push(["Net cost (EUR)", (hour) => planNumber(hour.import_cost_eur - hour.export_revenue_eur, 3)]);
     if (plan.price_forecast_from) columns.push(["Price", (hour) => (isForecastPrice(plan, hour) ? "forecast" : "published")]);

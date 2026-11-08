@@ -54,6 +54,11 @@ class EvSpecification:
     the state of charge the car is charged up to. Every kWh stored beyond the
     target is worth ``value_eur_per_kwh`` in the optimization (not in the reported
     objective), which is what makes the car take energy that would be exported.
+    ``consumption_kwh`` is the energy the car is expected to use for driving in
+    each hour, and ``morning_minimums`` are (planned hours until the morning,
+    minimum kWh) pairs the state of charge must reach. Energy the plan cannot
+    provide for them is reported as shortfall instead of making the plan
+    infeasible.
     """
 
     capacity_kwh: KilowattHour
@@ -68,6 +73,8 @@ class EvSpecification:
     surplus_kw: tuple[Kilowatt, ...] | None = None
     charge_limit_kwh: KilowattHour | None = None
     value_eur_per_kwh: EuroPerKilowattHour = 0.0
+    consumption_kwh: tuple[KilowattHour, ...] | None = None
+    morning_minimums: tuple[tuple[int, KilowattHour], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,6 +108,8 @@ class PlannedBatteryHour:
 class PlannedEvHour:
     charge_kw: Kilowatt
     state_of_charge_kwh: KilowattHour
+    plugged_in: bool = True
+    consumption_kwh: KilowattHour = 0.0
 
 
 @dataclass(frozen=True)
