@@ -34,6 +34,7 @@ from energy_optimizer.exclusions import (
     HourExclusion,
 )
 from energy_optimizer.orchestration import (
+    ELECTRICITY_PRICE_FORECAST_SOURCE,
     ExpectedPlanningError,
     OrchestrationError,
     PlanGenerator,
@@ -1739,3 +1740,62 @@ def test_household_load_refresh_excludes_a_negative_combined_hour_and_moves_on(
     assert refreshed.start_time == START
     assert refreshed.load_kw == (0.5, None, 0.5, 1.0, 0.5)
     assert refreshed.exclusions == bootstrapped.exclusions
+
+
+def _forecast_orchestrator(
+    tmp_path: Path, plans: PlanRecorder, forecast: ProviderRegistration
+) -> ProviderOrchestrator:
+    """Plan from a required source plus the optional price forecast."""
+    store = ProviderDataStore(tmp_path)
+    return ProviderOrchestrator(
+        OrchestrationConfiguration(
+            enabled=True,
+            sources={
+                "live": DataSourceScheduleConfiguration(interval_seconds=300),
+                ELECTRICITY_PRICE_FORECAST_SOURCE: DataSourceScheduleConfiguration(
+                    interval_seconds=300
+                ),
+            },
+            optimization=OptimizationTriggerConfiguration(
+                enabled=True, required_sources=["live"]
+            ),
+        ),
+        [named_registration("live", lambda _: True, store), forecast],
+        store,
+        plan_generator=plans,
+    )
+
+
+def test_a_current_price_forecast_is_handed_to_the_plan_without_being_required(
+    tmp_path: Path,
+) -> None:
+    plans = PlanRecorder()
+    store = ProviderDataStore(tmp_path)
+    forecast = named_registration(
+        ELECTRICITY_PRICE_FORECAST_SOURCE, lambda _: True, store
+    )
+
+    cycle = _forecast_orchestrator(tmp_path, plans, forecast).run_due(START)
+
+    assert cycle.plan_status == "created"
+    assert set(plans[0].data) == {"live", ELECTRICITY_PRICE_FORECAST_SOURCE}
+
+
+def test_a_failing_price_forecast_does_not_prevent_the_plan(tmp_path: Path) -> None:
+    plans = PlanRecorder()
+
+    def unreachable() -> HouseholdLoadData:
+        raise RuntimeError("EPEX Predictor is down")
+
+    forecast = ProviderRegistration(
+        name=ELECTRICITY_PRICE_FORECAST_SOURCE,
+        data_type="household-load",
+        adapter=ADAPTER,
+        plan=lambda now, _: plan_without_needs(unreachable),
+        is_fresh=lambda value, now: True,
+    )
+
+    cycle = _forecast_orchestrator(tmp_path, plans, forecast).run_due(START)
+
+    assert cycle.plan_status == "created"
+    assert set(plans[0].data) == {"live"}

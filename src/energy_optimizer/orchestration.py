@@ -20,6 +20,7 @@ from energy_optimizer.config import (
 from energy_optimizer.exclusions import exclusion_summary
 from energy_optimizer.history_merge import HISTORY_RETENTION_HOURS, merge_price_history
 from energy_optimizer.providers.awattar import AwattarImporter
+from energy_optimizer.providers.epex_predictor import EpexPredictorImporter
 from energy_optimizer.providers.home_assistant import HomeAssistantLoadImporter
 from energy_optimizer.providers.home_assistant_battery import (
     HomeAssistantBatteryImporter,
@@ -69,6 +70,9 @@ from energy_optimizer.storage import (
 )
 
 logger = logging.getLogger(__name__)
+ELECTRICITY_PRICE_FORECAST_SOURCE = "electricity_price_forecast"
+# Optional plan inputs extend a plan when they are current but never block one.
+OPTIONAL_PLAN_SOURCES = frozenset({ELECTRICITY_PRICE_FORECAST_SOURCE})
 
 RunStatus = Literal["success", "failed", "stale", "skipped"]
 PlanStatus = Literal["disabled", "not-ready", "unavailable", "created", "failed"]
@@ -536,9 +540,19 @@ class ProviderOrchestrator:
             )
             return "not-ready", "required source data is stale"
 
+        optional_data = {
+            source: data
+            for source, data in latest_data.items()
+            if source in OPTIONAL_PLAN_SOURCES
+            and source not in blocked_sources
+            and self._is_latest_data_fresh(source, data, captured_at)
+        }
         snapshot = ProviderDataSnapshot(
             captured_at=captured_at,
-            data={source: latest_data[source] for source in required_sources},
+            data={
+                **optional_data,
+                **{source: latest_data[source] for source in required_sources},
+            },
         )
         try:
             self.plan_generator(snapshot)
@@ -840,6 +854,28 @@ def _build_electricity_prices_registration(
     )
 
 
+def _build_electricity_price_forecast_registration(
+    configuration: Configuration, sources: _Sources, store: ProviderDataStore
+) -> ProviderRegistration | None:
+    epex_predictor = configuration.epex_predictor
+    if epex_predictor is None or ELECTRICITY_PRICE_FORECAST_SOURCE not in sources:
+        return None
+    importer = EpexPredictorImporter(epex_predictor)
+    adapter = TypeAdapter(ElectricityPriceData)
+    key = ProviderDataKey(
+        "electricity-price-forecast", "epex-predictor", epex_predictor.region.lower()
+    )
+    return _registration(
+        ELECTRICITY_PRICE_FORECAST_SOURCE,
+        ElectricityPriceData,
+        adapter,
+        key,
+        store,
+        _fetch_plan(lambda now: importer.fetch(now=now)),
+        importer.is_fresh,
+    )
+
+
 def _build_grid_flow_registration(
     configuration: Configuration, sources: _Sources, store: ProviderDataStore
 ) -> ProviderRegistration | None:
@@ -1033,6 +1069,7 @@ _REGISTRATION_FACTORIES = (
     _build_pv_history_registration,
     _build_pv_generation_registration,
     _build_electricity_prices_registration,
+    _build_electricity_price_forecast_registration,
     _build_grid_flow_registration,
     _build_battery_registration,
     _build_ev_registration,

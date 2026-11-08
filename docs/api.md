@@ -74,7 +74,9 @@ A solver result that is neither of these is an unexpected error and returns HTTP
 shape as the `POST /optimize` response plus `created_at`, the time of the provider
 snapshot it was computed from. With an electric vehicle configured, each hour has an `ev` object and the
 response has `ev_shortfall_kwh`, the energy the car is short of its target at the
-deadline. It returns 404 before the first plan exists and 503
+deadline. `price_forecast_from` is the first hour priced by the EPEX Predictor
+forecast instead of a published day-ahead price (null when every price is
+published). It returns 404 before the first plan exists and 503
 when persistence is not configured. See the README for how the inputs are derived.
 
 ## Appliances and general energy history
@@ -610,7 +612,9 @@ the request log without recording query payloads or provider credentials.
 
 The Plan tab shows the latest plan from `GET /plan` (see [Current plan](#current-plan))
 and has no range controls: the plan always covers the future hours for which prices
-and the PV forecast exist. It is marked as an "Optimization plan" so that it is not
+and the PV forecast exist. When forecast prices extend the plan, the summary shows
+where they start, a Price column marks each hour as published or forecast, and
+the forecast source is credited below the summary. It is marked as an "Optimization plan" so that it is not
 mistaken for historic actuals or forecast inputs.
 
 - **Summary:** solver status, objective, import cost, export revenue, planned hours,

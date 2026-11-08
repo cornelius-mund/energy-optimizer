@@ -52,7 +52,11 @@ def _hour(
 
 
 def _save_plan(
-    store: ProviderDataStore, *, battery: bool = True, electric_vehicle: bool = True
+    store: ProviderDataStore,
+    *,
+    battery: bool = True,
+    electric_vehicle: bool = True,
+    price_forecast_from: datetime | None = None,
 ) -> None:
     hours = tuple(
         _hour(index, battery=battery, electric_vehicle=electric_vehicle)
@@ -68,6 +72,7 @@ def _save_plan(
             ev_capacity_kwh=60.0 if electric_vehicle else None,
             load_forecast_method="weekday_profile",
             load_forecast_mae_kw=0.12,
+            price_forecast_from=price_forecast_from,
             plan=Plan(
                 status=PlanStatus.OPTIMAL,
                 objective_eur=3.0,
@@ -208,3 +213,36 @@ def test_the_plan_fits_a_phone_screen_by_scrolling_the_table_only(
     assert overflow <= 1
     wrapper = page.locator("#plan-content .table-wrap")
     assert wrapper.evaluate("el => el.scrollWidth > el.clientWidth") is True
+
+
+def test_hours_priced_by_the_epex_predictor_forecast_are_marked(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    forecast_from = FIRST_HOUR + timedelta(hours=2)
+    _save_plan(provider_store, price_forecast_from=forecast_from)
+
+    _open_plan(page)
+
+    rows = page.locator("#plan-rows tr")
+    expect(page.locator("#plan-head")).to_contain_text("Price")
+    expect(rows.nth(0).locator("td").last).to_have_text("published")
+    expect(rows.nth(1).locator("td").last).to_have_text("published")
+    expect(rows.nth(2).locator("td").last).to_have_text("forecast")
+    expect(page.locator("#plan-summary")).to_contain_text(
+        f"Forecast prices from{_stamp(forecast_from)}"
+    )
+    expect(page.locator("#plan-price-attribution")).to_be_visible()
+    expect(page.locator("#plan-price-attribution")).to_contain_text("EPEX Predictor")
+
+
+def test_a_plan_with_published_prices_only_has_no_price_column(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
+    expect(page.locator("#plan-head")).not_to_contain_text("Price")
+    expect(page.locator("#plan-summary")).not_to_contain_text("Forecast prices")
+    expect(page.locator("#plan-price-attribution")).to_be_hidden()

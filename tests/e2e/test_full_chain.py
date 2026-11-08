@@ -20,6 +20,7 @@ from fake_world import (
     HOME_ASSISTANT_TOKEN,
     HOUSEHOLD_ENERGY_ENTITY,
     FakeWorld,
+    forecast_price_eur_per_mwh,
     household_load_kw,
     market_price_eur_per_mwh,
     pv_kw,
@@ -468,3 +469,64 @@ def test_the_plan_reports_how_the_load_was_forecast(
 
     assert forecast["method"] in {"seven_day_mean", "weekday_profile"}
     assert forecast["mean_absolute_error_kw"] == pytest.approx(0.0, abs=1e-6)
+
+
+WEEK_PV_FORECAST_DAYS = 4
+PUBLISHED_PRICE_HOURS = 48
+
+
+@pytest.fixture(scope="module")
+def week_chain(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, FakeWorld]]:
+    root = tmp_path_factory.mktemp("week-chain")
+    with running_fake_world() as (world_url, world):
+        configuration = _chain_configuration(world_url, root / "provider-data")
+        del configuration["forecast_solar"]
+        configuration["open_meteo_pv"] = {
+            "latitude": 52.52,
+            "longitude": 13.41,
+            "planes": [
+                {
+                    "name": "South roof",
+                    "tilt_degrees": 30,
+                    "azimuth_degrees": 0,
+                    "peak_power_kw": 5,
+                }
+            ],
+            "performance_factor": 0.8,
+            "forecast_days": WEEK_PV_FORECAST_DAYS,
+            "base_url": world_url,
+        }
+        configuration["epex_predictor"] = {"base_url": world_url}
+        configuration["orchestration"]["sources"]["electricity_price_forecast"] = {
+            "interval_seconds": 600
+        }
+        with running_service(configuration, root) as service_url:
+            yield service_url, world
+
+
+def test_forecast_prices_extend_the_plan_beyond_the_published_day_ahead_prices(
+    week_chain: tuple[str, FakeWorld],
+) -> None:
+    service_url, world = week_chain
+
+    plan = _wait_for_plan(service_url)
+
+    assert "/prices" in world.requests
+    assert plan["price_forecast_from"] is not None
+    forecast_from = datetime.fromisoformat(plan["price_forecast_from"])
+    schedule = plan["schedule"]
+    assert len(schedule) > PUBLISHED_PRICE_HOURS
+    tariff = TariffConfiguration.model_validate(TARIFF)
+    for hour in schedule:
+        starts = datetime.fromisoformat(hour["start_time"])
+        market_eur_per_mwh = (
+            forecast_price_eur_per_mwh(starts.hour)
+            if starts >= forecast_from
+            else market_price_eur_per_mwh(starts.hour)
+        )
+        expected_cost = hour["grid_import_kw"] * tariff.import_price_eur_per_kwh(
+            market_eur_per_mwh / 1000, starts.hour
+        )
+        assert hour["import_cost_eur"] == pytest.approx(expected_cost, abs=TOLERANCE)

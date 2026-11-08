@@ -757,3 +757,10 @@ class PlanSnapshotResponse(OptimizationResponse):
 
     created_at: datetime = Field(description="When the provider snapshot was taken")
     load_forecast: LoadForecastResponse | None = None
+    price_forecast_from: datetime | None = Field(
+        default=None,
+        description=(
+            "First hour priced by the EPEX Predictor forecast instead of a "
+            "published day-ahead price; null when every price is published"
+        ),
+    )

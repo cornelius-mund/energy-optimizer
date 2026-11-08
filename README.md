@@ -225,6 +225,40 @@ such as the end of the current day before publication, is accepted unchanged.
 The Forecast dashboard keeps the imported and exported price series separate while
 retaining the same timestamps and values for this single-market-price source.
 
+### EPEX Predictor price forecast
+
+Day-ahead prices are published once a day for the next day, so the published
+prices end at most about 34 hours ahead. To plan a week, configure
+`epex_predictor` and enable the optional `electricity_price_forecast`
+orchestration source. It reads hourly market-price forecasts in EUR/MWh from
+[EPEX Predictor](https://github.com/b3nn0/EpexPredictor) (`GET /prices`, public
+instance `https://epexpredictor.batzill.com` by default; set `base_url` for a
+self-hosted instance) for `region` (default `DE`) over `forecast_hours` (default
+168). Published prices always win: the forecast is only appended after the last
+published hour, the grid tariff applies to both, and `GET /plan` reports the first
+forecast hour as `price_forecast_from`. The source is not a required plan input:
+if it fails or is stale, the plan uses the published prices only. Forecast data is
+provided by EPEX Predictor with prices under CC-BY-4.0 by energy-charts.info and
+ENTSO-E and weather data by Open-Meteo.com; the public instance is free on a fair
+use basis without guarantees.
+
+```yaml
+epex_predictor:
+  region: DE
+  forecast_hours: 168
+orchestration:
+  sources:
+    electricity_price_forecast: {enabled: true, interval_seconds: 3600}
+  optimization:
+    horizon_hours: 168
+open_meteo_pv:
+  forecast_days: 7
+```
+
+The plan ends where the prices or the PV forecast end, and at most after
+`orchestration.optimization.horizon_hours` (default 168). Set the PV forecast to
+the same number of days; Forecast.Solar's free tier only covers today and tomorrow.
+
 ### Normalized provider-data persistence
 
 When the optional `persistence.directory` setting is configured, the service

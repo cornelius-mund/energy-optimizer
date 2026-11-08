@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from energy_optimizer.config import Configuration
+from energy_optimizer.config import Configuration, OrchestrationConfiguration
 from energy_optimizer.optimization import PlanStatus
 from energy_optimizer.optimization.load_forecast import (
     LoadForecastError,
@@ -429,3 +429,75 @@ def test_by_default_pv_that_would_be_exported_cheaply_is_still_stored(
     assert sunny_hour.battery is not None
     assert sunny_hour.battery.charge_kw == pytest.approx(2.0)
     assert sunny_hour.grid_export_kw == pytest.approx(0.0, abs=1e-6)
+
+
+def _forecast(import_prices: list[float], first: datetime) -> ElectricityPriceData:
+    return replace(
+        prices(import_prices),
+        timestamps=tuple(first + ONE_HOUR * i for i in range(len(import_prices))),
+        source=SourceMetadata(provider="epex-predictor"),
+        expires_at=first + ONE_HOUR * len(import_prices),
+    )
+
+
+def test_forecast_prices_extend_the_plan_after_the_published_prices(
+    configuration: Configuration, store: ProviderDataStore
+) -> None:
+    generator = PlanGenerator(configuration, store)
+
+    stored = generator(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0] * 5),
+            electricity_prices=prices([0.30, 0.20]),
+            electricity_price_forecast=_forecast(
+                [0.99, 0.99, 0.10, 0.40, 0.50, 0.60], FIRST_PLANNED_HOUR
+            ),
+        )
+    )
+
+    assert len(stored.plan.hours) == 5
+    assert stored.price_forecast_from == FIRST_PLANNED_HOUR + 2 * ONE_HOUR
+    assert stored.plan.objective_eur == pytest.approx(0.30 + 0.20 + 0.10 + 0.40 + 0.50)
+
+
+def test_a_forecast_that_leaves_a_gap_after_the_published_prices_is_ignored(
+    configuration: Configuration, store: ProviderDataStore
+) -> None:
+    generator = PlanGenerator(configuration, store)
+
+    stored = generator(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0] * 5),
+            electricity_prices=prices([0.30, 0.20]),
+            electricity_price_forecast=_forecast(
+                [0.40, 0.50], FIRST_PLANNED_HOUR + 3 * ONE_HOUR
+            ),
+        )
+    )
+
+    assert len(stored.plan.hours) == 2
+    assert stored.price_forecast_from is None
+
+
+def test_the_plan_is_cut_at_the_configured_horizon(
+    configuration: Configuration, store: ProviderDataStore
+) -> None:
+    limited = configuration.model_copy(
+        update={
+            "orchestration": OrchestrationConfiguration.model_validate(
+                {"optimization": {"horizon_hours": 3}}
+            )
+        }
+    )
+
+    stored = PlanGenerator(limited, store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0] * 5),
+            electricity_prices=prices([0.30, 0.20, 0.10, 0.40, 0.50]),
+        )
+    )
+
+    assert len(stored.plan.hours) == 3

@@ -1962,6 +1962,14 @@ components:
           anyOf:
           - $ref: '#/components/schemas/LoadForecastResponse'
           - type: 'null'
+        price_forecast_from:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Price Forecast From
+          description: First hour priced by the EPEX Predictor forecast instead of
+            a published day-ahead price; null when every price is published
       additionalProperties: false
       type: object
       required:
