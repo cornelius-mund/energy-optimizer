@@ -274,7 +274,9 @@ keep the previous value. Hours newer than `raw_retention_days` (default 89) come
 from the raw policy `autogen` (field `value`), older ones from the long-term
 policy `downsample_rp` (minute means, field `mean_value`); a plug share of at
 least 0.5 counts as plugged in. Each refresh re-reads the last two days and keeps
-the persisted history otherwise; a failed refresh keeps it unchanged.
+the persisted history otherwise; a failed refresh keeps it unchanged. When the
+live plug entity has no reliable history, `ev_plugged_in_entity_id` names another
+entity for the plug history only (for example the car's own charge-port sensor).
 
 ```yaml
 influxdb:

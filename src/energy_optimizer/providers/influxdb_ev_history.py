@@ -74,7 +74,10 @@ class InfluxDbEvHistoryImporter:
         soc_series = InfluxSeries.for_entity(
             self.ev.state_of_charge.entity_id, self.ev.state_of_charge.unit
         )
-        plug_series = InfluxSeries.for_entity(self.ev.plugged_in.entity_id, None)
+        plug_series = InfluxSeries.for_entity(
+            self.influxdb.ev_plugged_in_entity_id or self.ev.plugged_in.entity_id,
+            None,
+        )
         state_of_charge = self._hourly(soc_series, start, end, retrieved_at)
         plug_share = self._hourly(plug_series, start, end, retrieved_at)
         hours = int((end - start) / ONE_HOUR)

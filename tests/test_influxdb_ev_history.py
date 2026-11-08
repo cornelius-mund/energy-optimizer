@@ -130,6 +130,18 @@ def test_old_hours_come_from_the_long_term_policy_and_recent_ones_from_raw() -> 
     assert f"time >= '{boundary}'" in raw
 
 
+def test_the_plug_history_can_come_from_another_entity_than_the_live_state() -> None:
+    hour = WINDOW_END - ONE_HOUR
+    fake = FakeInflux({"ev_soc": {}, "ev_charge_port": {hour: 1.0}})
+
+    data = importer(fake, ev_plugged_in_entity_id="binary_sensor.ev_charge_port").fetch(
+        hour, WINDOW_END, now=NOW
+    )
+
+    assert data.plugged_in == (True,)
+    assert '"autogen"."binary_sensor.ev_charge_port"' in fake.queries[1]["q"]
+
+
 def test_a_state_of_charge_in_kwh_is_converted_to_percent() -> None:
     hour = WINDOW_END - ONE_HOUR
     fake = FakeInflux({"ev_soc": {hour: 25.0}, "ev_cable": {}})

@@ -747,6 +747,15 @@ class InfluxDbConfiguration(_StrictModel):
         default="downsample_rp", pattern=r"^[A-Za-z0-9_]+$"
     )
     history_days: int = Field(default=180, ge=1, le=3650)
+    ev_plugged_in_entity_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Entity whose history tells whether the car was plugged in, when it "
+            "differs from the live home_assistant.ev.plugged_in entity"
+        ),
+    )
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     max_data_age_seconds: float | None = Field(default=7200, gt=0)
 
