@@ -259,6 +259,32 @@ The plan ends where the prices or the PV forecast end, and at most after
 `orchestration.optimization.horizon_hours` (default 168). Set the PV forecast to
 the same number of days; Forecast.Solar's free tier only covers today and tomorrow.
 
+### EV history from InfluxDB
+
+The Home Assistant recorder usually keeps only days, but its InfluxDB export keeps
+months. Configure `influxdb` (InfluxDB v1 HTTP API, `database` default
+`homeassistant`, optional `username`/`password`) and enable the `ev_history`
+orchestration source to import, for every hour of the last `history_days`
+(default 180), the EV state of charge in percent and whether the car was plugged
+in, both taken from the `home_assistant.ev` entities. Home Assistant's InfluxDB
+integration stores an entity under its unit (or under its entity ID when it has
+none) with the `entity_id` tag without the domain. Because it writes only state
+changes, each hour takes the last value up to its end and hours without a change
+keep the previous value. Hours newer than `raw_retention_days` (default 89) come
+from the raw policy `autogen` (field `value`), older ones from the long-term
+policy `downsample_rp` (minute means, field `mean_value`); a plug share of at
+least 0.5 counts as plugged in. Each refresh re-reads the last two days and keeps
+the persisted history otherwise; a failed refresh keeps it unchanged.
+
+```yaml
+influxdb:
+  base_url: http://homeassistant.local:8086
+  history_days: 180
+orchestration:
+  sources:
+    ev_history: {enabled: true, interval_seconds: 3600}
+```
+
 ### Normalized provider-data persistence
 
 When the optional `persistence.directory` setting is configured, the service

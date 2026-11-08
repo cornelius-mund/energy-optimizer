@@ -138,6 +138,22 @@ class EvData:
 
 
 @dataclass(frozen=True)
+class EvHistoryData:
+    """The EV state of charge and plug state at the end of every past hour.
+
+    ``None`` marks an hour for which the history holds no value yet.
+    """
+
+    schema_version: Literal["1"]
+    start_time: datetime
+    interval_minutes: Literal[60]
+    state_of_charge_percent: tuple[float | None, ...]
+    plugged_in: tuple[bool | None, ...]
+    source: SourceMetadata
+    retrieved_at: datetime
+
+
+@dataclass(frozen=True)
 class BatteryEfficiencyHistoryData:
     """Aligned measured energy and state-of-charge history for efficiency work.
 

@@ -132,6 +132,13 @@ awattar:
   timeout_seconds: 10
   max_data_age_seconds: 7200
 
+# Optional InfluxDB v1 that Home Assistant exports to; source of the long EV
+# history (enable the ev_history orchestration source).
+# influxdb:
+#   base_url: http://homeassistant.local:8086
+#   database: homeassistant
+#   history_days: 180
+
 # Optional EPEX Predictor market-price forecast (public instance, no key) for
 # the hours after the published day-ahead prices.
 epex_predictor:

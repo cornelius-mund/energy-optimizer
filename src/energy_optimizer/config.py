@@ -712,6 +712,31 @@ class EpexPredictorConfiguration(_StrictModel):
     max_data_age_seconds: float | None = Field(default=21600, gt=0)
 
 
+class InfluxDbConfiguration(_StrictModel):
+    """The InfluxDB v1 database into which Home Assistant writes every state."""
+
+    model_config = ConfigDict(validate_default=True)
+
+    base_url: AnyHttpUrl
+    database: str = Field(default="homeassistant", min_length=1)
+    username: str | None = None
+    password: SecretStr | None = None
+    raw_retention_policy: str = Field(default="autogen", pattern=r"^[A-Za-z0-9_]+$")
+    raw_retention_days: int = Field(
+        default=89,
+        ge=1,
+        description=(
+            "Days the raw policy still holds; older hours use the long-term policy"
+        ),
+    )
+    long_term_retention_policy: str = Field(
+        default="downsample_rp", pattern=r"^[A-Za-z0-9_]+$"
+    )
+    history_days: int = Field(default=180, ge=1, le=3650)
+    timeout_seconds: float = Field(default=30, gt=0, le=300)
+    max_data_age_seconds: float | None = Field(default=7200, gt=0)
+
+
 class PersistenceConfiguration(_StrictModel):
     """Filesystem location for normalized provider data."""
 
@@ -884,6 +909,7 @@ class Configuration(_StrictModel):
     open_meteo_pv: OpenMeteoPvConfiguration | None = None
     awattar: AwattarConfiguration | None = None
     epex_predictor: EpexPredictorConfiguration | None = None
+    influxdb: InfluxDbConfiguration | None = None
     tariff: TariffConfiguration | None = None
     load_forecast: LoadForecastConfiguration = Field(
         default_factory=LoadForecastConfiguration
