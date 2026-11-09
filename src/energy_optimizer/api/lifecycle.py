@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
 from typing import AsyncIterator
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 
@@ -16,6 +17,7 @@ from energy_optimizer.config import (
     load_configuration,
 )
 from energy_optimizer.control.ev_controller import EvController
+from energy_optimizer.control.plug_in_reminder import PlugInReminder
 from energy_optimizer.logging_config import configure_logging
 from energy_optimizer.optimization.plan_generation import PlanGenerator
 from energy_optimizer.orchestration import build_configured_orchestrator
@@ -36,6 +38,35 @@ def _start_ev_control(
     controller = EvController(configuration.home_assistant, store)
     logger.info("event=service_ev_control_starting component=control operation=startup")
     return asyncio.create_task(controller.run_forever(stop_event))
+
+
+def _start_plug_in_reminder(
+    configuration: Configuration,
+    store: ProviderDataStore | None,
+    stop_event: asyncio.Event,
+) -> asyncio.Task[None] | None:
+    charging = configuration.ev_charging
+    home_assistant = configuration.home_assistant
+    if (
+        charging is None
+        or charging.plug_in_reminder is None
+        or charging.home_hours is None
+        or home_assistant is None
+        or home_assistant.ev is None
+        or store is None
+    ):
+        return None
+    reminder = PlugInReminder(
+        home_assistant,
+        charging.home_hours,
+        charging.plug_in_reminder,
+        ZoneInfo(configuration.timezone),
+        store,
+    )
+    logger.info(
+        "event=service_plug_in_reminder_starting component=control operation=startup"
+    )
+    return asyncio.create_task(reminder.run_forever(stop_event))
 
 
 @asynccontextmanager
@@ -134,6 +165,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             application.state.ev_control_task = _start_ev_control(
                 configuration, store, stop_event
             )
+            application.state.plug_in_reminder_task = _start_plug_in_reminder(
+                configuration, store, stop_event
+            )
             logger.info(
                 "event=service_started component=api operation=startup "
                 "persistence_enabled=%s orchestration_enabled=%s "
@@ -161,6 +195,9 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             ev_control_task = application.state.ev_control_task
             if ev_control_task is not None:
                 await ev_control_task
+            reminder_task = application.state.plug_in_reminder_task
+            if reminder_task is not None:
+                await reminder_task
             task = application.state.orchestration_task
             if task is not None:
                 try:

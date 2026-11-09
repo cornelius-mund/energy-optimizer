@@ -14,6 +14,10 @@ from energy_optimizer.config import (
     HomeAssistantConfiguration,
     HomeAssistantEvServiceConfiguration,
 )
+from energy_optimizer.control.home_assistant_service import (
+    HomeAssistantServiceError,
+    call_service,
+)
 from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 
 logger = logging.getLogger(__name__)
@@ -184,26 +188,10 @@ class EvController:
         return round(power_kw * 1000 / (set_power.phases * set_power.voltage))
 
     def _call(self, service: str, data: dict[str, object]) -> None:
-        domain, name = service.split(".", 1)
-        base_url = str(self.home_assistant.base_url).rstrip("/")
         try:
-            response = self.client.post(
-                f"{base_url}/api/services/{domain}/{name}",
-                json=data,
-                headers={
-                    "Authorization": "Bearer "
-                    + self.home_assistant.token.get_secret_value()
-                },
-                timeout=self.home_assistant.timeout_seconds,
-            )
-        except httpx.HTTPError as error:
-            raise EvControlError(
-                f"Home Assistant service {service} failed: transport error"
-            ) from error
-        if response.status_code >= 400:
-            raise EvControlError(
-                f"Home Assistant service {service} returned HTTP {response.status_code}"
-            )
+            call_service(self.home_assistant, self.client, service, data)
+        except HomeAssistantServiceError as error:
+            raise EvControlError(str(error)) from error
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         interval = self.control.poll_interval_seconds

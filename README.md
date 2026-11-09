@@ -555,6 +555,25 @@ are local hours in which the car is always home: it can charge in them on every
 planned day whatever its current plug state and plug history say, because it is
 plugged in when needed. The learned pattern applies outside them.
 
+When the car is home at night but plugged in only when needed, add a
+`plug_in_reminder` (it needs `home_hours`). From `at` (default 21:00 local) until
+the end of the night's home hours the service checks the latest EV schedule every
+`poll_interval_seconds`; if it charges the car in the rest of the night and Home
+Assistant reports it unplugged, every notify service is called once for that night
+with `title` and `message` (`{energy_kwh}` and `{start}` are filled in). The sent
+night is persisted, so a restart does not repeat it; a failed call is retried at the
+next check, and an unknown plug state sends nothing.
+
+```yaml
+ev_charging:
+  strategy: daily_minimum
+  home_hours: {start: "22:00", end: "06:00"}
+  plug_in_reminder:
+    services: [notify.mobile_app_phone]
+    at: "21:00"
+    message: "Bitte EV anstecken: {energy_kwh:.0f} kWh ab {start}"
+```
+
 Without a history the car is expected at the charger in its current state and
 not to drive. Energy the plan cannot provide for a morning minimum or for
 driving is reported in `ev_shortfall_kwh` instead of failing. Each planned hour's
