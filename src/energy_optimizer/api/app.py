@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
+from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 
 from energy_optimizer import __version__
@@ -31,6 +32,19 @@ def configured_frontend_directory() -> Path:
 
 FRONTEND_DIRECTORY = configured_frontend_directory()
 
+
+class RevalidatedStaticFiles(StaticFiles):
+    """Dashboard files change with every release; without an explicit policy
+    browsers reuse cached copies by heuristic freshness and show an old
+    dashboard. ``no-cache`` keeps the copy but revalidates it by ETag.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app.middleware("http")(log_requests)
 app.include_router(core_routes.router)
 app.include_router(appliance_routes.router)
@@ -41,7 +55,7 @@ app.include_router(provider_routes.tail_router)
 if FRONTEND_DIRECTORY.is_dir():
     app.mount(
         "/dashboard",
-        StaticFiles(directory=FRONTEND_DIRECTORY, html=True),
+        RevalidatedStaticFiles(directory=FRONTEND_DIRECTORY, html=True),
         name="dashboard",
     )
 

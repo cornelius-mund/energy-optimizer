@@ -604,6 +604,10 @@ never overlaps the published prices. A note below the chart says that solid line
 are published prices and the dashed line is the forecast, credits its data sources,
 and states that all prices are market prices before grid fees and taxes.
 
+Dashboard files are served with `Cache-Control: no-cache` and an ETag, so a normal
+reload after an update shows the new dashboard while unchanged files cost only a
+304 answer.
+
 The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so the
 dashboard remains available after the Python application is installed into the
 image. Source-tree deployments may omit this setting when the repository's
