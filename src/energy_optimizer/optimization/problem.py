@@ -43,6 +43,11 @@ class BatterySpecification:
         0.0,
         0.0,
     )
+    headroom_kwh: tuple[KilowattHour, ...] | None = None
+    headroom_penalties_eur_per_kwh: tuple[EuroPerKilowattHour, EuroPerKilowattHour] = (
+        0.0,
+        0.0,
+    )
 
 
 @dataclass(frozen=True)
@@ -108,6 +113,7 @@ class PlannedBatteryHour:
     state_of_charge_kwh: KilowattHour
     degradation_cost_eur: Euro = 0.0
     reserve_kwh: KilowattHour = 0.0
+    headroom_kwh: KilowattHour = 0.0
 
 
 @dataclass(frozen=True)

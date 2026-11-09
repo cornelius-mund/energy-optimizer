@@ -225,6 +225,7 @@ def _read_plan(
                     hour,
                     _throughput_cost(problem),
                     _reserve_kwh(problem, hour),
+                    _headroom_kwh(problem, hour),
                 )
             ),
             ev=(
@@ -285,6 +286,12 @@ def _storage_hourly_costs(
             )
         ]
     return costs
+
+
+def _headroom_kwh(problem: PlanningProblem, hour: int) -> float:
+    if problem.battery is None or problem.battery.headroom_kwh is None:
+        return 0.0
+    return problem.battery.headroom_kwh[hour]
 
 
 def _reserve_kwh(problem: PlanningProblem, hour: int) -> float:

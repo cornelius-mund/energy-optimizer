@@ -253,6 +253,24 @@ class BatteryReserveConfiguration(_StrictModel):
         return self
 
 
+class BatteryHeadroomConfiguration(_StrictModel):
+    """Soft room below the maximum state of charge for more PV than forecast."""
+
+    percent: float = Field(default=10, gt=0, le=50)
+    unplanned_hours: int = Field(default=2, ge=0, le=24)
+    first_penalty_eur_per_kwh: float = Field(default=0.05, ge=0, le=10)
+    second_penalty_eur_per_kwh: float = Field(default=0.15, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def validate_penalties_rise(self) -> "BatteryHeadroomConfiguration":
+        if self.second_penalty_eur_per_kwh < self.first_penalty_eur_per_kwh:
+            raise ValueError(
+                "battery.headroom.second_penalty_eur_per_kwh must not be below "
+                "first_penalty_eur_per_kwh"
+            )
+        return self
+
+
 class HomeAssistantBatteryConfiguration(_StrictModel):
     """Home Assistant battery state and static capability configuration."""
 
@@ -277,6 +295,7 @@ class HomeAssistantBatteryConfiguration(_StrictModel):
         "than using it now",
     )
     reserve: BatteryReserveConfiguration | None = None
+    headroom: BatteryHeadroomConfiguration | None = None
     end_of_horizon_value_eur_per_kwh: float | None = Field(
         default=None,
         ge=0,

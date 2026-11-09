@@ -203,4 +203,5 @@ def _planned_battery(
         state_of_charge_percent=planned.state_of_charge_kwh / capacity_kwh * 100,
         degradation_cost_eur=planned.degradation_cost_eur,
         reserve_percent=planned.reserve_kwh / capacity_kwh * 100,
+        headroom_percent=planned.headroom_kwh / capacity_kwh * 100,
     )

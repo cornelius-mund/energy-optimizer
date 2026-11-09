@@ -8,7 +8,10 @@ no reserve, and beyond a day PV or cheap night hours refill the battery anyway.
 
 import math
 
-from energy_optimizer.config import BatteryReserveConfiguration
+from energy_optimizer.config import (
+    BatteryHeadroomConfiguration,
+    BatteryReserveConfiguration,
+)
 
 STANDARD_DEVIATION_PER_MEAN_ABSOLUTE_ERROR = math.sqrt(math.pi / 2)
 
@@ -45,3 +48,18 @@ def reserve_schedule(
         )
         reserves.append(min(reserve_kwh, usable_kwh))
     return tuple(reserves)
+
+
+def headroom_schedule(
+    settings: BatteryHeadroomConfiguration,
+    pv_forecast_kw: tuple[float, ...],
+    capacity_kwh: float,
+    usable_kwh: float,
+) -> tuple[float, ...]:
+    """Room kept free below the maximum while PV is expected; a full battery at
+    night loses nothing, so hours without PV forecast keep no headroom."""
+    headroom_kwh = min(settings.percent / 100 * capacity_kwh, usable_kwh)
+    return tuple(
+        headroom_kwh if hour >= settings.unplanned_hours and pv_kw > 0 else 0.0
+        for hour, pv_kw in enumerate(pv_forecast_kw)
+    )

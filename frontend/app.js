@@ -668,6 +668,9 @@
       if (schedule.some((hour) => hour.battery && hour.battery.reserve_percent > 0)) {
         columns.push(state("Battery reserve (%)", (hour) => hour.battery && hour.battery.reserve_percent));
       }
+      if (schedule.some((hour) => hour.battery && hour.battery.headroom_percent > 0)) {
+        columns.push(state("Battery headroom (%)", (hour) => hour.battery && hour.battery.headroom_percent));
+      }
     }
     if (schedule.some((hour) => hour.ev)) {
       columns.push(

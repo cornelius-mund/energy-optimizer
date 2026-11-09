@@ -2001,6 +2001,12 @@ components:
           title: Degradation Cost Eur
           description: Battery wear cost of the hour in EUR
           default: 0
+        headroom_percent:
+          type: number
+          title: Headroom Percent
+          description: Soft room below the maximum state of charge kept for more PV
+            than forecast at the end of the hour, in percent of the capacity
+          default: 0
         reserve_percent:
           type: number
           title: Reserve Percent

@@ -526,6 +526,21 @@ home_assistant:
       unplanned_hours: 2
 ```
 
+#### Soft battery headroom
+
+A battery that is completely full while PV is still expected exports any PV above
+the forecast for the feed-in tariff. With `home_assistant.battery.headroom` the plan
+keeps `percent` (default 10) of the capacity free below the maximum state of charge
+in planned hours with a PV forecast, after the first `unplanned_hours` (default 2).
+Like the reserve it is soft and charged once per planned day for the highest
+overshoot: the first half costs `first_penalty_eur_per_kwh` (default 0.05), the
+second half `second_penalty_eur_per_kwh` (default 0.15). Both stay below the gain of
+storing PV instead of exporting it, so the battery still fills up when nothing
+better takes the surplus; the penalty only tips close decisions, such as moving
+battery energy into the car earlier. Battery hours report `headroom_percent`, shown
+in the Plan tab as "Battery headroom (%)", and the penalty is part of
+`Cost (Optimizer)` at the fullest hour.
+
 #### Daily minimum over a multi-day plan
 
 With `daily_minimum` the car must hold `minimum_soc_percent` (default 30) at
