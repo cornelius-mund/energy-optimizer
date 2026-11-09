@@ -38,6 +38,11 @@ class BatterySpecification:
     discharge_efficiency: float
     throughput_cost_eur_per_kwh: EuroPerKilowattHour = 0.0
     terminal_value_eur_per_kwh: EuroPerKilowattHour = 0.0
+    reserve_kwh: tuple[KilowattHour, ...] | None = None
+    reserve_penalties_eur_per_kwh: tuple[EuroPerKilowattHour, EuroPerKilowattHour] = (
+        0.0,
+        0.0,
+    )
 
 
 @dataclass(frozen=True)
@@ -102,6 +107,7 @@ class PlannedBatteryHour:
     discharge_kw: Kilowatt
     state_of_charge_kwh: KilowattHour
     degradation_cost_eur: Euro = 0.0
+    reserve_kwh: KilowattHour = 0.0
 
 
 @dataclass(frozen=True)

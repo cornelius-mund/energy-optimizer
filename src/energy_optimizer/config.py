@@ -210,6 +210,49 @@ class HomeAssistantBatteryEfficiencyConfiguration(_StrictModel):
         return self
 
 
+class BatteryReserveConfiguration(_StrictModel):
+    """A soft battery reserve for load forecast errors (see battery_reserve)."""
+
+    confidence: float = Field(
+        default=1.0,
+        gt=0,
+        le=5,
+        description="Reserve in standard deviations of the accumulated load error",
+    )
+    forecast_error_kw: float | None = Field(
+        default=None,
+        ge=0,
+        le=50,
+        description=(
+            "Standard deviation of the hourly load error; default derived from the "
+            "backtested load forecast error"
+        ),
+    )
+    unplanned_hours: int = Field(
+        default=2,
+        ge=0,
+        le=24,
+        description="First planned hours without a reserve",
+    )
+    growth_cap_hours: int = Field(
+        default=24,
+        ge=1,
+        le=168,
+        description="Lead time after which the reserve stops growing",
+    )
+    first_penalty_eur_per_kwh: float = Field(default=0.05, ge=0, le=10)
+    second_penalty_eur_per_kwh: float = Field(default=0.15, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def validate_penalties_rise(self) -> "BatteryReserveConfiguration":
+        if self.second_penalty_eur_per_kwh < self.first_penalty_eur_per_kwh:
+            raise ValueError(
+                "battery.reserve.second_penalty_eur_per_kwh must not be below "
+                "first_penalty_eur_per_kwh"
+            )
+        return self
+
+
 class HomeAssistantBatteryConfiguration(_StrictModel):
     """Home Assistant battery state and static capability configuration."""
 
@@ -233,6 +276,7 @@ class HomeAssistantBatteryConfiguration(_StrictModel):
         "value_stored_energy lets it end emptier when the energy is worth less "
         "than using it now",
     )
+    reserve: BatteryReserveConfiguration | None = None
     end_of_horizon_value_eur_per_kwh: float | None = Field(
         default=None,
         ge=0,

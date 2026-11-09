@@ -14,6 +14,10 @@ from energy_optimizer.control.ev_controller import (
     EV_SCHEDULE_KEY,
     merge_schedule,
 )
+from energy_optimizer.optimization.battery_reserve import (
+    load_error_kw,
+    reserve_schedule,
+)
 from energy_optimizer.optimization.ev_patterns import (
     NO_PATTERNS,
     EvPatterns,
@@ -458,12 +462,36 @@ class PlanGenerator:
             raise PlanGenerationError(str(error)) from error
 
     def _battery_specification(
-        self, battery: BatteryData, import_prices: tuple[float, ...]
+        self,
+        battery: BatteryData,
+        import_prices: tuple[float, ...],
+        load_error_mae_kw: float | None,
     ) -> BatterySpecification:
-        return battery_specification(
+        specification = battery_specification(
             battery,
             self._throughput_cost(),
             self._terminal_value(battery, import_prices),
+        )
+        home_assistant = self.configuration.home_assistant
+        settings = (
+            None
+            if home_assistant is None or home_assistant.battery is None
+            else home_assistant.battery.reserve
+        )
+        if settings is None:
+            return specification
+        return replace(
+            specification,
+            reserve_kwh=reserve_schedule(
+                settings,
+                len(import_prices),
+                load_error_kw(settings, load_error_mae_kw),
+                battery.maximum_soc_kwh - battery.minimum_soc_kwh,
+            ),
+            reserve_penalties_eur_per_kwh=(
+                settings.first_penalty_eur_per_kwh,
+                settings.second_penalty_eur_per_kwh,
+            ),
         )
 
     def _terminal_value(
@@ -548,7 +576,9 @@ class PlanGenerator:
             maximum_export_kw=self.configuration.grid.maximum_export_kw,
             time_limit_seconds=self.configuration.solver.time_limit_seconds,
             battery=(
-                self._battery_specification(battery, import_prices)
+                self._battery_specification(
+                    battery, import_prices, forecast.mean_absolute_error_kw
+                )
                 if isinstance(battery, BatteryData)
                 else None
             ),
