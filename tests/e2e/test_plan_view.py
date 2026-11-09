@@ -77,6 +77,7 @@ def _save_plan(
     price_forecast_from: datetime | None = None,
     away_hour: int | None = None,
     reserve_kwh: float = 0.0,
+    hour_count: int = PLAN_HOURS,
 ) -> None:
     hours = tuple(
         _hour(
@@ -86,7 +87,7 @@ def _save_plan(
             away=index == away_hour,
             reserve_kwh=reserve_kwh,
         )
-        for index in range(PLAN_HOURS)
+        for index in range(hour_count)
     )
     store.save(
         PLAN_KEY,
@@ -327,3 +328,45 @@ def test_a_plan_without_a_reserve_has_no_reserve_column(
 
     expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
     expect(page.locator("#plan-head")).not_to_contain_text("Battery reserve")
+
+
+def test_a_total_row_sums_the_energy_and_the_costs_of_the_plan(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    headers = page.locator("#plan-head th").all_text_contents()
+    total = page.locator("#plan-foot tr td")
+    expect(total.nth(0)).to_have_text("Total")
+    expect(total.nth(headers.index("Grid import (kW)"))).to_have_text("18.00")
+    expect(total.nth(headers.index("EV charge (kW)"))).to_have_text("12.00")
+    expect(total.nth(headers.index("Cost (EUR)"))).to_have_text("3.000")
+    expect(total.nth(headers.index("Battery state (%)"))).to_have_text("")
+    cumulative = headers.index("Cumulative (EUR)")
+    rows = page.locator("#plan-rows tr")
+    expect(rows.nth(0).locator("td").nth(cumulative)).to_have_text("0.500")
+    expect(rows.nth(2).locator("td").nth(cumulative)).to_have_text("3.000")
+
+
+def test_every_column_of_a_long_plan_is_reachable_inside_the_table_box(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store, hour_count=150, away_hour=1, reserve_kwh=1.0)
+    page.set_viewport_size({"width": 1280, "height": 800})
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-rows tr")).to_have_count(150)
+    wrapper = page.locator("#plan-content .plan-table-wrap")
+    box = wrapper.bounding_box()
+    assert box is not None and box["height"] <= 800 * 0.7 + 1
+    wrapper.scroll_into_view_if_needed()
+    ev_charge = page.locator("#plan-head th", has_text="EV charge (kW)")
+    ev_charge.evaluate('el => el.scrollIntoView({block: "nearest", inline: "center"})')
+    expect(ev_charge).to_be_in_viewport()
+    assert wrapper.evaluate("el => el.scrollLeft") > 0
+    wrapper.evaluate("el => { el.scrollTop = el.scrollHeight; }")
+    expect(page.locator("#plan-head th").first).to_be_in_viewport()
+    expect(page.locator("#plan-foot td").first).to_be_in_viewport()

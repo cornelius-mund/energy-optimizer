@@ -70,6 +70,12 @@ button:hover { background: #28544b; }
 .plan-summary dd { margin: 4px 0 0; font-size: 1.05rem; font-weight: 800; }
 .plan-table td, .plan-table th { text-align: right; white-space: nowrap; }
 .plan-table td:first-child, .plan-table th:first-child { text-align: left; }
+.plan-table-wrap { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 12px; }
+.plan-table { border-collapse: separate; border-spacing: 0; }
+.plan-table thead th { position: sticky; top: 0; z-index: 2; background: var(--card); }
+.plan-table tfoot td { position: sticky; bottom: 0; z-index: 2; background: var(--card); border-top: 2px solid var(--line); font-weight: 800; }
+.plan-table td:first-child, .plan-table th:first-child { position: sticky; left: 0; z-index: 1; background: var(--card); }
+.plan-table thead th:first-child, .plan-table tfoot td:first-child { z-index: 3; }
 .card { padding: 28px 30px; }
 .card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .chart-wrap { min-height: 330px; margin: 26px -10px 0; }

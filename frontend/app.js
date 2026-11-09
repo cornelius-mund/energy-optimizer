@@ -35,6 +35,7 @@
   const planTable = document.querySelector("#plan-table");
   const planHead = document.querySelector("#plan-head");
   const planRows = document.querySelector("#plan-rows");
+  const planFoot = document.querySelector("#plan-foot");
   const planPriceAttribution = document.querySelector("#plan-price-attribution");
   const pricePredictionNote = document.querySelector("#price-prediction-note");
   const excludedSources = document.querySelector("#excluded-sources");
@@ -630,41 +631,63 @@
     excludedEmpty.hidden = data.hours.length !== 0 || !available;
   };
 
-  const planNumber = (value, digits = 2) => (value === null || value === undefined ? "–" : Number(value).toFixed(digits));
+  const planNumber = (value, digits = 2) => {
+    if (value === null || value === undefined) return "–";
+    const rounded = Number(value).toFixed(digits);
+    return /^-0(\.0+)?$/.test(rounded) ? rounded.slice(1) : rounded;
+  };
   const isForecastPrice = (plan, hour) => Boolean(plan.price_forecast_from) && new Date(hour.start_time) >= new Date(plan.price_forecast_from);
+  const hourCost = (hour) => hour.import_cost_eur - hour.export_revenue_eur + ((hour.battery && hour.battery.degradation_cost_eur) || 0);
+  const sumOf = (schedule, read) => schedule.reduce((sum, hour) => sum + (read(hour) || 0), 0);
   const planColumns = (plan) => {
     const schedule = plan.schedule;
+    const cumulative = [];
+    schedule.reduce((running, hour) => {
+      cumulative.push(running + hourCost(hour));
+      return running + hourCost(hour);
+    }, 0);
+    const flow = (title, read, digits = 2) => ({
+      title,
+      value: (hour) => planNumber(read(hour), digits),
+      total: () => planNumber(sumOf(schedule, read), digits),
+    });
+    const state = (title, read, digits = 1) => ({ title, value: (hour) => planNumber(read(hour), digits), total: () => "" });
     const columns = [
-      [`Hour (${timeZone})`, (hour) => formatTimestamp(hour.start_time)],
-      ["Load (kW)", (hour) => planNumber(hour.load_kw)],
-      ["PV (kW)", (hour) => planNumber(hour.pv_generation_kw)],
-      ["Grid import (kW)", (hour) => planNumber(hour.grid_import_kw)],
-      ["Grid export (kW)", (hour) => planNumber(hour.grid_export_kw)],
+      { title: `Hour (${timeZone})`, value: (hour) => formatTimestamp(hour.start_time), total: () => "Total" },
+      flow("Load (kW)", (hour) => hour.load_kw),
+      flow("PV (kW)", (hour) => hour.pv_generation_kw),
+      flow("Grid import (kW)", (hour) => hour.grid_import_kw),
+      flow("Grid export (kW)", (hour) => hour.grid_export_kw),
     ];
     if (schedule.some((hour) => hour.battery)) {
       columns.push(
-        ["Battery charge (kW)", (hour) => planNumber(hour.battery && hour.battery.charge_kw)],
-        ["Battery discharge (kW)", (hour) => planNumber(hour.battery && hour.battery.discharge_kw)],
-        ["Battery state (%)", (hour) => planNumber(hour.battery && hour.battery.state_of_charge_percent, 1)],
+        flow("Battery charge (kW)", (hour) => hour.battery && hour.battery.charge_kw),
+        flow("Battery discharge (kW)", (hour) => hour.battery && hour.battery.discharge_kw),
+        state("Battery state (%)", (hour) => hour.battery && hour.battery.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.battery && hour.battery.reserve_percent > 0)) {
-        columns.push(["Battery reserve (%)", (hour) => planNumber(hour.battery && hour.battery.reserve_percent, 1)]);
+        columns.push(state("Battery reserve (%)", (hour) => hour.battery && hour.battery.reserve_percent));
       }
     }
     if (schedule.some((hour) => hour.ev)) {
       columns.push(
-        ["EV charge (kW)", (hour) => planNumber(hour.ev && hour.ev.charge_kw)],
-        ["EV state (%)", (hour) => planNumber(hour.ev && hour.ev.state_of_charge_percent, 1)],
+        flow("EV charge (kW)", (hour) => hour.ev && hour.ev.charge_kw),
+        state("EV state (%)", (hour) => hour.ev && hour.ev.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.ev && (!hour.ev.expected_plugged_in || hour.ev.consumption_kwh > 0))) {
         columns.push(
-          ["EV at home", (hour) => (hour.ev ? (hour.ev.expected_plugged_in ? "yes" : "no") : "–")],
-          ["EV driving (kWh)", (hour) => planNumber(hour.ev && hour.ev.consumption_kwh, 1)],
+          { title: "EV at home", value: (hour) => (hour.ev ? (hour.ev.expected_plugged_in ? "yes" : "no") : "–"), total: () => "" },
+          flow("EV driving (kWh)", (hour) => hour.ev && hour.ev.consumption_kwh, 1),
         );
       }
     }
-    columns.push(["Net cost (EUR)", (hour) => planNumber(hour.import_cost_eur - hour.export_revenue_eur, 3)]);
-    if (plan.price_forecast_from) columns.push(["Price", (hour) => (isForecastPrice(plan, hour) ? "forecast" : "published")]);
+    columns.push(
+      flow("Cost (EUR)", hourCost, 3),
+      { title: "Cumulative (EUR)", value: (hour, index) => planNumber(cumulative[index], 3), total: () => "" },
+    );
+    if (plan.price_forecast_from) {
+      columns.push({ title: "Price", value: (hour) => (isForecastPrice(plan, hour) ? "forecast" : "published"), total: () => "" });
+    }
     return columns;
   };
   const planSummaryItems = (plan) => {
@@ -695,6 +718,7 @@
     planSummary.replaceChildren();
     planHead.replaceChildren();
     planRows.replaceChildren();
+    planFoot.replaceChildren();
     const empty = !plan || plan.schedule.length === 0;
     planEmpty.hidden = !empty;
     planTable.hidden = empty;
@@ -711,18 +735,21 @@
     });
     const columns = planColumns(plan);
     const headRow = document.createElement("tr");
-    columns.forEach(([title]) => {
+    columns.forEach(({ title }) => {
       const cell = document.createElement("th");
       cell.scope = "col";
       cell.textContent = title;
       headRow.append(cell);
     });
     planHead.append(headRow);
-    plan.schedule.forEach((hour) => {
+    plan.schedule.forEach((hour, index) => {
       const row = document.createElement("tr");
-      columns.forEach(([, value]) => appendCell(row, value(hour)));
+      columns.forEach(({ value }) => appendCell(row, value(hour, index)));
       planRows.append(row);
     });
+    const totalRow = document.createElement("tr");
+    columns.forEach(({ total }) => appendCell(totalRow, total()));
+    planFoot.append(totalRow);
   };
   const loadPlan = async () => {
     setStatus("Loading the plan...");

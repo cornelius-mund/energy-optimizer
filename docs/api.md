@@ -633,7 +633,12 @@ mistaken for historic actuals or forecast inputs.
 - **Table:** one row per planned hour in the dashboard time zone with load, PV, grid
   import and export in kW, battery charge, discharge and state of charge when a
   battery was planned, EV charge power and state of charge when a car was planned,
-  and the net cost of the hour in EUR (a negative value is a revenue).
+  `Cost (EUR)`, the cost of the hour (import cost minus export revenue plus battery
+  wear; a negative value is a revenue), and `Cumulative (EUR)`, the running total.
+  A `Total` row at the bottom sums the energy columns (kWh, one row is one hour)
+  and the costs; state columns stay empty there. The table scrolls inside a box of
+  at most 70 % of the window height with a sticky header, hour column and total
+  row, so every column stays reachable. Values that round to zero have no minus sign.
 - **States:** before the first plan the tab says that no plan exists (HTTP 404);
   other failures (for example HTTP 503 without persistence) are shown as an error
   message. Only optimal plans are stored, so infeasible or time-limited solves never
