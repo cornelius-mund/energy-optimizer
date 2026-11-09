@@ -7,6 +7,7 @@ REST API, with cumulative energy counters that rise by the hourly load profile.
 """
 
 import json
+import re
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +47,15 @@ def forecast_price_eur_per_mwh(hour_of_day: int) -> float:
     return market_price_eur_per_mwh(hour_of_day) + PRICE_FORECAST_MARKUP_EUR_PER_MWH
 
 
+def ev_plugged_in_share(hour_of_day: int) -> float:
+    """The car is home from 17:00 to 07:00 UTC."""
+    return 1.0 if hour_of_day >= 17 or hour_of_day < 7 else 0.0
+
+
+def ev_history_soc_percent(hour_of_day: int) -> float:
+    return 70.0 if ev_plugged_in_share(hour_of_day) else 45.0
+
+
 def pv_kw(hour_of_day: int) -> float:
     return SUN_WATT_HOURS / 1000 if 10 <= hour_of_day < 16 else 0.0
 
@@ -80,6 +90,7 @@ class FakeWorld:
         )
         self.requests: list[str] = []
         self.service_calls: list[tuple[str, dict[str, Any]]] = []
+        self.influx_queries: list[str] = []
 
     def counter_kwh(self, boundary: datetime) -> float:
         hours = int((boundary - self.history_start) / ONE_HOUR)
@@ -155,6 +166,27 @@ class FakeWorld:
             "knownUntil": (first + ONE_HOUR * 24).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
 
+    def influx_query(self, statement: str) -> dict[str, Any]:
+        """Answer an hourly last-value query like the InfluxDB v1 HTTP API."""
+        self.influx_queries.append(statement)
+        entity = re.search(r"\"entity_id\" = '([^']+)'", statement)
+        window = re.findall(r"time [<>]=? '([^']+)'", statement)
+        if entity is None or len(window) != 2:
+            return {"results": [{"error": "unsupported query"}]}
+        start, end = (datetime.fromisoformat(moment) for moment in window)
+        hourly_value = (
+            ev_plugged_in_share
+            if entity.group(1) == EV_PLUG_ENTITY.split(".", 1)[1]
+            else ev_history_soc_percent
+        )
+        rows = []
+        moment = start
+        while moment < end:
+            rows.append([int(moment.timestamp()), hourly_value(moment.hour)])
+            moment += ONE_HOUR
+        series = [{"name": "x", "columns": ["time", "last"], "values": rows}]
+        return {"results": [{"statement_id": 0, "series": series}]}
+
     def irradiance(self, tilt_degrees: float, forecast_days: int = 2) -> dict[str, Any]:
         """Answer like Open-Meteo: each value labelled with its hour's end."""
         today = _floor_hour(datetime.now(timezone.utc)).replace(hour=0)
@@ -227,6 +259,8 @@ def _handler(world: FakeWorld) -> type[BaseHTTPRequestHandler]:
                         int(query.get("forecast_days", ["2"])[0]),
                     ),
                 )
+            elif url.path == "/query":
+                self._reply(200, world.influx_query(query["q"][0]))
             elif url.path == "/prices":
                 self._reply(200, world.price_forecast())
             else:

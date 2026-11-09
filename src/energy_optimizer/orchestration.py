@@ -44,6 +44,10 @@ from energy_optimizer.providers.home_assistant_history import (
     HomeAssistantHistory,
     HomeAssistantHistoryImporter,
 )
+from energy_optimizer.providers.influxdb_ev_history import (
+    InfluxDbEvHistoryImporter,
+    merge_ev_history,
+)
 from energy_optimizer.providers.interfaces import (
     BATTERY_EFFICIENCY_SOURCE_ID,
     BATTERY_SOURCE_ID,
@@ -54,6 +58,7 @@ from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyHistoryData,
     ElectricityPriceData,
     EvData,
+    EvHistoryData,
     GridFlowData,
     HouseholdLoadData,
     PvGenerationData,
@@ -71,6 +76,10 @@ from energy_optimizer.storage import (
 
 logger = logging.getLogger(__name__)
 ELECTRICITY_PRICE_FORECAST_SOURCE = "electricity_price_forecast"
+EV_HISTORY_SOURCE = "ev_history"
+# Each refresh re-reads the last two days, so hours that a late InfluxDB write
+# completed are corrected.
+EV_HISTORY_REFRESH_OVERLAP = timedelta(days=2)
 # Optional plan inputs extend a plan when they are current but never block one.
 OPTIONAL_PLAN_SOURCES = frozenset({ELECTRICITY_PRICE_FORECAST_SOURCE})
 
@@ -966,6 +975,46 @@ def _build_ev_registration(
     )
 
 
+def _build_ev_history_registration(
+    configuration: Configuration, sources: _Sources, store: ProviderDataStore
+) -> ProviderRegistration | None:
+    home_assistant = configuration.home_assistant
+    influxdb = configuration.influxdb
+    if (
+        influxdb is None
+        or home_assistant is None
+        or home_assistant.ev is None
+        or EV_HISTORY_SOURCE not in sources
+    ):
+        return None
+    importer = InfluxDbEvHistoryImporter(influxdb, home_assistant.ev)
+    adapter = TypeAdapter(EvHistoryData)
+    key = ProviderDataKey("ev-history", "influxdb", EV_SOURCE_ID)
+    keep_hours = influxdb.history_days * 24
+
+    def fetch(now: datetime) -> EvHistoryData:
+        end = now.replace(minute=0, second=0, microsecond=0)
+        persisted = store.load(key, adapter)
+        start = (
+            end - timedelta(hours=keep_hours)
+            if persisted is None
+            else end - EV_HISTORY_REFRESH_OVERLAP
+        )
+        return merge_ev_history(
+            persisted, importer.fetch(start, end, now=now), keep_hours
+        )
+
+    return _registration(
+        EV_HISTORY_SOURCE,
+        EvHistoryData,
+        adapter,
+        key,
+        store,
+        _fetch_plan(fetch),
+        importer.is_fresh,
+    )
+
+
 def _build_battery_efficiency_registration(
     configuration: Configuration, sources: _Sources, store: ProviderDataStore
 ) -> ProviderRegistration | None:
@@ -1070,6 +1119,7 @@ _REGISTRATION_FACTORIES = (
     _build_pv_generation_registration,
     _build_electricity_prices_registration,
     _build_electricity_price_forecast_registration,
+    _build_ev_history_registration,
     _build_grid_flow_registration,
     _build_battery_registration,
     _build_ev_registration,
