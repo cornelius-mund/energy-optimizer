@@ -652,7 +652,9 @@ mistaken for historic actuals or forecast inputs.
   energy at the start. On windows wider than 760 px the Plan view uses the full
   window width.
   A `Total` row at the bottom sums the energy columns (kWh, one row is one hour)
-  and the costs; state columns stay empty there. The table scrolls inside a box of
+  and the costs; for `Battery state (%)` and `EV state (%)` it shows the change
+  from the first to the last planned hour, signed (for example -41.9), and other
+  state columns stay empty there. The table scrolls inside a box of
   at most 70 % of the window height with a sticky header, hour column and total
   row, so every column stays reachable. Values that round to zero have no minus sign.
 - **States:** before the first plan the tab says that no plan exists (HTTP 404);

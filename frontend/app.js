@@ -652,6 +652,16 @@
       total: () => planNumber(sumOf(schedule, read), digits),
     });
     const state = (title, read, digits = 1) => ({ title, value: (hour) => planNumber(read(hour), digits), total: () => "" });
+    const stateChange = (title, read, digits = 1) => ({
+      title,
+      value: (hour) => planNumber(read(hour), digits),
+      total: () => {
+        const known = schedule.map(read).filter((value) => value !== null && value !== undefined);
+        if (known.length < 2) return "";
+        const change = planNumber(known[known.length - 1] - known[0], digits);
+        return Number(change) > 0 ? `+${change}` : change;
+      },
+    });
     const columns = [
       { title: `Hour (${timeZone})`, value: (hour) => formatTimestamp(hour.start_time), total: () => "Total" },
       flow("Load (kW)", (hour) => hour.load_kw),
@@ -663,7 +673,7 @@
       columns.push(
         flow("Battery charge (kW)", (hour) => hour.battery && hour.battery.charge_kw),
         flow("Battery discharge (kW)", (hour) => hour.battery && hour.battery.discharge_kw),
-        state("Battery state (%)", (hour) => hour.battery && hour.battery.state_of_charge_percent),
+        stateChange("Battery state (%)", (hour) => hour.battery && hour.battery.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.battery && hour.battery.reserve_percent > 0)) {
         columns.push(state("Battery reserve (%)", (hour) => hour.battery && hour.battery.reserve_percent));
@@ -675,7 +685,7 @@
     if (schedule.some((hour) => hour.ev)) {
       columns.push(
         flow("EV charge (kW)", (hour) => hour.ev && hour.ev.charge_kw),
-        state("EV state (%)", (hour) => hour.ev && hour.ev.state_of_charge_percent),
+        stateChange("EV state (%)", (hour) => hour.ev && hour.ev.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.ev && (!hour.ev.expected_plugged_in || hour.ev.consumption_kwh > 0))) {
         columns.push(
