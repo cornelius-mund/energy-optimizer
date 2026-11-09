@@ -519,6 +519,11 @@ class EvChargingConfiguration(_StrictModel):
             )
         if self.strategy == "minimum_plus_target":
             self._validate_soft_target()
+        if self.strategy == "daily_minimum" and self.target_soc_percent is not None:
+            if self.target_soc_percent < max(self.day_target_percents()):
+                raise ValueError(
+                    "ev_charging.target_soc_percent must not be below any minimum"
+                )
         return self
 
     def _validate_soft_target(self) -> None:
@@ -535,6 +540,9 @@ class EvChargingConfiguration(_StrictModel):
             raise ValueError(
                 "ev_charging.target_soc_percent must not be below any minimum"
             )
+
+    def day_target_percents(self) -> list[float]:
+        return [percent for percent, _ in self.day_targets().values()]
 
     def day_targets(self) -> dict[int, tuple[float, time]]:
         """Minimum state of charge and deadline per weekday (Monday is 0).
@@ -564,7 +572,7 @@ class EvChargingConfiguration(_StrictModel):
     def limit_soc_percent(self) -> float:
         """The state of charge the car is charged up to, as far as it is a limit."""
         if self.strategy == "daily_minimum":
-            return 100.0
+            return 100.0 if self.target_soc_percent is None else self.target_soc_percent
         if self.strategy == "minimum_plus_target":
             assert self.target_soc_percent is not None
             return self.target_soc_percent
