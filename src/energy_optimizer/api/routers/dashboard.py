@@ -28,7 +28,9 @@ from energy_optimizer.api.schemas import (
     ExcludedHoursResponse,
 )
 from energy_optimizer.api.series import align_hourly_values
+from energy_optimizer.config import Configuration
 from energy_optimizer.providers.awattar import AwattarImporter
+from energy_optimizer.providers.epex_predictor import EpexPredictorImporter
 from energy_optimizer.providers.interfaces import (
     BatteryEfficiencyData,
     ElectricityPriceData,
@@ -38,7 +40,11 @@ from energy_optimizer.providers.pv_forecast import (
     configured_pv_forecast_importer,
     pv_forecast_key,
 )
-from energy_optimizer.storage import ProviderDataKey, ProviderDataStoreError
+from energy_optimizer.storage import (
+    ProviderDataKey,
+    ProviderDataStore,
+    ProviderDataStoreError,
+)
 
 router = APIRouter()
 
@@ -186,6 +192,45 @@ def _pv_dashboard_series(
         retrieved_at=data.retrieved_at,
         generated_at=data.generated_at,
         published_at=data.published_at,
+        freshness=freshness,
+        validation_status="valid",
+        missing_intervals=[timestamp for timestamp, value in selected if value is None],
+    )
+
+
+def _predicted_price_series(
+    data: ElectricityPriceData,
+    start: datetime,
+    end: datetime,
+    published_until: datetime | None,
+    freshness: Freshness,
+) -> DashboardSeries | None:
+    """The EPEX Predictor market price for the hours after the last published
+    day-ahead price; earlier hours are left empty so both never overlap.
+    """
+    predicted = {
+        timestamp: value
+        for timestamp, value in zip(
+            data.timestamps, data.import_price_eur_per_kwh, strict=True
+        )
+        if published_until is None or timestamp >= published_until
+    }
+    if not predicted:
+        return None
+    selected = align_hourly_values(predicted, start, end)
+    return DashboardSeries(
+        id="price_predicted_forecast",
+        data_type="import_price",
+        scenario_kind="forecast",
+        timestamps=[timestamp for timestamp, _ in selected],
+        values=[value for _, value in selected],
+        unit=data.unit,
+        source=api_source(data.source),
+        requested_start_time=start,
+        requested_end_time=end,
+        available_start_time=min(predicted),
+        available_end_time=max(predicted) + timedelta(hours=1),
+        retrieved_at=data.retrieved_at,
         freshness=freshness,
         validation_status="valid",
         missing_intervals=[timestamp for timestamp, value in selected if value is None],
@@ -382,6 +427,7 @@ def _forecast_dashboard_data(
             freshness: Freshness = "fresh" if pv_importer.is_fresh(data) else "stale"
             series.append(_pv_dashboard_series(data, start, end, freshness))
 
+    published_prices: ElectricityPriceData | None = None
     if configuration.awattar is not None:
         key = ProviderDataKey(
             data_type="electricity-prices",
@@ -398,6 +444,7 @@ def _forecast_dashboard_data(
         if data is None:
             diagnostics.append("electricity-price forecast data is unavailable")
         else:
+            published_prices = data
             price_importer = AwattarImporter(configuration.awattar)
             freshness = "fresh" if price_importer.is_fresh(data) else "stale"
             for direction in ("import", "export"):
@@ -413,6 +460,11 @@ def _forecast_dashboard_data(
                     continue
                 if direction_series is not None:
                     series.append(direction_series)
+    predicted = _predicted_price_dashboard_series(
+        configuration, store, start, end, published_prices
+    )
+    if predicted is not None:
+        series.append(predicted)
     response = _dashboard_response(start, end, series, diagnostics)
     if response.status == "unavailable":
         logger.warning(
@@ -425,6 +477,35 @@ def _forecast_dashboard_data(
             ),
         )
     return response
+
+
+def _predicted_price_dashboard_series(
+    configuration: Configuration,
+    store: ProviderDataStore,
+    start: datetime,
+    end: datetime,
+    published_prices: ElectricityPriceData | None,
+) -> DashboardSeries | None:
+    epex_predictor = configuration.epex_predictor
+    if epex_predictor is None:
+        return None
+    key = ProviderDataKey(
+        "electricity-price-forecast", "epex-predictor", epex_predictor.region.lower()
+    )
+    try:
+        data = store.load(key, ELECTRICITY_PRICE_ADAPTER)
+    except ProviderDataStoreError:
+        return None
+    if data is None:
+        return None
+    published_until = (
+        None
+        if published_prices is None
+        else published_prices.timestamps[-1] + timedelta(hours=1)
+    )
+    importer = EpexPredictorImporter(epex_predictor)
+    freshness: Freshness = "fresh" if importer.is_fresh(data) else "stale"
+    return _predicted_price_series(data, start, end, published_until, freshness)
 
 
 @router.get(

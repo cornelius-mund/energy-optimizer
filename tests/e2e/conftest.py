@@ -68,6 +68,7 @@ def _configuration(data_directory: Path) -> dict[str, Any]:
             "max_data_age_seconds": 7200,
         },
         "awattar": {},
+        "epex_predictor": {},
         "home_assistant": {
             "base_url": "http://homeassistant.local:8123",
             "token": "test-token",

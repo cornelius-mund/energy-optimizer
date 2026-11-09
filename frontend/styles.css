@@ -84,6 +84,7 @@ svg { width: 100%; height: auto; overflow: visible; }
 .legend-1 .legend-swatch { background: var(--series-1); }
 .legend-2 .legend-swatch { background: var(--series-2); }
 .legend-3 .legend-swatch { background: #c18a21; }
+.legend-4 .legend-swatch { background: repeating-linear-gradient(90deg, #c0563b 0 4px, transparent 4px 6px); border-radius: 2px; }
 .legend-item[aria-pressed="false"] { color: var(--muted); font-weight: 600; text-decoration: line-through; }
 .legend-item[aria-pressed="false"] .legend-swatch { opacity: .3; }
 .axis-unit { fill: var(--ink); font-size: 12px; font-weight: 800; }
@@ -97,10 +98,12 @@ svg { width: 100%; height: auto; overflow: visible; }
 .series-1 { stroke: var(--series-1); }
 .series-2 { stroke: var(--series-2); }
 .series-3 { stroke: #c18a21; }
+.series-4 { stroke: #c0563b; stroke-dasharray: 6 5; }
 .point { fill: var(--card); stroke: var(--series-0); stroke-width: 2; cursor: pointer; }
 .point-1 { stroke: var(--series-1); }
 .point-2 { stroke: var(--series-2); }
 .point-3 { stroke: #c18a21; }
+.point-4 { stroke: #c0563b; }
 .point:hover, .point:focus { fill: var(--accent); stroke: var(--accent-dark); outline: none; }
 .point-tooltip { position: absolute; z-index: 2; width: max-content; max-width: 320px; padding: 8px 10px; border: 1px solid #bddbd1; border-radius: 8px; color: var(--ink); background: var(--card); box-shadow: var(--shadow); font-size: .75rem; font-weight: 700; pointer-events: none; }
 .chart-wrap { position: relative; }
@@ -163,3 +166,4 @@ a { color: var(--accent-dark); font-weight: 700; }
   .card-heading { display: block; }
   footer { padding-bottom: 12px; }
 }
+#price-prediction-note { grid-column: 1 / -1; }
