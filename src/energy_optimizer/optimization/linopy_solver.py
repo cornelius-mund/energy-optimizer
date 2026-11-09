@@ -17,6 +17,7 @@ from energy_optimizer.optimization.ev_model import (
     EvVariables,
     add_ev,
     read_ev_hour,
+    shortfall_kwh,
 )
 from energy_optimizer.optimization.problem import (
     Plan,
@@ -168,7 +169,9 @@ def _minimize_net_cost(
             objective - problem.battery.terminal_value_eur_per_kwh * final_state_kwh
         )
     if variables.ev is not None:
-        objective = objective + SHORTFALL_PENALTY_EUR_PER_KWH * variables.ev.shortfall
+        objective = objective + SHORTFALL_PENALTY_EUR_PER_KWH * (
+            variables.ev.shortfall + variables.ev.missing_energy.sum()
+        )
         assert problem.ev is not None
         stored_value = problem.ev.value_eur_per_kwh * problem.ev.charge_efficiency
         objective = objective - stored_value * variables.ev.charge.sum()
@@ -216,7 +219,11 @@ def _read_plan(
                     _throughput_cost(problem),
                 )
             ),
-            ev=None if variables.ev is None else read_ev_hour(variables.ev, hour),
+            ev=(
+                None
+                if variables.ev is None or problem.ev is None
+                else read_ev_hour(variables.ev, problem.ev, hour)
+            ),
         )
         for hour in range(problem.hours())
     )
@@ -242,7 +249,7 @@ def _read_plan(
 def _shortfall_kwh(variables: _GridAndPvVariables) -> float:
     if variables.ev is None:
         return 0.0
-    return max(float(variables.ev.shortfall.solution.item()), 0.0)
+    return shortfall_kwh(variables.ev)
 
 
 def _throughput_cost(problem: PlanningProblem) -> float:

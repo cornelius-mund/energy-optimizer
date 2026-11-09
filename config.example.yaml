@@ -338,7 +338,8 @@ load_forecast:
 
 # Optional EV charging wish, used when home_assistant.ev is configured.
 # ev_charging:
-#   strategy: deadline   # deadline, immediate, surplus or minimum_plus_target
+#   strategy: deadline   # deadline, immediate, surplus, minimum_plus_target
+#                        # or daily_minimum (every morning, default 30 % at 07:00)
 #   minimum_soc_percent: 80
 #   deadline: '07:00'
 #   weekly:

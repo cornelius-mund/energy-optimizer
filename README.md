@@ -274,7 +274,9 @@ keep the previous value. Hours newer than `raw_retention_days` (default 89) come
 from the raw policy `autogen` (field `value`), older ones from the long-term
 policy `downsample_rp` (minute means, field `mean_value`); a plug share of at
 least 0.5 counts as plugged in. Each refresh re-reads the last two days and keeps
-the persisted history otherwise; a failed refresh keeps it unchanged.
+the persisted history otherwise; a failed refresh keeps it unchanged. When the
+live plug entity has no reliable history, `ev_plugged_in_entity_id` names another
+entity for the plug history only (for example the car's own charge-port sensor).
 
 ```yaml
 influxdb:
@@ -447,7 +449,7 @@ ev_charging:
   deadline: "07:00"          # local time, see `timezone`
 ```
 
-Strategies (`ev_charging.strategy`): `deadline` (default), `immediate`, `surplus` and `minimum_plus_target`. With
+Strategies (`ev_charging.strategy`): `deadline` (default), `immediate`, `surplus`, `minimum_plus_target` and `daily_minimum`. With
 `immediate` the car charges at full power from the first hour while plugged in until
 `minimum_soc_percent` is stored (the last hour is rounded up to the charger minimum);
 no deadline is needed and the rest of the plan is optimized around that fixed load.
@@ -491,6 +493,35 @@ a power between its minimum and maximum. If the target cannot be reached, the pl
 charges as much as possible and reports `ev_shortfall_kwh` instead of failing. A
 deadline beyond the planning horizon is not planned yet. The plan hours carry an
 `ev` object with `charge_kw`, `state_of_charge_kwh` and `state_of_charge_percent`.
+
+#### Daily minimum over a multi-day plan
+
+With `daily_minimum` the car must hold `minimum_soc_percent` (default 30) at
+`deadline` (default 07:00 local) on every morning of the plan; a `weekly` block
+changes the minimum or the time per weekday. In between, the plan charges on the
+cheapest days and hours, which with a week-long plan (see the EPEX Predictor
+price forecast) can mean charging once for several days. With the `ev_history`
+source (see EV history from InfluxDB) the plan learns from the history:
+
+- the driving energy per local weekday, the sum of the state-of-charge drops of
+  each day with at least 20 known hours, averaged per weekday and deducted in the
+  hour the car is expected back (else at 18:00);
+- the plug-in share per weekday and hour; the car can only charge in hours with
+  a share of at least 0.5. The current plug state holds until the learned pattern
+  next changes, and hours without at least two samples keep the current state.
+
+Without a history the car is expected at the charger in its current state and
+not to drive. Energy the plan cannot provide for a morning minimum or for
+driving is reported in `ev_shortfall_kwh` instead of failing. Each planned hour's
+`ev` object carries `expected_plugged_in` and `consumption_kwh`, and the Plan tab
+shows them as "EV at home" and "EV driving (kWh)".
+
+```yaml
+ev_charging:
+  strategy: daily_minimum
+  minimum_soc_percent: 30
+  deadline: "07:00"
+```
 
 #### Controlling the wall box
 

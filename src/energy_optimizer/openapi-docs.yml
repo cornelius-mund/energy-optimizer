@@ -2021,6 +2021,16 @@ components:
         state_of_charge_percent:
           type: number
           title: State Of Charge Percent
+        expected_plugged_in:
+          type: boolean
+          title: Expected Plugged In
+          description: Whether the car is expected at the charger
+          default: true
+        consumption_kwh:
+          type: number
+          title: Consumption Kwh
+          description: Driving energy deducted in this hour, learned from the history
+          default: 0.0
       additionalProperties: false
       type: object
       required:

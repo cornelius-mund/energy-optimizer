@@ -185,6 +185,8 @@ def _planned_ev(
         charge_kw=planned.charge_kw,
         state_of_charge_kwh=planned.state_of_charge_kwh,
         state_of_charge_percent=planned.state_of_charge_kwh / capacity_kwh * 100,
+        expected_plugged_in=planned.plugged_in,
+        consumption_kwh=planned.consumption_kwh,
     )
 
 

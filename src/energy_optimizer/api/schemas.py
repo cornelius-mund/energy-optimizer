@@ -690,6 +690,13 @@ class PlannedEvResponse(_StrictModel):
     charge_kw: float
     state_of_charge_kwh: float
     state_of_charge_percent: float
+    expected_plugged_in: bool = Field(
+        default=True, description="Whether the car is expected at the charger"
+    )
+    consumption_kwh: float = Field(
+        default=0.0,
+        description="Driving energy deducted in this hour, learned from the history",
+    )
 
 
 class PlannedHourResponse(_StrictModel):

@@ -452,12 +452,16 @@ class EvDayTargetConfiguration(_StrictModel):
     deadline: time
 
 
+DAILY_MINIMUM_SOC_PERCENT = 30.0
+DAILY_MINIMUM_TIME = time(7)
+
+
 class EvChargingConfiguration(_StrictModel):
     """What the owner wants from the car: a state of charge at a local time."""
 
-    strategy: Literal["deadline", "immediate", "surplus", "minimum_plus_target"] = (
-        "deadline"
-    )
+    strategy: Literal[
+        "deadline", "immediate", "surplus", "minimum_plus_target", "daily_minimum"
+    ] = "deadline"
     minimum_soc_percent: float | None = Field(
         default=None,
         gt=0,
@@ -533,12 +537,20 @@ class EvChargingConfiguration(_StrictModel):
             )
 
     def day_targets(self) -> dict[int, tuple[float, time]]:
-        """Minimum state of charge and deadline per weekday (Monday is 0)."""
+        """Minimum state of charge and deadline per weekday (Monday is 0).
+
+        The daily minimum applies every morning, by default 30 % at 07:00.
+        """
         general = (
             (self.minimum_soc_percent, self.deadline)
             if self.minimum_soc_percent is not None and self.deadline is not None
             else None
         )
+        if general is None and self.strategy == "daily_minimum":
+            general = (
+                self.minimum_soc_percent or DAILY_MINIMUM_SOC_PERCENT,
+                self.deadline or DAILY_MINIMUM_TIME,
+            )
         targets: dict[int, tuple[float, time]] = {}
         for index, name in enumerate(WEEKDAYS):
             entry = self.weekly.get(name)
@@ -551,6 +563,8 @@ class EvChargingConfiguration(_StrictModel):
     @property
     def limit_soc_percent(self) -> float:
         """The state of charge the car is charged up to, as far as it is a limit."""
+        if self.strategy == "daily_minimum":
+            return 100.0
         if self.strategy == "minimum_plus_target":
             assert self.target_soc_percent is not None
             return self.target_soc_percent
@@ -733,6 +747,15 @@ class InfluxDbConfiguration(_StrictModel):
         default="downsample_rp", pattern=r"^[A-Za-z0-9_]+$"
     )
     history_days: int = Field(default=180, ge=1, le=3650)
+    ev_plugged_in_entity_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description=(
+            "Entity whose history tells whether the car was plugged in, when it "
+            "differs from the live home_assistant.ev.plugged_in entity"
+        ),
+    )
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     max_data_age_seconds: float | None = Field(default=7200, gt=0)
 

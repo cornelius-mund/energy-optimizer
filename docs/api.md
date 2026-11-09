@@ -72,7 +72,9 @@ A solver result that is neither of these is an unexpected error and returns HTTP
 
 `GET /plan` returns the latest plan that the orchestration cycle stored, in the same
 shape as the `POST /optimize` response plus `created_at`, the time of the provider
-snapshot it was computed from. With an electric vehicle configured, each hour has an `ev` object and the
+snapshot it was computed from. With an electric vehicle configured, each hour has an `ev` object
+(with `expected_plugged_in` and the driving energy `consumption_kwh` learned for the
+`daily_minimum` strategy) and the
 response has `ev_shortfall_kwh`, the energy the car is short of its target at the
 deadline. `price_forecast_from` is the first hour priced by the EPEX Predictor
 forecast instead of a published day-ahead price (null when every price is
