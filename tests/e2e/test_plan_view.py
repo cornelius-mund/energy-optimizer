@@ -39,6 +39,7 @@ def _hour(
     battery: bool = True,
     electric_vehicle: bool = True,
     away: bool = False,
+    reserve_kwh: float = 0.0,
 ) -> PlannedHour:
     return PlannedHour(
         start_time=FIRST_HOUR + timedelta(hours=index),
@@ -50,7 +51,11 @@ def _hour(
         grid_export_kw=0.0,
         import_cost_eur=0.5 * (index + 1),
         export_revenue_eur=0.0,
-        battery=PlannedBatteryHour(0.0, 0.5, 4.0 - index) if battery else None,
+        battery=(
+            PlannedBatteryHour(0.0, 0.5, 4.0 - index, reserve_kwh=reserve_kwh)
+            if battery
+            else None
+        ),
         ev=(
             PlannedEvHour(
                 4.0,
@@ -71,6 +76,7 @@ def _save_plan(
     electric_vehicle: bool = True,
     price_forecast_from: datetime | None = None,
     away_hour: int | None = None,
+    reserve_kwh: float = 0.0,
 ) -> None:
     hours = tuple(
         _hour(
@@ -78,6 +84,7 @@ def _save_plan(
             battery=battery,
             electric_vehicle=electric_vehicle,
             away=index == away_hour,
+            reserve_kwh=reserve_kwh,
         )
         for index in range(PLAN_HOURS)
     )
@@ -293,3 +300,30 @@ def test_a_car_that_is_always_home_and_never_drives_has_no_presence_columns(
     _open_plan(page)
 
     expect(page.locator("#plan-head")).not_to_contain_text("EV at home")
+
+
+def test_the_battery_reserve_is_shown_when_the_plan_keeps_one(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store, reserve_kwh=1.5)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-head")).to_contain_text("Battery reserve (%)")
+    reserve_column = (
+        page.locator("#plan-head th").all_text_contents().index("Battery reserve (%)")
+    )
+    expect(
+        page.locator("#plan-rows tr").nth(0).locator("td").nth(reserve_column)
+    ).to_have_text("15.0")
+
+
+def test_a_plan_without_a_reserve_has_no_reserve_column(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
+    expect(page.locator("#plan-head")).not_to_contain_text("Battery reserve")

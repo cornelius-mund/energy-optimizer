@@ -496,6 +496,36 @@ charges as much as possible and reports `ev_shortfall_kwh` instead of failing. A
 deadline beyond the planning horizon is not planned yet. The plan hours carry an
 `ev` object with `charge_kw`, `state_of_charge_kwh` and `state_of_charge_percent`.
 
+#### Soft battery reserve
+
+Load forecasts are wrong by some tenths of a kW per hour; if the plan drains the
+battery exactly, a higher load means expensive grid imports. With
+`home_assistant.battery.reserve` the plan keeps a soft reserve above the minimum
+state of charge. Its size at planned hour t is `confidence * sigma *
+sqrt(min(t + 1 - unplanned_hours, growth_cap_hours))`: hourly errors partly cancel,
+so the energy the house may draw beyond the forecast grows with the square root of
+the lead time. sigma is `forecast_error_kw`, or the backtested mean absolute load
+error times sqrt(pi/2). The first `unplanned_hours` (default 2) have no reserve
+because the plan is recomputed every hour with the measured state of charge, and
+the reserve stops growing after `growth_cap_hours` (default 24).
+
+The reserve is soft: the battery may use it, at a price per kWh of the deepest
+shortfall of each planned day (a forecast error costs one expensive import, not one
+per hour). The first half of the reserve costs `first_penalty_eur_per_kwh`
+(default 0.05), the second half `second_penalty_eur_per_kwh` (default 0.15), about
+the expected extra cost of an evening import. When discharging saves more, the
+battery still goes down to its minimum. The penalty is not part of the reported
+objective; each planned battery hour reports `reserve_percent`, shown in the Plan
+tab as "Battery reserve (%)".
+
+```yaml
+home_assistant:
+  battery:
+    reserve:
+      confidence: 1.0
+      unplanned_hours: 2
+```
+
 #### Daily minimum over a multi-day plan
 
 With `daily_minimum` the car must hold `minimum_soc_percent` (default 30) at

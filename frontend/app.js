@@ -647,6 +647,9 @@
         ["Battery discharge (kW)", (hour) => planNumber(hour.battery && hour.battery.discharge_kw)],
         ["Battery state (%)", (hour) => planNumber(hour.battery && hour.battery.state_of_charge_percent, 1)],
       );
+      if (schedule.some((hour) => hour.battery && hour.battery.reserve_percent > 0)) {
+        columns.push(["Battery reserve (%)", (hour) => planNumber(hour.battery && hour.battery.reserve_percent, 1)]);
+      }
     }
     if (schedule.some((hour) => hour.ev)) {
       columns.push(

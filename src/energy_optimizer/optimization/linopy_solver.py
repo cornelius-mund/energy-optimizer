@@ -11,6 +11,7 @@ from energy_optimizer.optimization.battery_model import (
     BatteryVariables,
     add_battery,
     read_battery_hour,
+    reserve_penalty,
 )
 from energy_optimizer.optimization.ev_model import (
     SHORTFALL_PENALTY_EUR_PER_KWH,
@@ -164,6 +165,7 @@ def _minimize_net_cost(
             problem.battery.throughput_cost_eur_per_kwh
             * variables.battery.discharge.sum()
         )
+        objective = objective + reserve_penalty(variables.battery, problem.battery)
         final_state_kwh = variables.battery.state_of_charge.loc[hours[-1]]
         objective = (
             objective - problem.battery.terminal_value_eur_per_kwh * final_state_kwh
@@ -217,6 +219,7 @@ def _read_plan(
                     variables.battery,
                     hour,
                     _throughput_cost(problem),
+                    _reserve_kwh(problem, hour),
                 )
             ),
             ev=(
@@ -250,6 +253,12 @@ def _shortfall_kwh(variables: _GridAndPvVariables) -> float:
     if variables.ev is None:
         return 0.0
     return shortfall_kwh(variables.ev)
+
+
+def _reserve_kwh(problem: PlanningProblem, hour: int) -> float:
+    if problem.battery is None or problem.battery.reserve_kwh is None:
+        return 0.0
+    return problem.battery.reserve_kwh[hour]
 
 
 def _throughput_cost(problem: PlanningProblem) -> float:

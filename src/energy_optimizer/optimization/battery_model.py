@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import pandas
-from linopy import Model, Variable
+from linopy import LinearExpression, Model, Variable
 
 from energy_optimizer.optimization.problem import (
     BatterySpecification,
@@ -11,6 +11,8 @@ from energy_optimizer.optimization.problem import (
 )
 
 HOUR_DIMENSION = "hour"
+DAY_DIMENSION = "planned_day"
+HOURS_PER_DAY = 24
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class BatteryVariables:
     charge: Variable
     discharge: Variable
     state_of_charge: Variable
+    reserve_deficits: tuple[Variable, Variable] | None = None
 
 
 def add_battery(
@@ -48,7 +51,66 @@ def add_battery(
     _forbid_simultaneous_charge_and_discharge(model, hours, specification, variables)
     _add_state_of_charge_dynamics(model, hours, specification, variables)
     _require_final_state_of_charge(model, hours, specification, variables)
-    return variables
+    return _add_soft_reserve(model, hours, specification, variables)
+
+
+def _add_soft_reserve(
+    model: Model,
+    hours: pandas.RangeIndex,
+    specification: BatterySpecification,
+    variables: BatteryVariables,
+) -> BatteryVariables:
+    """Falling below the reserve is allowed but costs, once per planned day for
+    its deepest shortfall: a forecast error costs one expensive import, not one
+    per hour spent below the reserve. The first half of the day's largest reserve
+    costs the first penalty, the second half the second.
+    """
+    if specification.reserve_kwh is None:
+        return variables
+    reserve = pandas.Series(specification.reserve_kwh, index=hours, dtype=float)
+    days = pandas.RangeIndex(-(-len(hours) // HOURS_PER_DAY), name=DAY_DIMENSION)
+    largest_half_reserve = pandas.Series(
+        [
+            reserve.iloc[day * HOURS_PER_DAY : (day + 1) * HOURS_PER_DAY].max() / 2
+            for day in days
+        ],
+        index=days,
+    )
+    first = model.add_variables(
+        lower=0,
+        upper=largest_half_reserve,
+        coords=[days],
+        name="battery_reserve_first_kwh",
+    )
+    second = model.add_variables(
+        lower=0,
+        upper=largest_half_reserve,
+        coords=[days],
+        name="battery_reserve_second_kwh",
+    )
+    for day in days:
+        day_hours = list(hours[day * HOURS_PER_DAY : (day + 1) * HOURS_PER_DAY])
+        model.add_constraints(
+            variables.state_of_charge.loc[day_hours] + first.loc[day] + second.loc[day]
+            >= specification.minimum_soc_kwh + reserve.loc[day_hours],
+            name=f"battery_soft_reserve_day_{day}",
+        )
+    return BatteryVariables(
+        charge=variables.charge,
+        discharge=variables.discharge,
+        state_of_charge=variables.state_of_charge,
+        reserve_deficits=(first, second),
+    )
+
+
+def reserve_penalty(
+    variables: BatteryVariables, specification: BatterySpecification
+) -> LinearExpression | int:
+    if variables.reserve_deficits is None:
+        return 0
+    first, second = variables.reserve_deficits
+    first_penalty, second_penalty = specification.reserve_penalties_eur_per_kwh
+    return first_penalty * first.sum() + second_penalty * second.sum()
 
 
 def _forbid_simultaneous_charge_and_discharge(
@@ -105,7 +167,10 @@ def _require_final_state_of_charge(
 
 
 def read_battery_hour(
-    variables: BatteryVariables, hour: int, throughput_cost_eur_per_kwh: float = 0.0
+    variables: BatteryVariables,
+    hour: int,
+    throughput_cost_eur_per_kwh: float = 0.0,
+    reserve_kwh: float = 0.0,
 ) -> PlannedBatteryHour:
     discharge_kw = float(variables.discharge.solution.values[hour])
     return PlannedBatteryHour(
@@ -113,4 +178,5 @@ def read_battery_hour(
         discharge_kw=discharge_kw,
         degradation_cost_eur=discharge_kw * throughput_cost_eur_per_kwh,
         state_of_charge_kwh=float(variables.state_of_charge.solution.values[hour]),
+        reserve_kwh=reserve_kwh,
     )

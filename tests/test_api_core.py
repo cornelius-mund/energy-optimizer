@@ -132,6 +132,7 @@ def test_optimize_schedules_the_battery_between_cheap_and_expensive_hours(
         state_of_charge_kwh=7.0,
         state_of_charge_percent=70.0,
         degradation_cost_eur=0.0,
+        reserve_percent=0.0,
     ) | {"discharge_kw": pytest.approx(0.0, abs=1e-6)}
     assert discharging_hour["battery"]["discharge_kw"] == pytest.approx(2.0)
     assert discharging_hour["battery"]["state_of_charge_percent"] == pytest.approx(50.0)

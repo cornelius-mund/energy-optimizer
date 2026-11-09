@@ -2001,6 +2001,12 @@ components:
           title: Degradation Cost Eur
           description: Battery wear cost of the hour in EUR
           default: 0
+        reserve_percent:
+          type: number
+          title: Reserve Percent
+          description: Soft reserve above the minimum state of charge kept for load
+            forecast errors at the end of the hour, in percent of the capacity
+          default: 0
       additionalProperties: false
       type: object
       required:

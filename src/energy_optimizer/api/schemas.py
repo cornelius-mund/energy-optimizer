@@ -682,6 +682,11 @@ class PlannedBatteryResponse(_StrictModel):
     degradation_cost_eur: float = Field(
         default=0, description="Battery wear cost of the hour in EUR"
     )
+    reserve_percent: float = Field(
+        default=0,
+        description="Soft reserve above the minimum state of charge kept for load "
+        "forecast errors at the end of the hour, in percent of the capacity",
+    )
 
 
 class PlannedEvResponse(_StrictModel):
