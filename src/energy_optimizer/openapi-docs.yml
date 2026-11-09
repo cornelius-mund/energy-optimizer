@@ -2094,6 +2094,12 @@ components:
           - $ref: '#/components/schemas/PlannedEvResponse'
           - type: 'null'
           description: EV charging; null when no car is planned
+        optimizer_cost_eur:
+          type: number
+          title: Optimizer Cost Eur
+          description: 'Cost of the hour as the optimizer values it: cash cost plus
+            wear and penalties minus the value of the energy stored in the hour'
+          default: 0
       additionalProperties: false
       type: object
       required:

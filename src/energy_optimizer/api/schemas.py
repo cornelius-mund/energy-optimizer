@@ -726,6 +726,13 @@ class PlannedHourResponse(_StrictModel):
     ev: PlannedEvResponse | None = Field(
         default=None, description="EV charging; null when no car is planned"
     )
+    optimizer_cost_eur: float = Field(
+        default=0,
+        description=(
+            "Cost of the hour as the optimizer values it: cash cost plus wear "
+            "and penalties minus the value of the energy stored in the hour"
+        ),
+    )
 
 
 class OptimizationResponse(_StrictModel):

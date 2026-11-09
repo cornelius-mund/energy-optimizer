@@ -20,6 +20,10 @@ from energy_optimizer.optimization.ev_model import (
     read_ev_hour,
     shortfall_kwh,
 )
+from energy_optimizer.optimization.optimizer_cost import (
+    battery_hourly_costs,
+    ev_hourly_costs,
+)
 from energy_optimizer.optimization.problem import (
     Plan,
     PlannedHour,
@@ -199,6 +203,7 @@ def _read_plan(
     imported_kw = variables.grid_import.solution.values
     exported_kw = variables.grid_export.solution.values
     pv_used_kw = variables.pv_used.solution.values
+    storage_costs = _storage_hourly_costs(problem, variables)
     hours = tuple(
         PlannedHour(
             start_time=problem.start_time + timedelta(hours=hour),
@@ -227,6 +232,10 @@ def _read_plan(
                 if variables.ev is None or problem.ev is None
                 else read_ev_hour(variables.ev, problem.ev, hour)
             ),
+            optimizer_cost_eur=float(imported_kw[hour])
+            * problem.import_price_eur_per_kwh[hour]
+            - float(exported_kw[hour]) * problem.export_price_eur_per_kwh[hour]
+            + storage_costs[hour],
         )
         for hour in range(problem.hours())
     )
@@ -253,6 +262,29 @@ def _shortfall_kwh(variables: _GridAndPvVariables) -> float:
     if variables.ev is None:
         return 0.0
     return shortfall_kwh(variables.ev)
+
+
+def _storage_hourly_costs(
+    problem: PlanningProblem, variables: _GridAndPvVariables
+) -> list[float]:
+    costs = [0.0] * problem.hours()
+    if variables.battery is not None and problem.battery is not None:
+        costs = [
+            cost + battery_cost
+            for cost, battery_cost in zip(
+                costs,
+                battery_hourly_costs(variables.battery, problem.battery),
+                strict=True,
+            )
+        ]
+    if variables.ev is not None and problem.ev is not None:
+        costs = [
+            cost + ev_cost
+            for cost, ev_cost in zip(
+                costs, ev_hourly_costs(variables.ev, problem.ev), strict=True
+            )
+        ]
+    return costs
 
 
 def _reserve_kwh(problem: PlanningProblem, hour: int) -> float:
