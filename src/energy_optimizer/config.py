@@ -238,7 +238,7 @@ class HomeAssistantBatteryConfiguration(_StrictModel):
         ge=0,
         le=10,
         description="Value of a kWh left in the battery when end_of_horizon is "
-        "value_stored_energy; defaults to the mean import price of the plan",
+        "value_stored_energy; defaults to the cheapest import price of the plan",
     )
 
     @model_validator(mode="before")

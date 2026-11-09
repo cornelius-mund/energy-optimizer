@@ -231,6 +231,17 @@ def planning_horizon(
     ]
 
 
+def terminal_value_of_stored_energy(
+    battery: BatteryData, import_prices: tuple[float, ...]
+) -> float:
+    """A kWh left at the end replaces a later import, and the cheapest hour of the
+    plan bounds what refilling it costs. Valuing it higher (for example at the mean
+    price) would make the plan charge from the grid only to end full.
+    """
+    cheapest_import_price = min(import_prices)
+    return cheapest_import_price * math.sqrt(battery.battery_efficiency)
+
+
 class PlanGenerator:
     """Plan callable for the orchestrator: solve the snapshot and persist the plan."""
 
@@ -327,8 +338,7 @@ class PlanGenerator:
             return None
         if settings.end_of_horizon_value_eur_per_kwh is not None:
             return settings.end_of_horizon_value_eur_per_kwh
-        mean_import_price = sum(import_prices) / len(import_prices)
-        return mean_import_price * math.sqrt(battery.battery_efficiency)
+        return terminal_value_of_stored_energy(battery, import_prices)
 
     def _throughput_cost(self) -> float:
         home_assistant = self.configuration.home_assistant
