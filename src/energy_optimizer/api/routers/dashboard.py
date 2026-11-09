@@ -201,6 +201,10 @@ def _pv_dashboard_series(
 
 
 type PriceOfHour = Callable[[float, datetime], float]
+PREDICTED_PRICE_SERIES_IDS = {
+    "import": "price_predicted_forecast",
+    "export": "export_price_predicted_forecast",
+}
 
 
 def tariff_prices(configuration: Configuration) -> tuple[PriceOfHour, PriceOfHour]:
@@ -233,14 +237,19 @@ def _predicted_price_series(
     published_until: datetime | None,
     freshness: Freshness,
     price: PriceOfHour,
+    direction: Literal["import", "export"],
 ) -> DashboardSeries | None:
-    """The EPEX Predictor market price for the hours after the last published
-    day-ahead price; earlier hours are left empty so both never overlap.
+    """The price of the EPEX Predictor forecast for the hours after the last
+    published day-ahead price; earlier hours are left empty so both never overlap.
     """
     predicted = {
         timestamp: value
         for timestamp, value in _priced(
-            data.timestamps, data.import_price_eur_per_kwh, price
+            data.timestamps,
+            data.import_price_eur_per_kwh
+            if direction == "import"
+            else data.export_price_eur_per_kwh,
+            price,
         ).items()
         if published_until is None or timestamp >= published_until
     }
@@ -248,8 +257,8 @@ def _predicted_price_series(
         return None
     selected = align_hourly_values(predicted, start, end)
     return DashboardSeries(
-        id="price_predicted_forecast",
-        data_type="import_price",
+        id=PREDICTED_PRICE_SERIES_IDS[direction],
+        data_type=f"{direction}_price",
         scenario_kind="forecast",
         timestamps=[timestamp for timestamp, _ in selected],
         values=[value for _, value in selected],
@@ -498,11 +507,11 @@ def _forecast_dashboard_data(
                     continue
                 if direction_series is not None:
                     series.append(direction_series)
-    predicted = _predicted_price_dashboard_series(
-        configuration, store, start, end, published_prices
+    series.extend(
+        _predicted_price_dashboard_series(
+            configuration, store, start, end, published_prices
+        )
     )
-    if predicted is not None:
-        series.append(predicted)
     response = _dashboard_response(start, end, series, diagnostics)
     if response.status == "unavailable":
         logger.warning(
@@ -523,19 +532,19 @@ def _predicted_price_dashboard_series(
     start: datetime,
     end: datetime,
     published_prices: ElectricityPriceData | None,
-) -> DashboardSeries | None:
+) -> list[DashboardSeries]:
     epex_predictor = configuration.epex_predictor
     if epex_predictor is None:
-        return None
+        return []
     key = ProviderDataKey(
         "electricity-price-forecast", "epex-predictor", epex_predictor.region.lower()
     )
     try:
         data = store.load(key, ELECTRICITY_PRICE_ADAPTER)
     except ProviderDataStoreError:
-        return None
+        return []
     if data is None:
-        return None
+        return []
     published_until = (
         None
         if published_prices is None
@@ -543,10 +552,18 @@ def _predicted_price_dashboard_series(
     )
     importer = EpexPredictorImporter(epex_predictor)
     freshness: Freshness = "fresh" if importer.is_fresh(data) else "stale"
-    import_price, _ = tariff_prices(configuration)
-    return _predicted_price_series(
-        data, start, end, published_until, freshness, import_price
+    import_price, export_price = tariff_prices(configuration)
+    directions: tuple[tuple[PriceOfHour, Literal["import", "export"]], ...] = (
+        (import_price, "import"),
+        (export_price, "export"),
     )
+    predicted = (
+        _predicted_price_series(
+            data, start, end, published_until, freshness, price, direction
+        )
+        for price, direction in directions
+    )
+    return [series for series in predicted if series is not None]
 
 
 @router.get(

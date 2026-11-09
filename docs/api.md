@@ -598,7 +598,8 @@ not interpolated or treated as zero. The forecast charts have the same per-chart
 legends, show and hide behavior, and point tooltips as the Historic actuals tab.
 
 With `epex_predictor` configured, the price chart adds the series
-`price_predicted_forecast` ("Price forecast (EPEX Predictor)"): the predicted market
+`price_predicted_forecast` ("Import price forecast (EPEX Predictor)") and
+`export_price_predicted_forecast` ("Export price forecast (EPEX Predictor)"): the predicted
 price for the hours after the last published day-ahead price, drawn dashed, so it
 never overlaps the published prices. A note below the chart says that solid lines
 are published prices and the dashed line is the forecast and credits its data
