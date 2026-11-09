@@ -639,6 +639,12 @@ mistaken for historic actuals or forecast inputs.
   the plan range (end exclusive), when the data snapshot was taken, battery wear
   cost, EV shortfall at the deadline, and the load forecast method with its backtest
   error, each only when the plan has it.
+- **Charts:** above the table, three charts like the Forecast tab: planned power
+  (load, PV, grid import and export, battery charge and discharge, EV charge in kW),
+  state of charge (battery and EV in %) and cost (cash cost, optimizer cost and
+  cumulative cash cost per hour in EUR). Each has a legend whose entries show or
+  hide a series and rescale the value axis, and point tooltips; series without data
+  are left out.
 - **Table:** one row per planned hour in the dashboard time zone with load, PV, grid
   import and export in kW, battery charge, discharge and state of charge when a
   battery was planned, EV charge power and state of charge when a car was planned,

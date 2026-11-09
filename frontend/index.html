@@ -156,6 +156,44 @@
           <dl id="plan-summary" class="plan-summary" aria-label="Plan summary"></dl>
           <p id="plan-empty" class="excluded-empty" hidden>No plan has been created yet. A plan appears after the first complete refresh of all planning inputs.</p>
           <p id="plan-price-attribution" class="excluded-lede" hidden>Prices after the published day-ahead prices are forecasts by EPEX Predictor (prices CC-BY-4.0 energy-charts.info and ENTSO-E, weather data Open-Meteo.com).</p>
+          <div id="plan-charts" class="chart-wrap" hidden>
+            <div class="chart-stack" role="group" aria-label="Plan charts separated by unit">
+              <div id="plan-power-panel" class="chart-panel" hidden>
+                <svg id="plan-power-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-label="Planned power (kW)" aria-describedby="plan-power-chart-description">
+                  <desc id="plan-power-chart-description">Planned power per planned hour in kW.</desc>
+                  <text class="axis-unit" id="plan-power-axis-unit" x="4" y="12">kW</text>
+                  <g id="plan-power-grid-lines"></g>
+                  <g id="plan-power-series-paths"></g>
+                  <g id="plan-power-points"></g>
+                  <g id="plan-power-labels"></g>
+                </svg>
+                <div id="plan-power-legend" class="chart-legend" role="group" aria-label="Planned power series"></div>
+              </div>
+              <div id="plan-state-panel" class="chart-panel" hidden>
+                <svg id="plan-state-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-label="Planned state of charge (%)" aria-describedby="plan-state-chart-description">
+                  <desc id="plan-state-chart-description">Planned state of charge per planned hour in %.</desc>
+                  <text class="axis-unit" id="plan-state-axis-unit" x="4" y="12">%</text>
+                  <g id="plan-state-grid-lines"></g>
+                  <g id="plan-state-series-paths"></g>
+                  <g id="plan-state-points"></g>
+                  <g id="plan-state-labels"></g>
+                </svg>
+                <div id="plan-state-legend" class="chart-legend" role="group" aria-label="Planned state of charge series"></div>
+              </div>
+              <div id="plan-cost-panel" class="chart-panel" hidden>
+                <svg id="plan-cost-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-label="Planned cost (EUR)" aria-describedby="plan-cost-chart-description">
+                  <desc id="plan-cost-chart-description">Planned cost per planned hour in EUR.</desc>
+                  <text class="axis-unit" id="plan-cost-axis-unit" x="4" y="12">EUR</text>
+                  <g id="plan-cost-grid-lines"></g>
+                  <g id="plan-cost-series-paths"></g>
+                  <g id="plan-cost-points"></g>
+                  <g id="plan-cost-labels"></g>
+                </svg>
+                <div id="plan-cost-legend" class="chart-legend" role="group" aria-label="Planned cost series"></div>
+              </div>
+            </div>
+            <div class="point-tooltip" role="status" aria-live="polite" hidden></div>
+          </div>
           <div class="table-wrap plan-table-wrap">
             <table id="plan-table" class="excluded-table plan-table" hidden>
               <caption class="visually-hidden">Planned hourly energy flows, battery and vehicle states and costs</caption>
