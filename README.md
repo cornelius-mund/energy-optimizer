@@ -512,6 +512,14 @@ source (see EV history from InfluxDB) the plan learns from the history:
   a share of at least 0.5. The current plug state holds until the learned pattern
   next changes, and hours without at least two samples keep the current state.
 
+Every kWh stored in the car is worth the cheapest import price of the plan (what
+charging it later costs at best), so PV surplus goes into the car while it is home
+instead of being exported for less, also with the battery adding the rest up to
+the charger minimum power, and the plan no longer ends with an almost empty car.
+Charging from the grid only to store energy never pays because of the charging
+losses. `target_soc_percent` (default 100) caps the state of charge; the credit is
+not part of the reported objective.
+
 Without a history the car is expected at the charger in its current state and
 not to drive. Energy the plan cannot provide for a morning minimum or for
 driving is reported in `ev_shortfall_kwh` instead of failing. Each planned hour's

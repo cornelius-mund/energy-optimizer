@@ -7,7 +7,11 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from energy_optimizer.config import EvChargingConfiguration
-from energy_optimizer.optimization import EvSpecification, PlanStatus
+from energy_optimizer.optimization import (
+    BatterySpecification,
+    EvSpecification,
+    PlanStatus,
+)
 from energy_optimizer.optimization.ev_patterns import (
     EvPatterns,
     driving_consumption,
@@ -17,6 +21,7 @@ from energy_optimizer.optimization.ev_patterns import (
 from energy_optimizer.optimization.plan_generation import (
     daily_minimum_charging,
     morning_minimums,
+    stored_ev_energy_value,
 )
 from energy_optimizer.providers.interfaces import (
     EvData,
@@ -166,16 +171,21 @@ def test_weekday_overrides_change_the_minimum_and_the_time() -> None:
     assert charging.day_targets()[3] == (30.0, time(7))
 
 
-def _ev(state_of_charge_kwh: float, plugged_in: bool) -> EvData:
+def _ev(
+    state_of_charge_kwh: float,
+    plugged_in: bool,
+    charge_efficiency: float = 1.0,
+    minimum_charge_kw: float = 1.4,
+) -> EvData:
     return EvData(
         schema_version="1",
         start_time=MONDAY,
         state_of_charge_kwh=state_of_charge_kwh,
         capacity_kwh=CAPACITY_KWH,
         plugged_in=plugged_in,
-        minimum_charge_kw=1.4,
+        minimum_charge_kw=minimum_charge_kw,
         maximum_charge_kw=11.0,
-        charge_efficiency=1.0,
+        charge_efficiency=charge_efficiency,
         unit="kWh",
         source=SourceMetadata(provider="test"),
         retrieved_at=MONDAY,
@@ -236,3 +246,105 @@ def test_a_minimum_the_car_cannot_reach_is_reported_as_shortfall() -> None:
 
     assert plan.status is PlanStatus.OPTIMAL
     assert plan.ev_shortfall_kwh == pytest.approx(20.0)
+
+
+ALWAYS_HOME = EvPatterns(consumption_kwh_by_weekday={}, plugged_in_share={})
+FEED_IN_EUR_PER_KWH = 0.07
+IMPORT_EUR_PER_KWH = 0.30
+CAR_EFFICIENCY = 0.9
+BATTERY_LEG_EFFICIENCY = 0.9
+
+
+def _valued_car(
+    state_of_charge_kwh: float, hours: int, minimum_charge_kw: float = 1.4
+) -> EvSpecification:
+    sunday_noon = MONDAY + timedelta(days=6, hours=12)
+    return daily_minimum_charging(
+        _ev(
+            state_of_charge_kwh=state_of_charge_kwh,
+            plugged_in=True,
+            charge_efficiency=CAR_EFFICIENCY,
+            minimum_charge_kw=minimum_charge_kw,
+        ),
+        EvChargingConfiguration(strategy="daily_minimum"),
+        _hours(sunday_noon, hours),
+        UTC_ZONE,
+        ALWAYS_HOME,
+        stored_ev_energy_value((IMPORT_EUR_PER_KWH,) * hours),
+    )
+
+
+def test_stored_energy_in_the_car_is_worth_the_cheapest_import_price() -> None:
+    assert stored_ev_energy_value((0.35, 0.28, 0.41)) == pytest.approx(0.28)
+    assert stored_ev_energy_value((-0.02, 0.30)) == 0.0
+    assert stored_ev_energy_value(()) == 0.0
+
+
+def test_pv_surplus_goes_into_the_car_instead_of_the_grid() -> None:
+    plan = solve(
+        replace(
+            problem(
+                (1.0, 1.0),
+                (IMPORT_EUR_PER_KWH,) * 2,
+                pv_forecast_kw=(7.0, 0.0),
+                export_price_eur_per_kwh=(FEED_IN_EUR_PER_KWH,) * 2,
+            ),
+            ev=_valued_car(state_of_charge_kwh=50.0, hours=2),
+        )
+    )
+
+    sunny = plan.hours[0]
+    assert sunny.ev is not None
+    assert sunny.ev.charge_kw == pytest.approx(6.0)
+    assert sunny.grid_export_kw == pytest.approx(0.0, abs=TOLERANCE)
+    assert plan.hours[1].ev is not None
+    assert plan.hours[1].ev.charge_kw == pytest.approx(0.0, abs=TOLERANCE)
+
+
+def test_the_car_is_not_charged_from_the_grid_just_to_store_energy() -> None:
+    plan = solve(
+        replace(
+            problem((1.0,) * 3, (IMPORT_EUR_PER_KWH,) * 3),
+            ev=_valued_car(state_of_charge_kwh=50.0, hours=3),
+        )
+    )
+
+    assert all(
+        hour.ev is not None and hour.ev.charge_kw == pytest.approx(0.0, abs=TOLERANCE)
+        for hour in plan.hours
+    )
+
+
+def test_the_battery_tops_up_pv_surplus_to_the_charger_minimum() -> None:
+    """A full battery cannot take the 3 kW surplus; the wall box needs 4.1 kW, so
+    the battery adds 1.1 kW instead of exporting the surplus for 7 ct."""
+    full_battery = BatterySpecification(
+        minimum_soc_kwh=0.0,
+        maximum_soc_kwh=8.0,
+        initial_soc_kwh=8.0,
+        final_soc_kwh=0.0,
+        maximum_charge_kw=5.0,
+        maximum_discharge_kw=5.0,
+        charge_efficiency=BATTERY_LEG_EFFICIENCY,
+        discharge_efficiency=BATTERY_LEG_EFFICIENCY,
+        terminal_value_eur_per_kwh=IMPORT_EUR_PER_KWH * BATTERY_LEG_EFFICIENCY,
+    )
+    plan = solve(
+        replace(
+            problem(
+                (0.0,),
+                (IMPORT_EUR_PER_KWH,),
+                pv_forecast_kw=(3.0,),
+                export_price_eur_per_kwh=(FEED_IN_EUR_PER_KWH,),
+                battery=full_battery,
+            ),
+            ev=_valued_car(state_of_charge_kwh=50.0, hours=1, minimum_charge_kw=4.1),
+        )
+    )
+
+    (hour,) = plan.hours
+    assert hour.ev is not None and hour.battery is not None
+    assert hour.ev.charge_kw == pytest.approx(4.1)
+    assert hour.battery.discharge_kw == pytest.approx(1.1)
+    assert hour.grid_import_kw == pytest.approx(0.0, abs=TOLERANCE)
+    assert hour.grid_export_kw == pytest.approx(0.0, abs=TOLERANCE)

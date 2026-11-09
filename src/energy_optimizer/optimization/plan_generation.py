@@ -214,15 +214,27 @@ def morning_minimums(
     return tuple(minimums)
 
 
+def stored_ev_energy_value(import_prices: tuple[float, ...]) -> float:
+    """A kWh in the car saves charging it later, at best in the cheapest hour of
+    the plan. Valuing it at that price (not divided by the charging efficiency)
+    keeps grid charging just to store energy unprofitable.
+    """
+    return max(min(import_prices), 0.0) if import_prices else 0.0
+
+
 def daily_minimum_charging(
     ev: EvData,
     charging: EvChargingConfiguration,
     hour_starts: list[datetime],
     time_zone: ZoneInfo,
     patterns: EvPatterns,
+    stored_value_eur_per_kwh: float = 0.0,
 ) -> EvSpecification:
     """Charge on the cheapest days while every morning keeps its minimum; the
     car is expected home and driving as its learned weekly pattern says.
+
+    Every stored kWh is worth ``stored_value_eur_per_kwh``, so PV surplus goes
+    into the car rather than being exported for less.
     """
     local_hours = [start.astimezone(time_zone) for start in hour_starts]
     plugged_in = expected_plugged_in(patterns, local_hours, ev.plugged_in)
@@ -239,6 +251,8 @@ def daily_minimum_charging(
         morning_minimums=morning_minimums(
             charging, hour_starts, time_zone, ev.capacity_kwh
         ),
+        charge_limit_kwh=charging.limit_soc_percent / 100 * ev.capacity_kwh,
+        value_eur_per_kwh=stored_value_eur_per_kwh,
     )
 
 
@@ -249,9 +263,17 @@ def ev_specification(
     time_zone: ZoneInfo,
     surplus_kw: tuple[float, ...],
     patterns: EvPatterns = NO_PATTERNS,
+    import_prices: tuple[float, ...] = (),
 ) -> EvSpecification | None:
     if charging.strategy == "daily_minimum":
-        return daily_minimum_charging(ev, charging, hour_starts, time_zone, patterns)
+        return daily_minimum_charging(
+            ev,
+            charging,
+            hour_starts,
+            time_zone,
+            patterns,
+            stored_ev_energy_value(import_prices),
+        )
     limit_kwh = charging.limit_soc_percent / 100 * ev.capacity_kwh
     if charging.strategy == "surplus":
         return pv_surplus_charging(ev, limit_kwh, surplus_kw)
@@ -530,7 +552,7 @@ class PlanGenerator:
                 if isinstance(battery, BatteryData)
                 else None
             ),
-            ev=self._ev(snapshot, hour_starts, surplus_kw),
+            ev=self._ev(snapshot, hour_starts, surplus_kw, import_prices),
         )
         return problem, forecast, price_forecast_from
 
@@ -539,6 +561,7 @@ class PlanGenerator:
         snapshot: ProviderDataSnapshot,
         hour_starts: list[datetime],
         surplus_kw: tuple[float, ...],
+        import_prices: tuple[float, ...],
     ) -> EvSpecification | None:
         ev = snapshot.data.get("ev")
         charging = self.configuration.ev_charging
@@ -552,7 +575,7 @@ class PlanGenerator:
             else NO_PATTERNS
         )
         return ev_specification(
-            ev, charging, hour_starts, time_zone, surplus_kw, patterns
+            ev, charging, hour_starts, time_zone, surplus_kw, patterns, import_prices
         )
 
 
