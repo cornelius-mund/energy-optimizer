@@ -36,6 +36,7 @@
   const planHead = document.querySelector("#plan-head");
   const planRows = document.querySelector("#plan-rows");
   const planPriceAttribution = document.querySelector("#plan-price-attribution");
+  const pricePredictionNote = document.querySelector("#price-prediction-note");
   const excludedSources = document.querySelector("#excluded-sources");
   const excludedSummary = document.querySelector("#excluded-summary");
   const excludedEmpty = document.querySelector("#excluded-empty");
@@ -170,7 +171,7 @@
     if (!Number.isFinite(tickSpan) || tickSpan <= 0) return 1;
     return Math.min(6, Math.max(1, Math.ceil(-Math.log10(tickSpan))));
   };
-  const unitForSeries = (item) => item.id === "import_price_forecast" || item.id === "export_price_forecast"
+  const unitForSeries = (item) => ["import_price_forecast", "export_price_forecast", "price_predicted_forecast"].includes(item.id)
     ? "EUR/kWh"
     : item.id === "pv_generation_forecast" || item.id === "household_load_actual"
       ? "kW"
@@ -188,6 +189,7 @@
     pv_generation_actual: "PV generation",
     import_price_forecast: "Import price",
     export_price_forecast: "Export price",
+    price_predicted_forecast: "Price forecast (EPEX Predictor)",
     inverter_charge_efficiency_actual: "Inverter charge efficiency",
     inverter_discharge_efficiency_actual: "Inverter discharge efficiency",
     battery_efficiency_actual: "Battery round-trip efficiency",
@@ -269,7 +271,7 @@
       "household_load_actual", "grid_import_actual", "grid_export_actual", "pv_generation_actual", "pv_generation_forecast",
     ].includes(item.id)),
     price: series.filter((item) => [
-      "import_price_forecast", "export_price_forecast", "import_price_actual", "export_price_actual",
+      "import_price_forecast", "export_price_forecast", "price_predicted_forecast", "import_price_actual", "export_price_actual",
     ].includes(item.id)),
     battery: series.filter((item) => item.id === "battery_state_of_charge_actual"),
   });
@@ -333,6 +335,7 @@
     pv_generation_actual: "series-3",
     import_price_forecast: "series-1",
     export_price_forecast: "series-2",
+    price_predicted_forecast: "series-4",
     import_price_actual: "series-1",
     export_price_actual: "series-2",
   }[item.id] || `series-${index}`);
@@ -770,6 +773,8 @@
     const hasPv = hasSeriesData(series, "pv_generation_forecast");
     const hasImportPrice = hasSeriesData(series, "import_price_forecast");
     const hasExportPrice = hasSeriesData(series, "export_price_forecast");
+    const hasPredictedPrice = hasSeriesData(series, "price_predicted_forecast");
+    pricePredictionNote.hidden = !(forecast && hasPredictedPrice);
     const efficiencyHistory = efficiency && series.find(
       (item) => item.available_start_time && item.available_end_time,
     );
@@ -784,7 +789,7 @@
     if (forecast) {
       const forecastTypes = [];
       if (hasPv) forecastTypes.push("PV");
-      if (hasImportPrice || hasExportPrice) forecastTypes.push("price");
+      if (hasImportPrice || hasExportPrice || hasPredictedPrice) forecastTypes.push("price");
       heading.textContent = forecastTypes.length
         ? `${forecastTypes.join(" and ")} forecast`
         : "Forecast";

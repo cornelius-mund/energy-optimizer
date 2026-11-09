@@ -597,6 +597,13 @@ published at 14:00 local time. Missing or partial observations remain gaps and a
 not interpolated or treated as zero. The forecast charts have the same per-chart
 legends, show and hide behavior, and point tooltips as the Historic actuals tab.
 
+With `epex_predictor` configured, the price chart adds the series
+`price_predicted_forecast` ("Price forecast (EPEX Predictor)"): the predicted market
+price for the hours after the last published day-ahead price, drawn dashed, so it
+never overlaps the published prices. A note below the chart says that solid lines
+are published prices and the dashed line is the forecast, credits its data sources,
+and states that all prices are market prices before grid fees and taxes.
+
 The Docker image sets `ENERGY_OPTIMIZER_FRONTEND_DIRECTORY=/app/frontend` so the
 dashboard remains available after the Python application is installed into the
 image. Source-tree deployments may omit this setting when the repository's

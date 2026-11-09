@@ -1,6 +1,7 @@
 """Browser end-to-end coverage for the unified dashboard."""
 
 import math
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -1591,3 +1592,53 @@ def test_unusable_time_zone_is_reported_and_no_data_is_requested(
         expect(page.locator("#status")).to_have_class("status error")
         expect(page.locator("#status")).to_contain_text(message)
     assert queries == []
+
+
+def test_forecast_tab_shows_the_price_forecast_after_the_published_prices(
+    provider_store: ProviderDataStore, page: Page
+) -> None:
+    start = _hour(1)
+    end = start + timedelta(hours=4)
+    _seed_forecasts(provider_store, start)
+    predicted = _forecast(
+        ElectricityPriceData,
+        "epex-predictor",
+        "de",
+        end,
+        timestamps=tuple(start + timedelta(hours=hour) for hour in range(4)),
+        import_price_eur_per_kwh=(0.50, 0.50, 0.31, 0.27),
+        export_price_eur_per_kwh=(0.50, 0.50, 0.31, 0.27),
+        unit="EUR/kWh",
+    )
+    _save(provider_store, "electricity-price-forecast", predicted)
+
+    _open_dashboard(page, "forecast", (start, end))
+
+    expect(page.locator("#price-legend .legend-item")).to_have_text(
+        [
+            "Import price (EUR/kWh)",
+            "Export price (EUR/kWh)",
+            "Price forecast (EPEX Predictor) (EUR/kWh)",
+        ]
+    )
+    expect(
+        page.locator("#price-legend [data-series-id=price_predicted_forecast]")
+    ).to_have_class(re.compile(r"legend-4"))
+    expect(page.locator("#price-series-paths path.series-4")).to_have_count(1)
+    expect(page.locator("#price-points circle.point-4")).to_have_count(2)
+    expect(page.locator("#price-prediction-note")).to_be_visible()
+    expect(page.locator("#price-prediction-note")).to_contain_text(
+        "dashed line is the EPEX Predictor forecast"
+    )
+
+
+def test_the_price_forecast_note_is_hidden_without_a_forecast(
+    provider_store: ProviderDataStore, page: Page
+) -> None:
+    start, end = _window()
+    _seed_forecasts(provider_store, start)
+
+    _open_dashboard(page, "forecast", (start, end))
+
+    expect(page.locator("#price-legend .legend-item")).to_have_count(2)
+    expect(page.locator("#price-prediction-note")).to_be_hidden()
