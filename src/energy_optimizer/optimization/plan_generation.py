@@ -15,6 +15,7 @@ from energy_optimizer.control.ev_controller import (
     merge_schedule,
 )
 from energy_optimizer.optimization.battery_reserve import (
+    headroom_schedule,
     load_error_kw,
     reserve_schedule,
 )
@@ -472,6 +473,7 @@ class PlanGenerator:
         battery: BatteryData,
         import_prices: tuple[float, ...],
         load_error_mae_kw: float | None,
+        pv_forecast_kw: tuple[float, ...],
     ) -> BatterySpecification:
         specification = battery_specification(
             battery,
@@ -484,6 +486,7 @@ class PlanGenerator:
             if home_assistant is None or home_assistant.battery is None
             else home_assistant.battery.reserve
         )
+        specification = self._with_headroom(specification, battery, pv_forecast_kw)
         if settings is None:
             return specification
         return replace(
@@ -495,6 +498,34 @@ class PlanGenerator:
                 battery.maximum_soc_kwh - battery.minimum_soc_kwh,
             ),
             reserve_penalties_eur_per_kwh=(
+                settings.first_penalty_eur_per_kwh,
+                settings.second_penalty_eur_per_kwh,
+            ),
+        )
+
+    def _with_headroom(
+        self,
+        specification: BatterySpecification,
+        battery: BatteryData,
+        pv_forecast_kw: tuple[float, ...],
+    ) -> BatterySpecification:
+        home_assistant = self.configuration.home_assistant
+        settings = (
+            None
+            if home_assistant is None or home_assistant.battery is None
+            else home_assistant.battery.headroom
+        )
+        if settings is None:
+            return specification
+        return replace(
+            specification,
+            headroom_kwh=headroom_schedule(
+                settings,
+                pv_forecast_kw,
+                battery.capacity_kwh,
+                battery.maximum_soc_kwh - battery.minimum_soc_kwh,
+            ),
+            headroom_penalties_eur_per_kwh=(
                 settings.first_penalty_eur_per_kwh,
                 settings.second_penalty_eur_per_kwh,
             ),
@@ -583,7 +614,10 @@ class PlanGenerator:
             time_limit_seconds=self.configuration.solver.time_limit_seconds,
             battery=(
                 self._battery_specification(
-                    battery, import_prices, forecast.mean_absolute_error_kw
+                    battery,
+                    import_prices,
+                    forecast.mean_absolute_error_kw,
+                    pv_forecast_kw,
                 )
                 if isinstance(battery, BatteryData)
                 else None

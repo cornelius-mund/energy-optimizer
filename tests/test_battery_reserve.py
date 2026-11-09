@@ -7,10 +7,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from energy_optimizer.config import BatteryReserveConfiguration
+from energy_optimizer.config import (
+    BatteryHeadroomConfiguration,
+    BatteryReserveConfiguration,
+)
 from energy_optimizer.optimization import PlanStatus
 from energy_optimizer.optimization.battery_reserve import (
     STANDARD_DEVIATION_PER_MEAN_ABSOLUTE_ERROR,
+    headroom_schedule,
     load_error_kw,
     reserve_schedule,
 )
@@ -129,3 +133,106 @@ def test_the_plan_sizes_the_reserve_from_the_load_forecast_error(
         (0.0, 0.5, 0.5 * math.sqrt(2))
     )
     assert problem_with_reserve.battery.reserve_penalties_eur_per_kwh == (0.05, 0.15)
+
+
+HEADROOM = BatteryHeadroomConfiguration(percent=10, unplanned_hours=1)
+
+
+def test_headroom_is_kept_only_in_planned_hours_with_pv() -> None:
+    headroom = headroom_schedule(
+        HEADROOM, (2.0, 3.0, 0.0, 1.0), capacity_kwh=40.0, usable_kwh=36.0
+    )
+
+    assert headroom == (0.0, 4.0, 0.0, 4.0)
+
+
+def _surplus_day_plan(
+    alternative_value_eur_per_kwh: float,
+) -> tuple[float, float]:
+    """A battery at 9 of 10 kWh, 2 kWh PV surplus, and a load later that could
+    take battery energy now at a price; returns the highest state of charge and
+    the export."""
+    full_battery = replace(
+        battery(initial_soc_kwh=9.0, final_soc_kwh=0.0, maximum_charge_kw=5.0),
+        terminal_value_eur_per_kwh=0.27,
+        headroom_kwh=(1.0, 1.0),
+        headroom_penalties_eur_per_kwh=(0.05, 0.15),
+    )
+    plan = solve(
+        problem(
+            (0.0, 1.0),
+            (alternative_value_eur_per_kwh, alternative_value_eur_per_kwh),
+            pv_forecast_kw=(2.0, 0.0),
+            export_price_eur_per_kwh=(0.07, 0.07),
+            battery=full_battery,
+        )
+    )
+    highest = max(
+        hour.battery.state_of_charge_kwh for hour in plan.hours if hour.battery
+    )
+    return highest, sum(hour.grid_export_kw for hour in plan.hours)
+
+
+def test_the_battery_still_fills_up_when_nothing_better_takes_the_surplus() -> None:
+    highest, exported = _surplus_day_plan(0.30)
+
+    assert highest == pytest.approx(10.0)
+    assert exported == pytest.approx(1.0)
+
+
+def test_headroom_penalty_is_charged_once_at_the_fullest_hour() -> None:
+    full_battery = replace(
+        battery(initial_soc_kwh=9.0, final_soc_kwh=0.0, maximum_charge_kw=5.0),
+        terminal_value_eur_per_kwh=0.27,
+        headroom_kwh=(1.0, 1.0),
+        headroom_penalties_eur_per_kwh=(0.05, 0.15),
+    )
+    plan = solve(
+        problem(
+            (0.0, 0.0),
+            (0.30, 0.30),
+            pv_forecast_kw=(2.0, 0.0),
+            export_price_eur_per_kwh=(0.07, 0.07),
+            battery=full_battery,
+        )
+    )
+
+    first = plan.hours[0]
+    assert first.battery is not None
+    assert first.battery.state_of_charge_kwh == pytest.approx(10.0)
+    assert first.battery.headroom_kwh == 1.0
+    assert first.optimizer_cost_eur == pytest.approx(
+        -0.07 * first.grid_export_kw - 0.27 * 1.0 + 0.05 * 0.5 + 0.15 * 0.5
+    )
+
+
+def _ending_with_surplus(headroom_kwh: tuple[float, float] | None) -> float:
+    """9.5 of 10 kWh stored, a 1 kWh load at 20 ct before 0.5 kWh PV surplus."""
+    nearly_full = replace(
+        battery(initial_soc_kwh=9.5, final_soc_kwh=0.0, maximum_charge_kw=5.0),
+        terminal_value_eur_per_kwh=0.27,
+        headroom_kwh=headroom_kwh,
+        headroom_penalties_eur_per_kwh=(0.05, 0.15),
+    )
+    plan = solve(
+        problem(
+            (1.0, 0.0),
+            (0.20, 0.20),
+            pv_forecast_kw=(0.0, 0.5),
+            export_price_eur_per_kwh=(0.07, 0.07),
+            battery=nearly_full,
+        )
+    )
+    last = plan.hours[-1].battery
+    assert last is not None
+    return last.state_of_charge_kwh
+
+
+def test_without_headroom_the_plan_ends_full() -> None:
+    assert _ending_with_surplus(None) == pytest.approx(10.0)
+
+
+def test_with_headroom_a_cheap_alternative_keeps_room_for_more_pv() -> None:
+    """Using 0.5 kWh earlier loses 3.5 ct of stored value and avoids 7.5 ct of
+    penalty; the next 0.5 kWh would lose 3.5 ct to avoid only 2.5 ct."""
+    assert _ending_with_surplus((0.0, 1.0)) == pytest.approx(9.5)

@@ -40,6 +40,7 @@ def _hour(
     electric_vehicle: bool = True,
     away: bool = False,
     reserve_kwh: float = 0.0,
+    headroom_kwh: float = 0.0,
 ) -> PlannedHour:
     return PlannedHour(
         start_time=FIRST_HOUR + timedelta(hours=index),
@@ -52,7 +53,13 @@ def _hour(
         import_cost_eur=0.5 * (index + 1),
         export_revenue_eur=0.0,
         battery=(
-            PlannedBatteryHour(0.0, 0.5, 4.0 - index, reserve_kwh=reserve_kwh)
+            PlannedBatteryHour(
+                0.0,
+                0.5,
+                4.0 - index,
+                reserve_kwh=reserve_kwh,
+                headroom_kwh=headroom_kwh,
+            )
             if battery
             else None
         ),
@@ -78,6 +85,7 @@ def _save_plan(
     price_forecast_from: datetime | None = None,
     away_hour: int | None = None,
     reserve_kwh: float = 0.0,
+    headroom_kwh: float = 0.0,
     hour_count: int = PLAN_HOURS,
 ) -> None:
     hours = tuple(
@@ -87,6 +95,7 @@ def _save_plan(
             electric_vehicle=electric_vehicle,
             away=index == away_hour,
             reserve_kwh=reserve_kwh,
+            headroom_kwh=headroom_kwh,
         )
         for index in range(hour_count)
     )
@@ -410,3 +419,19 @@ def test_the_plan_uses_the_full_width_of_a_large_window(
         "document.documentElement.scrollWidth - document.documentElement.clientWidth"
     )
     assert overflow <= 1
+
+
+def test_the_battery_headroom_is_shown_when_the_plan_keeps_one(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store, headroom_kwh=1.0)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
+    headers = page.locator("#plan-head th").all_text_contents()
+    column = headers.index("Battery headroom (%)")
+    expect(page.locator("#plan-rows tr").nth(0).locator("td").nth(column)).to_have_text(
+        "10.0"
+    )
+    expect(page.locator("#plan-foot td").nth(column)).to_have_text("")

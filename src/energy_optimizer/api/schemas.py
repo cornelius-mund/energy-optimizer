@@ -682,6 +682,11 @@ class PlannedBatteryResponse(_StrictModel):
     degradation_cost_eur: float = Field(
         default=0, description="Battery wear cost of the hour in EUR"
     )
+    headroom_percent: float = Field(
+        default=0,
+        description="Soft room below the maximum state of charge kept for more PV "
+        "than forecast at the end of the hour, in percent of the capacity",
+    )
     reserve_percent: float = Field(
         default=0,
         description="Soft reserve above the minimum state of charge kept for load "

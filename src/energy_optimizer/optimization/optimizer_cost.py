@@ -39,6 +39,8 @@ def battery_hourly_costs(
     ).tolist()
     for hour, penalty in _reserve_penalties(variables, specification, state_of_charge):
         costs[hour] += penalty
+    for hour, penalty in _headroom_penalties(variables, specification, state_of_charge):
+        costs[hour] += penalty
     return [float(cost) for cost in costs]
 
 
@@ -61,6 +63,34 @@ def _reserve_penalties(
         day_start = day * HOURS_PER_DAY
         day_slack = above_reserve[day_start : day_start + HOURS_PER_DAY]
         binding_hour = day_start + int(numpy.argmin(day_slack))
+        penalties.append(
+            (
+                binding_hour,
+                first_penalty * float(first_kwh) + second_penalty * float(second_kwh),
+            )
+        )
+    return penalties
+
+
+def _headroom_penalties(
+    variables: BatteryVariables,
+    specification: BatterySpecification,
+    state_of_charge: numpy.ndarray,
+) -> list[tuple[int, float]]:
+    if variables.headroom_overshoots is None or specification.headroom_kwh is None:
+        return []
+    first, second = variables.headroom_overshoots
+    first_penalty, second_penalty = specification.headroom_penalties_eur_per_kwh
+    into_headroom = state_of_charge - (
+        specification.maximum_soc_kwh - numpy.asarray(specification.headroom_kwh)
+    )
+    penalties = []
+    for day, (first_kwh, second_kwh) in enumerate(
+        zip(first.solution.values, second.solution.values, strict=True)
+    ):
+        day_start = day * HOURS_PER_DAY
+        day_overshoot = into_headroom[day_start : day_start + HOURS_PER_DAY]
+        binding_hour = day_start + int(numpy.argmax(day_overshoot))
         penalties.append(
             (
                 binding_hour,
