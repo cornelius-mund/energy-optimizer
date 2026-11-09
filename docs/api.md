@@ -641,8 +641,16 @@ mistaken for historic actuals or forecast inputs.
 - **Table:** one row per planned hour in the dashboard time zone with load, PV, grid
   import and export in kW, battery charge, discharge and state of charge when a
   battery was planned, EV charge power and state of charge when a car was planned,
-  `Cost (EUR)`, the cost of the hour (import cost minus export revenue plus battery
-  wear; a negative value is a revenue), and `Cumulative (EUR)`, the running total.
+  `Cost (EUR)`, the cash cost of the hour (import cost minus export revenue; a
+  negative value is a revenue), `Cumulative (EUR)`, its running total, and
+  `Cost (Optimizer)`, the hour as the optimizer values it (`optimizer_cost_eur`):
+  cash cost plus battery wear and penalties (the soft reserve at the hour furthest
+  below it, EV energy missing for driving, a morning minimum or the deadline) minus
+  the value of the energy stored in the hour (the battery's change of state of
+  charge at its end-of-horizon value, the energy charged into the car at its stored
+  value). Its total equals the solver objective minus the value of the battery
+  energy at the start. On windows wider than 760 px the Plan view uses the full
+  window width.
   A `Total` row at the bottom sums the energy columns (kWh, one row is one hour)
   and the costs; state columns stay empty there. The table scrolls inside a box of
   at most 70 % of the window height with a sticky header, hour column and total

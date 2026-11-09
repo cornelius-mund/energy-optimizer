@@ -66,6 +66,7 @@ def _hour(
             if electric_vehicle
             else None
         ),
+        optimizer_cost_eur=0.5 * (index + 1) - 0.25,
     )
 
 
@@ -337,6 +338,7 @@ def test_a_total_row_sums_the_energy_and_the_costs_of_the_plan(
 
     _open_plan(page)
 
+    expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
     headers = page.locator("#plan-head th").all_text_contents()
     total = page.locator("#plan-foot tr td")
     expect(total.nth(0)).to_have_text("Total")
@@ -370,3 +372,41 @@ def test_every_column_of_a_long_plan_is_reachable_inside_the_table_box(
     wrapper.evaluate("el => { el.scrollTop = el.scrollHeight; }")
     expect(page.locator("#plan-head th").first).to_be_in_viewport()
     expect(page.locator("#plan-foot td").first).to_be_in_viewport()
+
+
+def test_the_optimizer_cost_of_each_hour_is_shown_beside_the_cash_cost(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
+    headers = page.locator("#plan-head th").all_text_contents()
+    cash = headers.index("Cost (EUR)")
+    optimizer = headers.index("Cost (Optimizer)")
+    first = page.locator("#plan-rows tr").nth(0).locator("td")
+    expect(first.nth(cash)).to_have_text("0.500")
+    expect(first.nth(optimizer)).to_have_text("0.250")
+    total = page.locator("#plan-foot td")
+    expect(total.nth(cash)).to_have_text("3.000")
+    expect(total.nth(optimizer)).to_have_text("2.250")
+
+
+def test_the_plan_uses_the_full_width_of_a_large_window(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+    page.set_viewport_size({"width": 1920, "height": 1000})
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-rows tr")).to_have_count(PLAN_HOURS)
+    card = page.locator("#plan-content").bounding_box()
+    assert card is not None
+    assert card["width"] > 1800
+    assert card["x"] >= 0
+    overflow = page.evaluate(
+        "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+    )
+    assert overflow <= 1

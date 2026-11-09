@@ -637,7 +637,7 @@
     return /^-0(\.0+)?$/.test(rounded) ? rounded.slice(1) : rounded;
   };
   const isForecastPrice = (plan, hour) => Boolean(plan.price_forecast_from) && new Date(hour.start_time) >= new Date(plan.price_forecast_from);
-  const hourCost = (hour) => hour.import_cost_eur - hour.export_revenue_eur + ((hour.battery && hour.battery.degradation_cost_eur) || 0);
+  const hourCost = (hour) => hour.import_cost_eur - hour.export_revenue_eur;
   const sumOf = (schedule, read) => schedule.reduce((sum, hour) => sum + (read(hour) || 0), 0);
   const planColumns = (plan) => {
     const schedule = plan.schedule;
@@ -684,6 +684,7 @@
     columns.push(
       flow("Cost (EUR)", hourCost, 3),
       { title: "Cumulative (EUR)", value: (hour, index) => planNumber(cumulative[index], 3), total: () => "" },
+      flow("Cost (Optimizer)", (hour) => hour.optimizer_cost_eur, 3),
     );
     if (plan.price_forecast_from) {
       columns.push({ title: "Price", value: (hour) => (isForecastPrice(plan, hour) ? "forecast" : "published"), total: () => "" });

@@ -63,6 +63,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 export_revenue_eur=0.0,
                 battery=None,
                 ev=None,
+                optimizer_cost_eur=0.36,
             ),
             planned_hour(
                 start_time="2026-01-01T01:00:00Z",
@@ -76,6 +77,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 export_revenue_eur=0.0,
                 battery=None,
                 ev=None,
+                optimizer_cost_eur=0.15,
             ),
         ],
     }

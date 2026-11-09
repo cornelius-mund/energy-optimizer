@@ -64,6 +64,9 @@ button:hover { background: #28544b; }
 .dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(280px, .85fr); gap: 18px; }
 .dashboard-grid[hidden] { display: none; }
 .excluded-grid[hidden], .plan-grid[hidden] { display: none; }
+@media (min-width: 761px) {
+  .plan-grid { width: calc(100vw - 48px); margin-left: calc(50% - 50vw + 24px); }
+}
 .plan-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 0 0 18px; }
 .plan-summary div { padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; background: rgb(245 243 237 / 70%); }
 .plan-summary dt { color: var(--muted); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase; }

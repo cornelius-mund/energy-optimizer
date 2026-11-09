@@ -135,6 +135,7 @@ def _planned_hours(
             export_revenue_eur=hour.export_revenue_eur,
             battery=_planned_battery(battery_capacity_kwh, hour.battery),
             ev=_planned_ev(ev_capacity_kwh, hour.ev),
+            optimizer_cost_eur=hour.optimizer_cost_eur,
         )
         for hour in plan.hours
     ]
