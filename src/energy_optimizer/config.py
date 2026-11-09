@@ -515,6 +515,39 @@ class EvHomeHoursConfiguration(_StrictModel):
         return local_time >= self.start or local_time < self.end
 
 
+class EvPlugInReminderConfiguration(_StrictModel):
+    """Home Assistant notifications when the plan charges tonight and the car is
+    not plugged in."""
+
+    services: list[str] = Field(min_length=1)
+    at: time = time(21)
+    title: str = Field(default="EV", min_length=1)
+    message: str = Field(
+        default="Plug in the car: the plan charges {energy_kwh:.0f} kWh tonight "
+        "from {start}.",
+        min_length=1,
+        description="Template with {energy_kwh} and {start} (local HH:MM)",
+    )
+    poll_interval_seconds: float = Field(default=300, gt=0, le=3600)
+
+    @field_validator("services")
+    @classmethod
+    def validate_services(cls, services: list[str]) -> list[str]:
+        for service in services:
+            if not re.fullmatch(r"notify\.[a-z0-9_]+", service):
+                raise ValueError(f"{service!r} is not a notify service")
+        return services
+
+    @field_validator("message")
+    @classmethod
+    def validate_message(cls, message: str) -> str:
+        try:
+            message.format(energy_kwh=1.0, start="00:00")
+        except (KeyError, IndexError, ValueError) as error:
+            raise ValueError("message may only use {energy_kwh} and {start}") from error
+        return message
+
+
 DAILY_MINIMUM_SOC_PERCENT = 30.0
 DAILY_MINIMUM_TIME = time(7)
 
@@ -566,6 +599,7 @@ class EvChargingConfiguration(_StrictModel):
             "charge, whatever its plug state or plug history"
         ),
     )
+    plug_in_reminder: EvPlugInReminderConfiguration | None = None
 
     @model_validator(mode="after")
     def validate_deadline(self) -> "EvChargingConfiguration":
@@ -589,6 +623,8 @@ class EvChargingConfiguration(_StrictModel):
             )
         if self.strategy == "minimum_plus_target":
             self._validate_soft_target()
+        if self.plug_in_reminder is not None and self.home_hours is None:
+            raise ValueError("ev_charging.plug_in_reminder needs home_hours")
         if self.strategy == "daily_minimum" and self.target_soc_percent is not None:
             if self.target_soc_percent < max(self.day_target_percents()):
                 raise ValueError(
