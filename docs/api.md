@@ -601,8 +601,12 @@ With `epex_predictor` configured, the price chart adds the series
 `price_predicted_forecast` ("Price forecast (EPEX Predictor)"): the predicted market
 price for the hours after the last published day-ahead price, drawn dashed, so it
 never overlaps the published prices. A note below the chart says that solid lines
-are published prices and the dashed line is the forecast, credits its data sources,
-and states that all prices are market prices before grid fees and taxes.
+are published prices and the dashed line is the forecast and credits its data
+sources. All forecast prices are the ones the plan uses: with `tariff` configured,
+import prices are gross (market price plus the grid fee of the local hour and the
+fixed components, with VAT) and export prices are the export price of the tariff
+(the fixed feed-in remuneration when configured); without `tariff` both are the
+market price.
 
 Dashboard files are served with `Cache-Control: no-cache` and an ETag, so a normal
 reload after an update shows the new dashboard while unchanged files cost only a
