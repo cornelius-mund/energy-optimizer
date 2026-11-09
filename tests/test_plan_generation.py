@@ -501,3 +501,23 @@ def test_the_plan_is_cut_at_the_configured_horizon(
     )
 
     assert len(stored.plan.hours) == 3
+
+
+def test_the_battery_supplies_the_cheapest_hour_instead_of_the_grid(
+    store: ProviderDataStore,
+) -> None:
+    configuration = _battery_configuration(end_of_horizon="value_stored_energy")
+
+    stored = PlanGenerator(configuration, store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.10, 0.50]),
+            battery=battery(efficiency=0.81),
+        )
+    )
+
+    cheapest_hour = stored.plan.hours[0]
+    assert cheapest_hour.grid_import_kw == pytest.approx(0.0, abs=1e-6)
+    assert cheapest_hour.battery is not None
+    assert cheapest_hour.battery.discharge_kw == pytest.approx(1.0)
