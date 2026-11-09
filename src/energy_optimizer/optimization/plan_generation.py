@@ -56,6 +56,7 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 logger = logging.getLogger(__name__)
 
 SURPLUS_CHARGING_VALUE_EUR_PER_KWH = 1.0
+TERMINAL_VALUE_DISCOUNT = 0.02
 ONE_HOUR = timedelta(hours=1)
 PLAN_KEY = ProviderDataKey("optimization-plan", "energy-optimizer", "current")
 
@@ -370,10 +371,17 @@ def terminal_value_of_stored_energy(
 ) -> float:
     """A kWh left at the end replaces a later import, and the cheapest hour of the
     plan bounds what refilling it costs. Valuing it higher (for example at the mean
-    price) would make the plan charge from the grid only to end full.
+    price) would make the plan charge from the grid only to end full. Valued at
+    exactly that price, battery and grid would tie in the cheapest hour; the small
+    discount lets the battery supply it, and the cheapest price is often only a
+    forecast.
     """
     cheapest_import_price = min(import_prices)
-    return cheapest_import_price * math.sqrt(battery.battery_efficiency)
+    return (
+        cheapest_import_price
+        * math.sqrt(battery.battery_efficiency)
+        * (1 - TERMINAL_VALUE_DISCOUNT)
+    )
 
 
 class PlanGenerator:
