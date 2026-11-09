@@ -1630,6 +1630,9 @@ def test_forecast_tab_shows_the_price_forecast_after_the_published_prices(
     expect(page.locator("#price-prediction-note")).to_contain_text(
         "dashed line is the EPEX Predictor forecast"
     )
+    expect(page.locator("#price-prediction-note")).to_contain_text(
+        "import prices include grid fees, levies and VAT"
+    )
 
 
 def test_the_price_forecast_note_is_hidden_without_a_forecast(

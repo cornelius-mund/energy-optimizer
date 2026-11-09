@@ -458,3 +458,32 @@ def test_dashboard_contract_separates_actual_and_plan_scenarios(
     assert responses["plan"].status_code == 200
     assert responses["plan"].json()["series"] == []
     assert responses["plan"].json()["plan_summary"]["status"] == "unavailable"
+
+
+TARIFF_CONFIGURATION = """\
+timezone: UTC
+tariff:
+  grid_fee_bands:
+    - {start_hour: 0, end_hour: 12, fee_ct_per_kwh: 1.0}
+    - {start_hour: 12, end_hour: 24, fee_ct_per_kwh: 10.0}
+  levies_ct_per_kwh: 2.0
+  vat_rate: 0.19
+  feed_in_ct_per_kwh: 7
+"""
+
+
+def test_forecast_prices_are_the_tariff_prices_the_plan_uses(
+    persistence_configuration: Path, store: ProviderDataStore
+) -> None:
+    append_configuration(
+        persistence_configuration, AWATTAR_CONFIGURATION + TARIFF_CONFIGURATION
+    )
+    save_prices(store, import_prices=(0.10, 0.12), export_prices=(0.10, 0.12))
+
+    body = get_dashboard_data("forecast", window_hours=2)
+
+    series = {item["id"]: item for item in body["series"]}
+    assert series["import_price_forecast"]["values"] == pytest.approx(
+        [(10 + 1 + 2) * 1.19 / 100, (12 + 1 + 2) * 1.19 / 100]
+    )
+    assert series["export_price_forecast"]["values"] == pytest.approx([0.07, 0.07])

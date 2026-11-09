@@ -1,7 +1,9 @@
 """Dashboard HTTP API routes and response mapping helpers."""
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Query, Request
 
@@ -198,21 +200,48 @@ def _pv_dashboard_series(
     )
 
 
+type PriceOfHour = Callable[[float, datetime], float]
+
+
+def tariff_prices(configuration: Configuration) -> tuple[PriceOfHour, PriceOfHour]:
+    """The import and export price the plan uses for a market price and hour."""
+    tariff = configuration.tariff
+    if tariff is None:
+        return (lambda market, _: market), (lambda market, _: market)
+    time_zone = ZoneInfo(configuration.timezone)
+    return (
+        lambda market, hour: tariff.import_price_eur_per_kwh(
+            market, hour.astimezone(time_zone).hour
+        ),
+        lambda market, _: tariff.export_price_eur_per_kwh(market),
+    )
+
+
+def _priced(
+    timestamps: tuple[datetime, ...], values: tuple[float, ...], price: PriceOfHour
+) -> dict[datetime, float | None]:
+    return {
+        timestamp: price(value, timestamp)
+        for timestamp, value in zip(timestamps, values, strict=True)
+    }
+
+
 def _predicted_price_series(
     data: ElectricityPriceData,
     start: datetime,
     end: datetime,
     published_until: datetime | None,
     freshness: Freshness,
+    price: PriceOfHour,
 ) -> DashboardSeries | None:
     """The EPEX Predictor market price for the hours after the last published
     day-ahead price; earlier hours are left empty so both never overlap.
     """
     predicted = {
         timestamp: value
-        for timestamp, value in zip(
-            data.timestamps, data.import_price_eur_per_kwh, strict=True
-        )
+        for timestamp, value in _priced(
+            data.timestamps, data.import_price_eur_per_kwh, price
+        ).items()
         if published_until is None or timestamp >= published_until
     }
     if not predicted:
@@ -243,6 +272,7 @@ def _price_dashboard_series(
     end: datetime,
     direction: Literal["import", "export"],
     freshness: Freshness,
+    price: PriceOfHour,
 ) -> DashboardSeries | None:
     """Map one normalized price direction to a forecast series."""
     values = (
@@ -256,7 +286,9 @@ def _price_dashboard_series(
         raise ProviderDataStoreError(
             f"persisted {direction}-price forecast values are misaligned"
         )
-    selected = align_hourly_values(dict(zip(data.timestamps, values)), start, end)
+    selected = align_hourly_values(
+        _priced(data.timestamps, tuple(values), price), start, end
+    )
     return DashboardSeries(
         id=f"{direction}_price_forecast",
         data_type=f"{direction}_price",
@@ -428,6 +460,7 @@ def _forecast_dashboard_data(
             series.append(_pv_dashboard_series(data, start, end, freshness))
 
     published_prices: ElectricityPriceData | None = None
+    import_price, export_price = tariff_prices(configuration)
     if configuration.awattar is not None:
         key = ProviderDataKey(
             data_type="electricity-prices",
@@ -450,7 +483,12 @@ def _forecast_dashboard_data(
             for direction in ("import", "export"):
                 try:
                     direction_series = _price_dashboard_series(
-                        data, start, end, direction, freshness
+                        data,
+                        start,
+                        end,
+                        direction,
+                        freshness,
+                        import_price if direction == "import" else export_price,
                     )
                 except ProviderDataStoreError:
                     diagnostics.append(
@@ -505,7 +543,10 @@ def _predicted_price_dashboard_series(
     )
     importer = EpexPredictorImporter(epex_predictor)
     freshness: Freshness = "fresh" if importer.is_fresh(data) else "stale"
-    return _predicted_price_series(data, start, end, published_until, freshness)
+    import_price, _ = tariff_prices(configuration)
+    return _predicted_price_series(
+        data, start, end, published_until, freshness, import_price
+    )
 
 
 @router.get(
