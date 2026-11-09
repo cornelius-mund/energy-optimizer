@@ -535,6 +535,7 @@ def test_forecast_prices_extend_the_plan_beyond_the_published_day_ahead_prices(
 
 
 DAILY_MINIMUM_PERCENT = 30.0
+HOME_HOURS_OF_DAY = (12, 13)
 MORNING_HOUR = 7
 
 
@@ -563,7 +564,10 @@ def daily_chain(
         }
         configuration["epex_predictor"] = {"base_url": world_url}
         configuration["influxdb"] = {"base_url": world_url, "history_days": 14}
-        configuration["ev_charging"] = {"strategy": "daily_minimum"}
+        configuration["ev_charging"] = {
+            "strategy": "daily_minimum",
+            "home_hours": {"start": "12:00", "end": "14:00"},
+        }
         sources = configuration["orchestration"]["sources"]
         sources["electricity_price_forecast"] = {"interval_seconds": 600}
         sources["ev_history"] = {"interval_seconds": 600}
@@ -598,6 +602,13 @@ def test_every_morning_keeps_the_daily_minimum_with_the_learned_driving(
     assert len(mornings) >= 2
     for hour in mornings:
         assert hour["ev"]["state_of_charge_percent"] >= DAILY_MINIMUM_PERCENT - 1e-4
+    home_hours = [
+        hour
+        for hour in schedule
+        if datetime.fromisoformat(hour["start_time"]).hour in HOME_HOURS_OF_DAY
+    ]
+    assert home_hours
+    assert all(hour["ev"]["expected_plugged_in"] for hour in home_hours)
     away = [hour for hour in schedule[24:] if not hour["ev"]["expected_plugged_in"]]
     assert away
     assert all(

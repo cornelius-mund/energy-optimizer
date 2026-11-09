@@ -550,6 +550,11 @@ Charging from the grid only to store energy never pays because of the charging
 losses. `target_soc_percent` (default 100) caps the state of charge; the credit is
 not part of the reported objective.
 
+`home_hours` (for example `{start: "22:00", end: "06:00"}`, may wrap midnight)
+are local hours in which the car is always home: it can charge in them on every
+planned day whatever its current plug state and plug history say, because it is
+plugged in when needed. The learned pattern applies outside them.
+
 Without a history the car is expected at the charger in its current state and
 not to drive. Energy the plan cannot provide for a morning minimum or for
 driving is reported in `ev_shortfall_kwh` instead of failing. Each planned hour's
