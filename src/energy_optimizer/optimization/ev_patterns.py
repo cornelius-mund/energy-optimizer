@@ -1,6 +1,7 @@
 """Weekly driving and plug-in patterns of the car, learned from its history."""
 
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from statistics import fmean
@@ -86,12 +87,28 @@ def _plugged_in_share(
 
 
 def expected_plugged_in(
-    patterns: EvPatterns, local_hours: list[datetime], plugged_in_now: bool
+    patterns: EvPatterns,
+    local_hours: list[datetime],
+    plugged_in_now: bool,
+    always_home: Callable[[time], bool] | None = None,
 ) -> tuple[bool, ...]:
     """The current plug state holds until the learned pattern next changes state;
     afterwards the pattern decides, and hours it does not know keep the current
-    state.
+    state. Hours in which the car is always home are available regardless,
+    because the owner plugs it in when it is needed.
     """
+    learned = _learned_plug_state(patterns, local_hours, plugged_in_now)
+    if always_home is None:
+        return learned
+    return tuple(
+        plugged or always_home(moment.time())
+        for moment, plugged in zip(local_hours, learned, strict=True)
+    )
+
+
+def _learned_plug_state(
+    patterns: EvPatterns, local_hours: list[datetime], plugged_in_now: bool
+) -> tuple[bool, ...]:
     learned = [patterns.expected_plugged_in(moment) for moment in local_hours]
     expected = [plugged_in_now if value is None else value for value in learned]
     first_change = next(

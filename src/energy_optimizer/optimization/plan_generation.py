@@ -241,7 +241,13 @@ def daily_minimum_charging(
     into the car rather than being exported for less.
     """
     local_hours = [start.astimezone(time_zone) for start in hour_starts]
-    plugged_in = expected_plugged_in(patterns, local_hours, ev.plugged_in)
+    home_hours = charging.home_hours
+    plugged_in = expected_plugged_in(
+        patterns,
+        local_hours,
+        ev.plugged_in,
+        None if home_hours is None else home_hours.contains,
+    )
     return EvSpecification(
         capacity_kwh=ev.capacity_kwh,
         initial_soc_kwh=ev.state_of_charge_kwh,

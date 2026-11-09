@@ -496,6 +496,25 @@ class EvDayTargetConfiguration(_StrictModel):
     deadline: time
 
 
+class EvHomeHoursConfiguration(_StrictModel):
+    """Local hours in which the car is always home and can be plugged in."""
+
+    start: time
+    end: time
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "EvHomeHoursConfiguration":
+        if self.start == self.end:
+            raise ValueError("ev_charging.home_hours start and end must differ")
+        return self
+
+    def contains(self, local_time: time) -> bool:
+        """The window may wrap midnight, for example 22:00 to 06:00."""
+        if self.start < self.end:
+            return self.start <= local_time < self.end
+        return local_time >= self.start or local_time < self.end
+
+
 DAILY_MINIMUM_SOC_PERCENT = 30.0
 DAILY_MINIMUM_TIME = time(7)
 
@@ -539,6 +558,13 @@ class EvChargingConfiguration(_StrictModel):
         default=None,
         ge=0,
         description="`minimum_plus_target`: value of a stored kWh above the minimum",
+    )
+    home_hours: EvHomeHoursConfiguration | None = Field(
+        default=None,
+        description=(
+            "`daily_minimum`: local hours in which the car is always home and can "
+            "charge, whatever its plug state or plug history"
+        ),
     )
 
     @model_validator(mode="after")

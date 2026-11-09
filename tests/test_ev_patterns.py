@@ -5,8 +5,9 @@ from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
-from energy_optimizer.config import EvChargingConfiguration
+from energy_optimizer.config import EvChargingConfiguration, EvHomeHoursConfiguration
 from energy_optimizer.optimization import (
     BatterySpecification,
     EvSpecification,
@@ -348,3 +349,42 @@ def test_the_battery_tops_up_pv_surplus_to_the_charger_minimum() -> None:
     assert hour.battery.discharge_kw == pytest.approx(1.1)
     assert hour.grid_import_kw == pytest.approx(0.0, abs=TOLERANCE)
     assert hour.grid_export_kw == pytest.approx(0.0, abs=TOLERANCE)
+
+
+NIGHT = EvHomeHoursConfiguration(start=time(22), end=time(6))
+RARELY_PLUGGED_AT_NIGHT = EvPatterns(
+    consumption_kwh_by_weekday={},
+    plugged_in_share={
+        (weekday, hour): 0.3 for weekday in range(7) for hour in range(24)
+    },
+)
+
+
+def test_home_hours_may_wrap_midnight() -> None:
+    assert NIGHT.contains(time(22))
+    assert NIGHT.contains(time(3))
+    assert not NIGHT.contains(time(6))
+    assert not NIGHT.contains(time(12))
+    assert EvHomeHoursConfiguration(start=time(9), end=time(17)).contains(time(9))
+
+
+def test_home_hours_need_a_start_and_an_end_that_differ() -> None:
+    with pytest.raises(ValidationError, match="must differ"):
+        EvHomeHoursConfiguration(start=time(22), end=time(22))
+
+
+def test_the_car_can_charge_in_its_home_hours_whatever_its_plug_state() -> None:
+    evening = MONDAY + timedelta(hours=20)
+    hours = _hours(evening, 12)
+
+    plugged = expected_plugged_in(RARELY_PLUGGED_AT_NIGHT, hours, False, NIGHT.contains)
+
+    assert plugged == (False,) * 2 + (True,) * 8 + (False,) * 2
+
+
+def test_without_home_hours_the_plug_history_decides() -> None:
+    evening = MONDAY + timedelta(hours=20)
+
+    plugged = expected_plugged_in(RARELY_PLUGGED_AT_NIGHT, _hours(evening, 12), False)
+
+    assert plugged == (False,) * 12
