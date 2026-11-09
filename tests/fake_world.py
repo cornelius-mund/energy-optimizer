@@ -28,6 +28,8 @@ NORMAL_EUR_PER_MWH = 150.0
 EXPENSIVE_EUR_PER_MWH = 250.0
 SUN_WATT_HOURS = 3000.0
 ONE_HOUR = timedelta(hours=1)
+PRICE_FORECAST_HOURS = 168
+PRICE_FORECAST_MARKUP_EUR_PER_MWH = 10.0
 
 
 def household_load_kw(hour_of_day: int) -> float:
@@ -38,6 +40,10 @@ def market_price_eur_per_mwh(hour_of_day: int) -> float:
     if hour_of_day < 6:
         return CHEAP_EUR_PER_MWH
     return EXPENSIVE_EUR_PER_MWH if 17 <= hour_of_day < 22 else NORMAL_EUR_PER_MWH
+
+
+def forecast_price_eur_per_mwh(hour_of_day: int) -> float:
+    return market_price_eur_per_mwh(hour_of_day) + PRICE_FORECAST_MARKUP_EUR_PER_MWH
 
 
 def pv_kw(hour_of_day: int) -> float:
@@ -134,10 +140,25 @@ class FakeWorld:
             "message": {"info": {"timezone": "UTC"}},
         }
 
-    def irradiance(self, tilt_degrees: float) -> dict[str, Any]:
+    def price_forecast(self) -> dict[str, Any]:
+        """Answer like EPEX Predictor: hourly EUR/MWh from the running hour."""
+        first = _floor_hour(datetime.now(timezone.utc))
+        starts = [first + ONE_HOUR * hour for hour in range(PRICE_FORECAST_HOURS)]
+        return {
+            "prices": [
+                {
+                    "startsAt": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "total": forecast_price_eur_per_mwh(start.hour),
+                }
+                for start in starts
+            ],
+            "knownUntil": (first + ONE_HOUR * 24).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def irradiance(self, tilt_degrees: float, forecast_days: int = 2) -> dict[str, Any]:
         """Answer like Open-Meteo: each value labelled with its hour's end."""
         today = _floor_hour(datetime.now(timezone.utc)).replace(hour=0)
-        hour_starts = [today + ONE_HOUR * hour for hour in range(48)]
+        hour_starts = [today + ONE_HOUR * hour for hour in range(24 * forecast_days)]
         return {
             "utc_offset_seconds": 0,
             "hourly": {
@@ -199,7 +220,15 @@ def _handler(world: FakeWorld) -> type[BaseHTTPRequestHandler]:
             elif url.path.startswith("/estimate/"):
                 self._reply(200, world.forecast())
             elif url.path == "/v1/forecast":
-                self._reply(200, world.irradiance(float(query["tilt"][0])))
+                self._reply(
+                    200,
+                    world.irradiance(
+                        float(query["tilt"][0]),
+                        int(query.get("forecast_days", ["2"])[0]),
+                    ),
+                )
+            elif url.path == "/prices":
+                self._reply(200, world.price_forecast())
             else:
                 self._reply(404, {"message": "not found"})
 

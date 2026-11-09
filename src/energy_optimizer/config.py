@@ -698,6 +698,20 @@ class AwattarConfiguration(_StrictModel):
         return "de"
 
 
+class EpexPredictorConfiguration(_StrictModel):
+    """EPEX Predictor market-price forecast for the hours after the published
+    day-ahead prices (https://github.com/b3nn0/EpexPredictor).
+    """
+
+    model_config = ConfigDict(validate_default=True)
+
+    base_url: AnyHttpUrl = AnyHttpUrl("https://epexpredictor.batzill.com")
+    region: Literal["DE", "AT", "BE", "FR", "NL"] = "DE"
+    forecast_hours: int = Field(default=168, ge=1, le=336)
+    timeout_seconds: float = Field(default=10, gt=0, le=120)
+    max_data_age_seconds: float | None = Field(default=21600, gt=0)
+
+
 class PersistenceConfiguration(_StrictModel):
     """Filesystem location for normalized provider data."""
 
@@ -720,6 +734,12 @@ class OptimizationTriggerConfiguration(_StrictModel):
 
     enabled: bool = False
     required_sources: list[str] = Field(default_factory=list)
+    horizon_hours: int = Field(
+        default=168,
+        ge=1,
+        le=336,
+        description="Longest plan; it also ends where prices or the PV forecast end",
+    )
 
     @field_validator("required_sources")
     @classmethod
@@ -863,6 +883,7 @@ class Configuration(_StrictModel):
     forecast_solar: ForecastSolarConfiguration | None = None
     open_meteo_pv: OpenMeteoPvConfiguration | None = None
     awattar: AwattarConfiguration | None = None
+    epex_predictor: EpexPredictorConfiguration | None = None
     tariff: TariffConfiguration | None = None
     load_forecast: LoadForecastConfiguration = Field(
         default_factory=LoadForecastConfiguration

@@ -2,7 +2,7 @@
 
 import logging
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -62,6 +62,7 @@ class PlanSnapshot:
     ev_capacity_kwh: float | None = None
     load_forecast_method: str | None = None
     load_forecast_mae_kw: float | None = None
+    price_forecast_from: datetime | None = None
 
 
 PLAN_ADAPTER = TypeAdapter(PlanSnapshot)
@@ -220,15 +221,52 @@ def ev_specification(
 
 
 def planning_horizon(
-    prices: ElectricityPriceData, pv: PvGenerationData
+    prices: ElectricityPriceData,
+    pv: PvGenerationData,
+    maximum_hours: int | None = None,
 ) -> list[datetime]:
     """Return the hours for which both prices and the PV forecast exist."""
     pv_end = pv.start_time + ONE_HOUR * len(pv.generation_kw)
-    return [
+    covered = [
         hour_start
         for hour_start in prices.timestamps
         if pv.start_time <= hour_start < pv_end
     ]
+    return covered if maximum_hours is None else covered[:maximum_hours]
+
+
+def extend_with_forecast(
+    published: ElectricityPriceData, forecast: ElectricityPriceData | None
+) -> tuple[ElectricityPriceData, datetime | None]:
+    """Append the forecast hours after the last published hour.
+
+    Published day-ahead prices always win; the forecast only reaches further.
+    Returns the extended prices and the first forecast hour, if any.
+    """
+    if forecast is None:
+        return published, None
+    last_published = published.timestamps[-1]
+    later = [
+        index
+        for index, start in enumerate(forecast.timestamps)
+        if start > last_published
+    ]
+    contiguous = bool(later) and (
+        forecast.timestamps[later[0]] == last_published + ONE_HOUR
+    )
+    if not contiguous:
+        return published, None
+    extended = replace(
+        published,
+        timestamps=published.timestamps
+        + tuple(forecast.timestamps[index] for index in later),
+        import_price_eur_per_kwh=published.import_price_eur_per_kwh
+        + tuple(forecast.import_price_eur_per_kwh[index] for index in later),
+        export_price_eur_per_kwh=published.export_price_eur_per_kwh
+        + tuple(forecast.export_price_eur_per_kwh[index] for index in later),
+        expires_at=max(published.expires_at, forecast.expires_at),
+    )
+    return extended, forecast.timestamps[later[0]]
 
 
 def terminal_value_of_stored_energy(
@@ -256,7 +294,7 @@ class PlanGenerator:
         self.solver = solver or LinopyPlanSolver()
 
     def __call__(self, snapshot: ProviderDataSnapshot) -> PlanSnapshot:
-        problem, forecast = self._build(snapshot)
+        problem, forecast, price_forecast_from = self._build(snapshot)
         plan = self.solver.solve(problem)
         if not plan.has_schedule():
             raise PlanGenerationError(
@@ -273,6 +311,13 @@ class PlanGenerator:
             plan=plan,
             load_forecast_method=forecast.method,
             load_forecast_mae_kw=forecast.mean_absolute_error_kw,
+            price_forecast_from=(
+                price_forecast_from
+                if price_forecast_from is not None
+                and price_forecast_from
+                < problem.start_time + ONE_HOUR * problem.hours()
+                else None
+            ),
             ev_capacity_kwh=(
                 ev.capacity_kwh if isinstance(ev, EvData) and problem.ev else None
             ),
@@ -340,6 +385,12 @@ class PlanGenerator:
             return settings.end_of_horizon_value_eur_per_kwh
         return terminal_value_of_stored_energy(battery, import_prices)
 
+    def _horizon_hours(self) -> int | None:
+        orchestration = self.configuration.orchestration
+        return (
+            None if orchestration is None else orchestration.optimization.horizon_hours
+        )
+
     def _throughput_cost(self) -> float:
         home_assistant = self.configuration.home_assistant
         if home_assistant is None or home_assistant.battery is None:
@@ -363,12 +414,19 @@ class PlanGenerator:
 
     def _build(
         self, snapshot: ProviderDataSnapshot
-    ) -> tuple[PlanningProblem, LoadForecast]:
+    ) -> tuple[PlanningProblem, LoadForecast, datetime | None]:
         load = _required(snapshot, "household_load", HouseholdLoadData)
         pv = _required(snapshot, "pv_generation", PvGenerationData)
-        prices = _required(snapshot, "electricity_prices", ElectricityPriceData)
+        published = _required(snapshot, "electricity_prices", ElectricityPriceData)
+        price_forecast = snapshot.data.get("electricity_price_forecast")
+        prices, price_forecast_from = extend_with_forecast(
+            published,
+            price_forecast
+            if isinstance(price_forecast, ElectricityPriceData)
+            else None,
+        )
         battery = snapshot.data.get("battery")
-        hour_starts = planning_horizon(prices, pv)
+        hour_starts = planning_horizon(prices, pv, self._horizon_hours())
         if not hour_starts:
             raise PlanGenerationError(
                 "prices and the PV forecast do not overlap in any future hour"
@@ -404,7 +462,7 @@ class PlanGenerator:
             ),
             ev=self._ev(snapshot, hour_starts, surplus_kw),
         )
-        return problem, forecast
+        return problem, forecast, price_forecast_from
 
     def _ev(
         self,

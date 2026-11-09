@@ -166,6 +166,7 @@ def current_plan(http_request: Request) -> PlanSnapshotResponse:
                 mean_absolute_error_kw=stored.load_forecast_mae_kw,
             )
         ),
+        price_forecast_from=stored.price_forecast_from,
         ev_shortfall_kwh=stored.plan.ev_shortfall_kwh,
         battery_throughput_kwh=stored.plan.battery_throughput_kwh,
         degradation_cost_eur=stored.plan.degradation_cost_eur,

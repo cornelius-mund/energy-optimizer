@@ -35,6 +35,7 @@
   const planTable = document.querySelector("#plan-table");
   const planHead = document.querySelector("#plan-head");
   const planRows = document.querySelector("#plan-rows");
+  const planPriceAttribution = document.querySelector("#plan-price-attribution");
   const excludedSources = document.querySelector("#excluded-sources");
   const excludedSummary = document.querySelector("#excluded-summary");
   const excludedEmpty = document.querySelector("#excluded-empty");
@@ -627,7 +628,9 @@
   };
 
   const planNumber = (value, digits = 2) => (value === null || value === undefined ? "–" : Number(value).toFixed(digits));
-  const planColumns = (schedule) => {
+  const isForecastPrice = (plan, hour) => Boolean(plan.price_forecast_from) && new Date(hour.start_time) >= new Date(plan.price_forecast_from);
+  const planColumns = (plan) => {
+    const schedule = plan.schedule;
     const columns = [
       [`Hour (${timeZone})`, (hour) => formatTimestamp(hour.start_time)],
       ["Load (kW)", (hour) => planNumber(hour.load_kw)],
@@ -649,6 +652,7 @@
       );
     }
     columns.push(["Net cost (EUR)", (hour) => planNumber(hour.import_cost_eur - hour.export_revenue_eur, 3)]);
+    if (plan.price_forecast_from) columns.push(["Price", (hour) => (isForecastPrice(plan, hour) ? "forecast" : "published")]);
     return columns;
   };
   const planSummaryItems = (plan) => {
@@ -672,6 +676,7 @@
       const error = plan.load_forecast.mean_absolute_error_kw;
       items.push(["Load forecast", `${plan.load_forecast.method}${error === null ? "" : ` (±${planNumber(error)} kW)`}`]);
     }
+    if (plan.price_forecast_from) items.push(["Forecast prices from", formatTimestamp(plan.price_forecast_from)]);
     return items;
   };
   const renderPlan = (plan) => {
@@ -681,6 +686,7 @@
     const empty = !plan || plan.schedule.length === 0;
     planEmpty.hidden = !empty;
     planTable.hidden = empty;
+    planPriceAttribution.hidden = empty || !plan.price_forecast_from;
     if (empty) return;
     planSummaryItems(plan).forEach(([label, value]) => {
       const item = document.createElement("div");
@@ -691,7 +697,7 @@
       item.append(term, description);
       planSummary.append(item);
     });
-    const columns = planColumns(plan.schedule);
+    const columns = planColumns(plan);
     const headRow = document.createElement("tr");
     columns.forEach(([title]) => {
       const cell = document.createElement("th");

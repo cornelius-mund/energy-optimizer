@@ -78,6 +78,11 @@ orchestration:
     electricity_prices:
       enabled: true
       interval_seconds: 3600
+    # Optional: extends the plan with EPEX Predictor forecasts after the
+    # published prices; never required for planning.
+    electricity_price_forecast:
+      enabled: true
+      interval_seconds: 3600
   optimization:
     # Plans every future hour covered by prices and the PV forecast once all
     # required sources hold current data. Add battery and ev to plan them.
@@ -86,6 +91,8 @@ orchestration:
       - household_load
       - pv_generation
       - electricity_prices
+    # Longest plan in hours; it also ends where prices or the PV forecast end.
+    horizon_hours: 168
 
 # Optional direct PV forecast provider. The public Forecast.Solar tier requires
 # no account or API key and provides hourly forecasts for today and tomorrow.
@@ -124,6 +131,14 @@ awattar:
   base_url: https://api.awattar.de/v1/marketdata
   timeout_seconds: 10
   max_data_age_seconds: 7200
+
+# Optional EPEX Predictor market-price forecast (public instance, no key) for
+# the hours after the published day-ahead prices.
+epex_predictor:
+  base_url: https://epexpredictor.batzill.com
+  region: DE
+  forecast_hours: 168
+  timeout_seconds: 10
 
 # Optional Home Assistant provider settings. The token should be a long-lived
 # access token and must not be committed to source control. Every energy
