@@ -855,7 +855,8 @@ class TariffConfiguration(_StrictModel):
     """Turns the net exchange price into the price on the electricity bill.
 
     The gross import price is ``(market price + grid fee of the local hour + fixed
-    components) * (1 + vat_rate)``. All amounts are net, in ct/kWh.
+    components) * (1 + vat_rate)``. All amounts are net, in ct/kWh. Exports earn
+    the market price unless a fixed feed-in tariff (EEG) is configured.
     """
 
     grid_fee_bands: list[GridFeeBandConfiguration] = Field(min_length=1)
@@ -864,6 +865,12 @@ class TariffConfiguration(_StrictModel):
     concession_fee_ct_per_kwh: float = Field(default=0, ge=0)
     electricity_tax_ct_per_kwh: float = Field(default=0, ge=0)
     vat_rate: float = Field(default=0, ge=0, lt=1)
+    feed_in_ct_per_kwh: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Fixed remuneration of every exported kWh; default market price",
+    )
 
     @model_validator(mode="after")
     def validate_bands_cover_the_day(self) -> "TariffConfiguration":
@@ -901,6 +908,11 @@ class TariffConfiguration(_StrictModel):
             + self.fixed_components_ct_per_kwh()
         )
         return net_ct * (1 + self.vat_rate) / 100
+
+    def export_price_eur_per_kwh(self, market_price_eur_per_kwh: float) -> float:
+        if self.feed_in_ct_per_kwh is None:
+            return market_price_eur_per_kwh
+        return self.feed_in_ct_per_kwh / 100
 
 
 class LoadForecastConfiguration(_StrictModel):

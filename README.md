@@ -413,8 +413,9 @@ the price on the bill instead: `grid_fee_bands` (local hours, `start_hour` inclu
 `supplier_surcharge_ct_per_kwh`, `levies_ct_per_kwh`, `concession_fee_ct_per_kwh`,
 `electricity_tax_ct_per_kwh` and `vat_rate`, all net. The import price of an hour is
 `(market price + grid fee of the local hour + fixed components) * (1 + vat_rate)`;
-the export price stays the market price. Without `tariff` the plan uses the market
-price for both directions. Example (section 14a module 3, Westnetz):
+the export price stays the market price unless `feed_in_ct_per_kwh` sets a fixed
+feed-in tariff (for example the EEG remuneration), which then applies to every
+exported kWh. Without `tariff` the plan uses the market price for both directions. Example (section 14a module 3, Westnetz):
 
 ```yaml
 tariff:
@@ -428,6 +429,7 @@ tariff:
   concession_fee_ct_per_kwh: 1.32
   electricity_tax_ct_per_kwh: 2.05
   vat_rate: 0.19
+  feed_in_ct_per_kwh: 7   # fixed EEG remuneration of exports
 ```
 
 ### Electric vehicle charging

@@ -330,6 +330,8 @@ tariff:
   concession_fee_ct_per_kwh: 1.32
   electricity_tax_ct_per_kwh: 2.05
   vat_rate: 0.19
+  # Optional fixed feed-in tariff (EEG) for exports instead of the market price.
+  # feed_in_ct_per_kwh: 7
 
 # auto backtests every method and plans with the smallest mean absolute error.
 load_forecast:

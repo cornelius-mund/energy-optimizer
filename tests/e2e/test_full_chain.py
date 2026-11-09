@@ -613,3 +613,33 @@ def test_every_morning_keeps_the_daily_minimum_with_the_learned_driving(
     driving = [hour["ev"]["consumption_kwh"] for hour in schedule]
     assert max(driving) == pytest.approx(learned_kwh_per_day, rel=1e-6)
     assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=1e-6)
+
+
+FEED_IN_CT_PER_KWH = 7.0
+
+
+@pytest.fixture(scope="module")
+def feed_in_chain(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, FakeWorld]]:
+    root = tmp_path_factory.mktemp("feed-in-chain")
+    with running_fake_world() as (world_url, world):
+        configuration = _chain_configuration(world_url, root / "provider-data")
+        configuration["tariff"] = {**TARIFF, "feed_in_ct_per_kwh": FEED_IN_CT_PER_KWH}
+        with running_service(configuration, root) as service_url:
+            yield service_url, world
+
+
+def test_exports_earn_the_fixed_feed_in_tariff_and_the_battery_is_not_sold(
+    feed_in_chain: tuple[str, FakeWorld],
+) -> None:
+    schedule = _wait_for_plan(feed_in_chain[0])["schedule"]
+
+    for hour in schedule:
+        assert hour["export_revenue_eur"] == pytest.approx(
+            hour["grid_export_kw"] * FEED_IN_CT_PER_KWH / 100, abs=1e-6
+        )
+        sells_battery_energy = (
+            hour["battery"]["discharge_kw"] > 1e-6 and hour["grid_export_kw"] > 1e-6
+        )
+        assert not sells_battery_energy

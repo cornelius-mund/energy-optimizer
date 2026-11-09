@@ -411,6 +411,15 @@ class PlanGenerator:
             for price, start in zip(market, hour_starts, strict=True)
         )
 
+    def _export_prices(
+        self, prices: ElectricityPriceData, prices_at: list[int]
+    ) -> tuple[float, ...]:
+        market = [prices.export_price_eur_per_kwh[i] for i in prices_at]
+        tariff = self.configuration.tariff
+        if tariff is None:
+            return tuple(market)
+        return tuple(tariff.export_price_eur_per_kwh(price) for price in market)
+
     def _load_forecast(
         self, load: HouseholdLoadData, hour_starts: list[datetime]
     ) -> LoadForecast:
@@ -512,9 +521,7 @@ class PlanGenerator:
             load_kw=load_kw,
             pv_forecast_kw=pv_forecast_kw,
             import_price_eur_per_kwh=import_prices,
-            export_price_eur_per_kwh=tuple(
-                prices.export_price_eur_per_kwh[i] for i in prices_at
-            ),
+            export_price_eur_per_kwh=self._export_prices(prices, prices_at),
             maximum_import_kw=self.configuration.grid.maximum_import_kw,
             maximum_export_kw=self.configuration.grid.maximum_export_kw,
             time_limit_seconds=self.configuration.solver.time_limit_seconds,

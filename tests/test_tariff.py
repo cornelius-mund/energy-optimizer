@@ -12,6 +12,7 @@ from energy_optimizer.optimization.plan_generation import PlanGenerator
 from energy_optimizer.storage import ProviderDataStore
 from test_plan_generation import (
     FIRST_PLANNED_HOUR,
+    battery,
     flat_history,
     prices,
     pv_forecast,
@@ -114,3 +115,44 @@ def test_the_plan_prices_imports_with_the_tariff_of_the_local_hour(
     )
     assert problem.export_price_eur_per_kwh == pytest.approx(tuple(market))
     assert FIRST_PLANNED_HOUR == datetime(2026, 3, 10, 13, tzinfo=UTC)
+
+
+def test_a_fixed_feed_in_tariff_replaces_the_market_price_for_exports() -> None:
+    eeg = tariff(feed_in_ct_per_kwh=7)
+
+    assert eeg.export_price_eur_per_kwh(0.64) == pytest.approx(0.07)
+    assert eeg.export_price_eur_per_kwh(-0.05) == pytest.approx(0.07)
+    assert tariff().export_price_eur_per_kwh(0.64) == pytest.approx(0.64)
+
+
+def test_with_a_feed_in_tariff_the_battery_is_not_sold_at_a_market_spike(
+    tmp_path: Path,
+) -> None:
+    settings = {
+        "time_resolution_minutes": 60,
+        "timezone": "Europe/Berlin",
+        "grid": {"maximum_import_kw": 20, "maximum_export_kw": 20},
+        "solver": {"name": "highs", "time_limit_seconds": 60},
+        "tariff": {**WESTNETZ_MODULE_3, "feed_in_ct_per_kwh": 7},
+    }
+    generator = PlanGenerator(
+        Configuration.model_validate(settings), ProviderDataStore(tmp_path)
+    )
+
+    stored = generator(
+        snapshot(
+            household_load=flat_history(0.5),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.64, 0.30]),
+            battery=battery(initial_soc_kwh=10.0, efficiency=1.0),
+        )
+    )
+
+    spike = stored.plan.hours[0]
+    assert spike.grid_export_kw == pytest.approx(0.0, abs=1e-6)
+    assert spike.battery is not None
+    assert spike.battery.discharge_kw == pytest.approx(0.5)
+    assert all(
+        hour.export_revenue_eur == pytest.approx(0.0, abs=1e-6)
+        for hour in stored.plan.hours
+    )
