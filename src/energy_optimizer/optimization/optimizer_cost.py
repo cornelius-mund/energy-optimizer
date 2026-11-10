@@ -103,20 +103,12 @@ def _headroom_penalties(
 def ev_hourly_costs(
     variables: EvVariables, specification: EvSpecification
 ) -> list[float]:
-    """The value of the charged energy as a credit (including the cheap-price
-    bonus), and penalties for energy missing for driving or a morning minimum and
-    at the deadline."""
+    """The value of the charged energy as a credit, and penalties for energy
+    missing for driving or a morning minimum and at the deadline."""
     charge = variables.charge.solution.values.astype(float)
     missing = variables.missing_energy.solution.values.astype(float)
-    stored_value = numpy.full(len(charge), specification.value_eur_per_kwh, dtype=float)
-    if specification.cheap_charge_bonus_eur_per_kwh is not None:
-        stored_value = stored_value + numpy.asarray(
-            specification.cheap_charge_bonus_eur_per_kwh, dtype=float
-        )
-    costs = (
-        SHORTFALL_PENALTY_EUR_PER_KWH * missing
-        - stored_value * specification.charge_efficiency * charge
-    ).tolist()
+    stored_value = specification.value_eur_per_kwh * specification.charge_efficiency
+    costs = (SHORTFALL_PENALTY_EUR_PER_KWH * missing - stored_value * charge).tolist()
     if specification.deadline_hours >= 1:
         costs[specification.deadline_hours - 1] += (
             SHORTFALL_PENALTY_EUR_PER_KWH * float(variables.shortfall.solution.item())

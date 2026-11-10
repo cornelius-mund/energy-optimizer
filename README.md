@@ -590,12 +590,14 @@ ev_charging:
     message: "Bitte EV anstecken: {energy_kwh:.0f} kWh ab {start}"
 ```
 
-`cheap_market_price_ct_per_kwh` (with `daily_minimum`) makes the car charge to its limit
-in every hour in which the market price (EPEX spot, before grid fees) is at or below
-the threshold. Such a charge is credited with a value above any import price, so the
-car fills up in cheap hours regardless of later PV. This is economical as long as the
-threshold stays below the feed-in tariff: a kWh bought at 1 ct and exported surplus at
-7 ct is worth more than keeping room for that PV, which would be exported anyway.
+With `daily_minimum`, `cheap_market_price_ct_per_kwh` (default unset, for example 1)
+sets the reference spot price (EPEX, before fees). A kWh stored in the car is worth the
+gross price at that spot price divided by the charging losses (about 23.6 ct with the
+example tariff and 90 % charging efficiency). Charging from the grid then pays exactly
+when the gross price is below that value, which is the case at about 1 ct spot, and PV
+surplus is stored whenever that is worth more than its feed-in remuneration. The
+morning minimums still hold the car's buffer. Keep the reference spot price such that
+the stored value stays above the feed-in tariff, otherwise PV is exported instead.
 
 Without a history the car is expected at the charger in its current state and
 not to drive. Energy the plan cannot provide for a morning minimum or for

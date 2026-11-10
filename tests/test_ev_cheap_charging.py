@@ -1,19 +1,19 @@
-"""Charge the car to its limit while the market price is at or below a threshold."""
+"""The car's stored energy is worth the gross price at the reference spot price,
+divided by the charging losses. Grid charging then pays only below that price,
+and PV surplus is stored instead of exported."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import ValidationError
 
-from energy_optimizer.config import EvChargingConfiguration
+from energy_optimizer.config import EvChargingConfiguration, TariffConfiguration
 from energy_optimizer.optimization import PlanStatus
 from energy_optimizer.optimization.ev_patterns import NO_PATTERNS
 from energy_optimizer.optimization.plan_generation import (
-    CHEAP_CHARGE_VALUE_EUR_PER_KWH,
-    cheap_charge_bonus,
     daily_minimum_charging,
+    reference_stored_value,
 )
 from test_ev_patterns import _ev
 from test_optimization import TOLERANCE, problem, solve
@@ -21,84 +21,109 @@ from test_optimization import TOLERANCE, problem, solve
 UTC_ZONE = ZoneInfo("UTC")
 SUNDAY_EVENING = datetime(2026, 11, 8, 20, tzinfo=UTC)
 ONE_HOUR = timedelta(hours=1)
-THRESHOLD_CT = 1.0
-GROSS_IMPORT_EUR_PER_KWH = 0.30
+CHARGE_EFFICIENCY = 0.9
+FEED_IN_EUR_PER_KWH = 0.07
+TARIFF = TariffConfiguration.model_validate(
+    {
+        "grid_fee_bands": [{"start_hour": 0, "end_hour": 24, "fee_ct_per_kwh": 9.53}],
+        "supplier_surcharge_ct_per_kwh": 1.0,
+        "levies_ct_per_kwh": 2.946,
+        "concession_fee_ct_per_kwh": 1.32,
+        "electricity_tax_ct_per_kwh": 2.05,
+        "vat_rate": 0.19,
+    }
+)
 
 
 def _hours(count: int) -> list[datetime]:
     return [SUNDAY_EVENING + ONE_HOUR * index for index in range(count)]
 
 
-def test_the_bonus_marks_only_the_hours_at_or_below_the_threshold() -> None:
-    bonus = cheap_charge_bonus((0.02, 0.01, 0.005, 0.30), THRESHOLD_CT)
+def _reference_value() -> float:
+    value = reference_stored_value(
+        _ev(
+            state_of_charge_kwh=40.0,
+            plugged_in=True,
+            charge_efficiency=CHARGE_EFFICIENCY,
+        ),
+        EvChargingConfiguration(
+            strategy="daily_minimum", cheap_market_price_ct_per_kwh=1
+        ),
+        TARIFF,
+        local_hour=21,
+    )
+    assert value is not None
+    return value
 
-    assert bonus == (
-        0.0,
-        CHEAP_CHARGE_VALUE_EUR_PER_KWH,
-        CHEAP_CHARGE_VALUE_EUR_PER_KWH,
-        0.0,
+
+def _gross(spot_ct_per_kwh: float) -> float:
+    return TARIFF.import_price_eur_per_kwh(spot_ct_per_kwh / 100, 21)
+
+
+def test_the_reference_value_is_the_gross_price_at_one_ct_spot_over_the_losses() -> (
+    None
+):
+    assert _reference_value() == pytest.approx(_gross(1.0) / CHARGE_EFFICIENCY)
+    assert _reference_value() == pytest.approx(0.2359, abs=1e-4)
+
+
+def test_without_a_reference_price_there_is_no_value_override() -> None:
+    value = reference_stored_value(
+        _ev(state_of_charge_kwh=40.0, plugged_in=True),
+        EvChargingConfiguration(strategy="daily_minimum"),
+        TARIFF,
+        local_hour=21,
     )
 
-
-def test_without_a_threshold_there_is_no_bonus() -> None:
-    assert cheap_charge_bonus((0.0, 0.0), None) is None
+    assert value is None
 
 
-def test_the_car_charges_to_its_limit_in_cheap_hours_and_not_otherwise() -> None:
-    hours = _hours(3)
-    market = (0.005, 0.005, 0.20)
+def _charge_kw_per_hour(
+    import_gross: tuple[float, ...],
+    pv_forecast_kw: tuple[float, ...] | None = None,
+    load_kw: tuple[float, ...] | None = None,
+) -> list[float]:
+    hours = _hours(len(import_gross))
     specification = daily_minimum_charging(
-        _ev(state_of_charge_kwh=40.0, plugged_in=True),
+        _ev(
+            state_of_charge_kwh=40.0,
+            plugged_in=True,
+            charge_efficiency=CHARGE_EFFICIENCY,
+        ),
         EvChargingConfiguration(strategy="daily_minimum"),
         hours,
         UTC_ZONE,
         NO_PATTERNS,
-        stored_value_eur_per_kwh=0.0,
-        cheap_bonus=cheap_charge_bonus(market, THRESHOLD_CT),
+        stored_value_eur_per_kwh=_reference_value(),
     )
-
     plan = solve(
-        replace(problem((0.0,) * 3, (GROSS_IMPORT_EUR_PER_KWH,) * 3), ev=specification)
-    )
-
-    assert plan.status is PlanStatus.OPTIMAL
-    cheap_1, cheap_2, expensive = plan.hours
-    assert (
-        cheap_1.ev is not None and cheap_2.ev is not None and expensive.ev is not None
-    )
-    assert cheap_2.ev.state_of_charge_kwh == pytest.approx(60.0, abs=TOLERANCE)
-    assert expensive.ev.charge_kw == pytest.approx(0.0, abs=TOLERANCE)
-
-
-def test_a_price_above_the_threshold_does_not_charge_the_car() -> None:
-    hours = _hours(2)
-    specification = daily_minimum_charging(
-        _ev(state_of_charge_kwh=40.0, plugged_in=True),
-        EvChargingConfiguration(strategy="daily_minimum"),
-        hours,
-        UTC_ZONE,
-        NO_PATTERNS,
-        stored_value_eur_per_kwh=0.0,
-        cheap_bonus=cheap_charge_bonus((0.02, 0.02), THRESHOLD_CT),
-    )
-
-    plan = solve(
-        replace(problem((0.0,) * 2, (GROSS_IMPORT_EUR_PER_KWH,) * 2), ev=specification)
-    )
-
-    assert all(
-        hour.ev is not None and hour.ev.charge_kw == pytest.approx(0.0, abs=TOLERANCE)
-        for hour in plan.hours
-    )
-
-
-def test_the_threshold_needs_the_daily_minimum_strategy() -> None:
-    with pytest.raises(ValidationError, match="needs the daily_minimum strategy"):
-        EvChargingConfiguration.model_validate(
-            {
-                "strategy": "deadline",
-                "minimum_soc_percent": 80,
-                "deadline": "07:00",
-                "cheap_market_price_ct_per_kwh": 1,
-            }
+        replace(
+            problem(
+                load_kw or (0.0,) * len(import_gross),
+                import_gross,
+                pv_forecast_kw=pv_forecast_kw,
+                export_price_eur_per_kwh=(FEED_IN_EUR_PER_KWH,) * len(import_gross),
+            ),
+            ev=specification,
         )
+    )
+    assert plan.status is PlanStatus.OPTIMAL
+    return [hour.ev.charge_kw for hour in plan.hours if hour.ev is not None]
+
+
+def test_the_car_charges_from_the_grid_below_one_ct_spot() -> None:
+    charge = _charge_kw_per_hour((_gross(0.5),))
+
+    assert charge[0] > 1.0
+
+
+def test_the_car_does_not_charge_from_the_grid_at_three_ct_spot() -> None:
+    charge = _charge_kw_per_hour((_gross(3.0),))
+
+    assert charge[0] == pytest.approx(0.0, abs=TOLERANCE)
+
+
+def test_pv_surplus_is_stored_in_the_car_instead_of_exported() -> None:
+    charge = _charge_kw_per_hour((_gross(3.0),), pv_forecast_kw=(3.0,), load_kw=(1.0,))
+
+    assert charge[0] == pytest.approx(2.0, abs=TOLERANCE)

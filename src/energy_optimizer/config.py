@@ -616,8 +616,8 @@ class EvChargingConfiguration(_StrictModel):
         ge=0,
         le=100,
         description=(
-            "`daily_minimum`: the car charges to its limit in every hour in which "
-            "the market price is at or below this value (ct/kWh)"
+            "`daily_minimum`: reference spot price (ct/kWh). A kWh stored in the car "
+            "is worth its gross price at this spot price divided by the charging losses"
         ),
     )
     home_hours: EvHomeHoursConfiguration | None = Field(

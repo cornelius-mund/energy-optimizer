@@ -85,7 +85,6 @@ class EvSpecification:
     value_eur_per_kwh: EuroPerKilowattHour = 0.0
     consumption_kwh: tuple[KilowattHour, ...] | None = None
     morning_minimums: tuple[tuple[int, KilowattHour], ...] = ()
-    cheap_charge_bonus_eur_per_kwh: tuple[EuroPerKilowattHour, ...] | None = None
 
 
 @dataclass(frozen=True)
