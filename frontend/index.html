@@ -169,6 +169,17 @@
                 </svg>
                 <div id="plan-power-legend" class="chart-legend" role="group" aria-label="Planned power series"></div>
               </div>
+              <div id="plan-price-panel" class="chart-panel" hidden>
+                <svg id="plan-price-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-label="Planned prices (EUR/kWh)" aria-describedby="plan-price-chart-description">
+                  <desc id="plan-price-chart-description">Import and export price per planned hour in EUR/kWh, on the same hours as the power chart.</desc>
+                  <text class="axis-unit" id="plan-price-axis-unit" x="4" y="12">EUR/kWh</text>
+                  <g id="plan-price-grid-lines"></g>
+                  <g id="plan-price-series-paths"></g>
+                  <g id="plan-price-points"></g>
+                  <g id="plan-price-labels"></g>
+                </svg>
+                <div id="plan-price-legend" class="chart-legend" role="group" aria-label="Planned price series"></div>
+              </div>
               <div id="plan-state-panel" class="chart-panel" hidden>
                 <svg id="plan-state-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-label="Planned state of charge (%)" aria-describedby="plan-state-chart-description">
                   <desc id="plan-state-chart-description">Planned state of charge per planned hour in %.</desc>

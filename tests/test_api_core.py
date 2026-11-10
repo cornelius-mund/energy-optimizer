@@ -63,6 +63,8 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 export_revenue_eur=0.0,
                 battery=None,
                 ev=None,
+                import_price_eur_per_kwh=0.3,
+                export_price_eur_per_kwh=0.08,
                 optimizer_cost_eur=0.36,
             ),
             planned_hour(
@@ -77,6 +79,8 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 export_revenue_eur=0.0,
                 battery=None,
                 ev=None,
+                import_price_eur_per_kwh=0.25,
+                export_price_eur_per_kwh=0.08,
                 optimizer_cost_eur=0.15,
             ),
         ],
