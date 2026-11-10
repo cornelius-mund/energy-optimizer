@@ -8,7 +8,11 @@ from zoneinfo import ZoneInfo
 
 from pydantic import TypeAdapter
 
-from energy_optimizer.config import Configuration, EvChargingConfiguration
+from energy_optimizer.config import (
+    Configuration,
+    EvChargingConfiguration,
+    TariffConfiguration,
+)
 from energy_optimizer.control.ev_controller import (
     EV_SCHEDULE_ADAPTER,
     EV_SCHEDULE_KEY,
@@ -220,6 +224,26 @@ def morning_minimums(
     return tuple(minimums)
 
 
+def reference_stored_value(
+    ev: EvData,
+    charging: EvChargingConfiguration,
+    tariff: TariffConfiguration | None,
+    local_hour: int,
+) -> float | None:
+    """What a kWh stored in the car is worth: the price of charging it from the grid
+    at the reference spot price, divided by the charging losses. Charging from the
+    grid then pays exactly when the gross price is below that reference, and PV
+    surplus is stored whenever it is worth more than its feed-in remuneration.
+    """
+    if charging.cheap_market_price_ct_per_kwh is None:
+        return None
+    spot = charging.cheap_market_price_ct_per_kwh / 100
+    gross = (
+        spot if tariff is None else tariff.import_price_eur_per_kwh(spot, local_hour)
+    )
+    return gross / ev.charge_efficiency
+
+
 def stored_ev_energy_value(import_prices: tuple[float, ...]) -> float:
     """A kWh in the car saves charging it later, at best in the cheapest hour of
     the plan. Valuing it at that price (not divided by the charging efficiency)
@@ -276,6 +300,7 @@ def ev_specification(
     surplus_kw: tuple[float, ...],
     patterns: EvPatterns = NO_PATTERNS,
     import_prices: tuple[float, ...] = (),
+    stored_value_eur_per_kwh: float | None = None,
 ) -> EvSpecification | None:
     if charging.strategy == "daily_minimum":
         return daily_minimum_charging(
@@ -284,7 +309,11 @@ def ev_specification(
             hour_starts,
             time_zone,
             patterns,
-            stored_ev_energy_value(import_prices),
+            (
+                stored_ev_energy_value(import_prices)
+                if stored_value_eur_per_kwh is None
+                else stored_value_eur_per_kwh
+            ),
         )
     limit_kwh = charging.limit_soc_percent / 100 * ev.capacity_kwh
     if charging.strategy == "surplus":
@@ -653,7 +682,19 @@ class PlanGenerator:
             else NO_PATTERNS
         )
         return ev_specification(
-            ev, charging, hour_starts, time_zone, surplus_kw, patterns, import_prices
+            ev,
+            charging,
+            hour_starts,
+            time_zone,
+            surplus_kw,
+            patterns,
+            import_prices,
+            reference_stored_value(
+                ev,
+                charging,
+                self.configuration.tariff,
+                hour_starts[0].astimezone(time_zone).hour,
+            ),
         )
 
 
