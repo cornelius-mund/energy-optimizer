@@ -20,7 +20,6 @@
   const status = document.querySelector("#status");
   const content = document.querySelector("#content");
   const details = document.querySelector("#details");
-  const tooltip = document.querySelector("#point-tooltip");
   const badge = document.querySelector("#scenario-badge");
   const heading = document.querySelector("#chart-heading");
   const eyebrow = document.querySelector("#series-eyebrow");
@@ -36,6 +35,24 @@
   const planHead = document.querySelector("#plan-head");
   const planRows = document.querySelector("#plan-rows");
   const planFoot = document.querySelector("#plan-foot");
+  const planCharts = document.querySelector("#plan-charts");
+  const chartDefinition = (prefix) => ({
+    panel: document.querySelector(`#${prefix}-panel`),
+    element: document.querySelector(`#${prefix}-chart`),
+    legend: document.querySelector(`#${prefix}-legend`),
+    grid: document.querySelector(`#${prefix}-grid-lines`),
+    labels: document.querySelector(`#${prefix}-labels`),
+    points: document.querySelector(`#${prefix}-points`),
+    seriesPaths: document.querySelector(`#${prefix}-series-paths`),
+    axisUnit: document.querySelector(`#${prefix}-axis-unit`),
+    description: document.querySelector(`#${prefix}-chart-description`),
+    series: [],
+  });
+  const planChartDefinitions = {
+    power: chartDefinition("plan-power"),
+    state: chartDefinition("plan-state"),
+    cost: chartDefinition("plan-cost"),
+  };
   const planPriceAttribution = document.querySelector("#plan-price-attribution");
   const pricePredictionNote = document.querySelector("#price-prediction-note");
   const excludedSources = document.querySelector("#excluded-sources");
@@ -191,6 +208,18 @@
     import_price_forecast: "Import price",
     export_price_forecast: "Export price",
     price_predicted_forecast: "Import price forecast (EPEX Predictor)",
+    plan_load: "Load",
+    plan_pv: "PV",
+    plan_grid_import: "Grid import",
+    plan_grid_export: "Grid export",
+    plan_battery_charge: "Battery charge",
+    plan_battery_discharge: "Battery discharge",
+    plan_ev_charge: "EV charge",
+    plan_battery_state: "Battery state",
+    plan_ev_state: "EV state",
+    plan_cost: "Cost",
+    plan_optimizer_cost: "Cost (optimizer)",
+    plan_cumulative_cost: "Cumulative cost",
     export_price_predicted_forecast: "Export price forecast (EPEX Predictor)",
     inverter_charge_efficiency_actual: "Inverter charge efficiency",
     inverter_discharge_efficiency_actual: "Inverter discharge efficiency",
@@ -309,6 +338,8 @@
   const showPoint = (label, timestamp, value, unit, point, chart) => {
     const margin = 4;
     const gap = 8;
+    const tooltip = chart.closest(".chart-wrap").querySelector(".point-tooltip");
+    hidePoint();
     tooltip.textContent = `${label} · ${formatTimestamp(timestamp)} · ${value} ${unit}`;
     tooltip.style.maxWidth = "";
     tooltip.hidden = false;
@@ -324,7 +355,7 @@
     tooltip.style.left = `${left - origin.left}px`;
     tooltip.style.top = `${Math.min(top, bounds.bottom - height - margin) - origin.top}px`;
   };
-  const hidePoint = () => { tooltip.hidden = true; };
+  const hidePoint = () => { document.querySelectorAll(".point-tooltip").forEach((element) => { element.hidden = true; }); };
   const hasSeriesData = (series, id) => series.some(
     (item) => item.id === id && item.values.some((value) => Number.isFinite(value)),
   );
@@ -730,6 +761,54 @@
     if (plan.price_forecast_from) items.push(["Forecast prices from", formatTimestamp(plan.price_forecast_from)]);
     return items;
   };
+  const planSeries = (plan, id, unit, read) => ({
+    id,
+    unit,
+    timestamps: plan.schedule.map((hour) => hour.start_time),
+    values: plan.schedule.map((hour) => {
+      const value = read(hour);
+      return value === null || value === undefined ? null : value;
+    }),
+  });
+  const planChartSeries = (plan) => {
+    let runningCost = 0;
+    const cumulative = plan.schedule.map((hour) => {
+      runningCost += hourCost(hour);
+      return runningCost;
+    });
+    return {
+      power: [
+        planSeries(plan, "plan_load", "kW", (hour) => hour.load_kw),
+        planSeries(plan, "plan_pv", "kW", (hour) => hour.pv_generation_kw),
+        planSeries(plan, "plan_grid_import", "kW", (hour) => hour.grid_import_kw),
+        planSeries(plan, "plan_grid_export", "kW", (hour) => hour.grid_export_kw),
+        planSeries(plan, "plan_battery_charge", "kW", (hour) => hour.battery && hour.battery.charge_kw),
+        planSeries(plan, "plan_battery_discharge", "kW", (hour) => hour.battery && hour.battery.discharge_kw),
+        planSeries(plan, "plan_ev_charge", "kW", (hour) => hour.ev && hour.ev.charge_kw),
+      ],
+      state: [
+        planSeries(plan, "plan_battery_state", "%", (hour) => hour.battery && hour.battery.state_of_charge_percent),
+        planSeries(plan, "plan_ev_state", "%", (hour) => hour.ev && hour.ev.state_of_charge_percent),
+      ],
+      cost: [
+        planSeries(plan, "plan_cost", "EUR", hourCost),
+        planSeries(plan, "plan_optimizer_cost", "EUR", (hour) => hour.optimizer_cost_eur),
+        { ...planSeries(plan, "plan_cumulative_cost", "EUR", () => 0), values: cumulative },
+      ],
+    };
+  };
+  const renderPlanCharts = (plan) => {
+    hidePoint();
+    Object.entries(planChartSeries(plan)).forEach(([kind, series]) => {
+      const definition = planChartDefinitions[kind];
+      definition.panel.setAttribute("hidden", "");
+      definition.legend.replaceChildren();
+      definition.series = series.filter((item) => hasSeriesData([item], item.id));
+      if (!definition.series.length) return;
+      renderLegend(definition);
+      renderGraph(definition);
+    });
+  };
   const renderPlan = (plan) => {
     planSummary.replaceChildren();
     planHead.replaceChildren();
@@ -738,6 +817,8 @@
     const empty = !plan || plan.schedule.length === 0;
     planEmpty.hidden = !empty;
     planTable.hidden = empty;
+    planCharts.hidden = empty;
+    if (!empty) renderPlanCharts(plan);
     planPriceAttribution.hidden = empty || !plan.price_forecast_from;
     if (empty) return;
     planSummaryItems(plan).forEach(([label, value]) => {

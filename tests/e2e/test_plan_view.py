@@ -436,3 +436,51 @@ def test_the_battery_headroom_is_shown_when_the_plan_keeps_one(
         "10.0"
     )
     expect(page.locator("#plan-foot td").nth(column)).to_have_text("")
+
+
+def test_the_plan_is_drawn_as_charts_whose_series_can_be_hidden(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-charts")).to_be_visible()
+    expect(page.locator("#plan-power-legend .legend-item")).to_have_text(
+        [
+            "Load (kW)",
+            "PV (kW)",
+            "Grid import (kW)",
+            "Grid export (kW)",
+            "Battery charge (kW)",
+            "Battery discharge (kW)",
+            "EV charge (kW)",
+        ]
+    )
+    expect(page.locator("#plan-state-legend .legend-item")).to_have_text(
+        ["Battery state (%)", "EV state (%)"]
+    )
+    expect(page.locator("#plan-cost-legend .legend-item")).to_have_text(
+        ["Cost (EUR)", "Cost (optimizer) (EUR)", "Cumulative cost (EUR)"]
+    )
+    paths = page.locator("#plan-power-series-paths path")
+    expect(paths).to_have_count(7)
+    load = page.locator("#plan-power-legend [data-series-id=plan_load]")
+    load.click()
+    expect(load).to_have_attribute("aria-pressed", "false")
+    expect(paths).to_have_count(6)
+    page.locator("#plan-state-points circle").first.hover()
+    expect(page.locator("#plan-charts .point-tooltip")).to_be_visible()
+    expect(page.locator("#plan-charts .point-tooltip")).to_contain_text("Battery state")
+
+
+def test_a_plan_without_battery_or_car_has_no_state_chart(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store, battery=False, electric_vehicle=False)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-power-panel")).to_be_visible()
+    expect(page.locator("#plan-state-panel")).to_be_hidden()
+    expect(page.locator("#plan-power-legend .legend-item")).to_have_count(4)

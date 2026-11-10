@@ -110,12 +110,18 @@ svg { width: 100%; height: auto; overflow: visible; }
 .series-3 { stroke: #c18a21; }
 .series-4 { stroke: #c0563b; stroke-dasharray: 6 5; }
 .series-5 { stroke: var(--series-2); stroke-dasharray: 6 5; }
+.series-6 { stroke: #2f7fb8; }
+.series-7 { stroke: #8a8f2a; }
+.series-8 { stroke: #b83f8a; }
 .point { fill: var(--card); stroke: var(--series-0); stroke-width: 2; cursor: pointer; }
 .point-1 { stroke: var(--series-1); }
 .point-2 { stroke: var(--series-2); }
 .point-3 { stroke: #c18a21; }
 .point-4 { stroke: #c0563b; }
 .point-5 { stroke: var(--series-2); }
+.point-6 { stroke: #2f7fb8; }
+.point-7 { stroke: #8a8f2a; }
+.point-8 { stroke: #b83f8a; }
 .point:hover, .point:focus { fill: var(--accent); stroke: var(--accent-dark); outline: none; }
 .point-tooltip { position: absolute; z-index: 2; width: max-content; max-width: 320px; padding: 8px 10px; border: 1px solid #bddbd1; border-radius: 8px; color: var(--ink); background: var(--card); box-shadow: var(--shadow); font-size: .75rem; font-weight: 700; pointer-events: none; }
 .chart-wrap { position: relative; }
@@ -179,3 +185,7 @@ a { color: var(--accent-dark); font-weight: 700; }
   footer { padding-bottom: 12px; }
 }
 #price-prediction-note { grid-column: 1 / -1; }
+.legend-6 .legend-swatch { background: #2f7fb8; }
+.legend-7 .legend-swatch { background: #8a8f2a; }
+.legend-8 .legend-swatch { background: #b83f8a; }
+#plan-charts[hidden] { display: none; }
