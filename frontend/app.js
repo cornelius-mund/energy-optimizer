@@ -52,6 +52,7 @@
     power: chartDefinition("plan-power"),
     state: chartDefinition("plan-state"),
     cost: chartDefinition("plan-cost"),
+    import: chartDefinition("plan-import"),
   };
   const planPriceAttribution = document.querySelector("#plan-price-attribution");
   const pricePredictionNote = document.querySelector("#price-prediction-note");
@@ -220,6 +221,8 @@
     plan_cost: "Cost",
     plan_optimizer_cost: "Cost (optimizer)",
     plan_cumulative_cost: "Cumulative cost",
+    plan_import_cost: "Grid import cost",
+    plan_cumulative_import_cost: "Cumulative grid import cost",
     export_price_predicted_forecast: "Export price forecast (EPEX Predictor)",
     inverter_charge_efficiency_actual: "Inverter charge efficiency",
     inverter_discharge_efficiency_actual: "Inverter discharge efficiency",
@@ -776,6 +779,11 @@
       runningCost += hourCost(hour);
       return runningCost;
     });
+    let runningImportCost = 0;
+    const cumulativeImport = plan.schedule.map((hour) => {
+      runningImportCost += hour.import_cost_eur;
+      return runningImportCost;
+    });
     return {
       power: [
         planSeries(plan, "plan_load", "kW", (hour) => hour.load_kw),
@@ -794,6 +802,10 @@
         planSeries(plan, "plan_cost", "EUR", hourCost),
         planSeries(plan, "plan_optimizer_cost", "EUR", (hour) => hour.optimizer_cost_eur),
         { ...planSeries(plan, "plan_cumulative_cost", "EUR", () => 0), values: cumulative },
+      ],
+      import: [
+        planSeries(plan, "plan_import_cost", "EUR", (hour) => hour.import_cost_eur),
+        { ...planSeries(plan, "plan_cumulative_import_cost", "EUR", () => 0), values: cumulativeImport },
       ],
     };
   };

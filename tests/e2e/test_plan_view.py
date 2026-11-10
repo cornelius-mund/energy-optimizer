@@ -484,3 +484,23 @@ def test_a_plan_without_battery_or_car_has_no_state_chart(
     expect(page.locator("#plan-power-panel")).to_be_visible()
     expect(page.locator("#plan-state-panel")).to_be_hidden()
     expect(page.locator("#plan-power-legend .legend-item")).to_have_count(4)
+
+
+def test_the_grid_import_cost_chart_shows_hourly_and_running_import_costs(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-import-panel")).to_be_visible()
+    expect(page.locator("#plan-import-legend .legend-item")).to_have_text(
+        ["Grid import cost (EUR)", "Cumulative grid import cost (EUR)"]
+    )
+    expect(page.locator("#plan-import-series-paths path")).to_have_count(2)
+    running = page.locator(
+        "#plan-import-legend [data-series-id=plan_cumulative_import_cost]"
+    )
+    running.click()
+    expect(running).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#plan-import-series-paths path")).to_have_count(1)
