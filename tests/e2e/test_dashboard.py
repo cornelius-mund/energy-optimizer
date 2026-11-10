@@ -1618,7 +1618,8 @@ def test_forecast_tab_shows_the_price_forecast_after_the_published_prices(
         [
             "Import price (EUR/kWh)",
             "Export price (EUR/kWh)",
-            "Price forecast (EPEX Predictor) (EUR/kWh)",
+            "Import price forecast (EPEX Predictor) (EUR/kWh)",
+            "Export price forecast (EPEX Predictor) (EUR/kWh)",
         ]
     )
     expect(
@@ -1626,6 +1627,8 @@ def test_forecast_tab_shows_the_price_forecast_after_the_published_prices(
     ).to_have_class(re.compile(r"legend-4"))
     expect(page.locator("#price-series-paths path.series-4")).to_have_count(1)
     expect(page.locator("#price-points circle.point-4")).to_have_count(2)
+    expect(page.locator("#price-points circle.point-5")).to_have_count(2)
+    expect(page.locator("#price-series-paths path.series-5")).to_have_count(1)
     expect(page.locator("#price-prediction-note")).to_be_visible()
     expect(page.locator("#price-prediction-note")).to_contain_text(
         "dashed line is the EPEX Predictor forecast"

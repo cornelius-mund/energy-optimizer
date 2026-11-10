@@ -487,3 +487,38 @@ def test_forecast_prices_are_the_tariff_prices_the_plan_uses(
         [(10 + 1 + 2) * 1.19 / 100, (12 + 1 + 2) * 1.19 / 100]
     )
     assert series["export_price_forecast"]["values"] == pytest.approx([0.07, 0.07])
+
+
+def test_forecast_export_prices_continue_after_the_published_prices(
+    persistence_configuration: Path, store: ProviderDataStore
+) -> None:
+    append_configuration(
+        persistence_configuration,
+        AWATTAR_CONFIGURATION + "epex_predictor: {}\n" + TARIFF_CONFIGURATION,
+    )
+    save_prices(store, import_prices=(0.10, 0.12), export_prices=(0.10, 0.12))
+    predicted_hours = tuple(hours_after_start(hour) for hour in range(4))
+    store.save(
+        ProviderDataKey("electricity-price-forecast", "epex-predictor", "de"),
+        TypeAdapter(ElectricityPriceData),
+        ElectricityPriceData(
+            schema_version="1",
+            timestamps=predicted_hours,
+            interval_minutes=60,
+            import_price_eur_per_kwh=(0.5, 0.5, 0.2, 0.3),
+            export_price_eur_per_kwh=(0.5, 0.5, 0.2, 0.3),
+            unit="EUR/kWh",
+            source=SourceMetadata(provider="epex-predictor", entity_id="de"),
+            retrieved_at=START,
+            expires_at=hours_after_start(4),
+        ),
+    )
+
+    body = get_dashboard_data("forecast", window_hours=4)
+
+    series = {item["id"]: item for item in body["series"]}
+    assert series["export_price_predicted_forecast"]["values"] == pytest.approx(
+        [None, None, 0.07, 0.07], nan_ok=True
+    )
+    assert series["export_price_predicted_forecast"]["data_type"] == "export_price"
+    assert series["price_predicted_forecast"]["values"][:2] == [None, None]
