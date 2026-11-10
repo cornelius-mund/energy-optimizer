@@ -138,6 +138,8 @@ class PlannedHour:
     battery: PlannedBatteryHour | None = None
     ev: PlannedEvHour | None = None
     optimizer_cost_eur: Euro = 0.0
+    import_price_eur_per_kwh: EuroPerKilowattHour = 0.0
+    export_price_eur_per_kwh: EuroPerKilowattHour = 0.0
 
 
 @dataclass(frozen=True)

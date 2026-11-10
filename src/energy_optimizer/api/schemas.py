@@ -731,6 +731,12 @@ class PlannedHourResponse(_StrictModel):
     ev: PlannedEvResponse | None = Field(
         default=None, description="EV charging; null when no car is planned"
     )
+    import_price_eur_per_kwh: float = Field(
+        default=0, description="Import price the plan uses in EUR/kWh"
+    )
+    export_price_eur_per_kwh: float = Field(
+        default=0, description="Export price the plan uses in EUR/kWh"
+    )
     optimizer_cost_eur: float = Field(
         default=0,
         description=(

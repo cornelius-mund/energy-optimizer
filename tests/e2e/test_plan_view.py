@@ -74,6 +74,8 @@ def _hour(
             else None
         ),
         optimizer_cost_eur=0.5 * (index + 1) - 0.25,
+        import_price_eur_per_kwh=0.2 + 0.05 * index,
+        export_price_eur_per_kwh=0.07,
     )
 
 
@@ -504,3 +506,21 @@ def test_the_grid_import_cost_chart_shows_hourly_and_running_import_costs(
     running.click()
     expect(running).to_have_attribute("aria-pressed", "false")
     expect(page.locator("#plan-import-series-paths path")).to_have_count(1)
+
+
+def test_the_prices_per_kwh_are_drawn_beside_the_power_chart(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    _save_plan(provider_store)
+
+    _open_plan(page)
+
+    expect(page.locator("#plan-price-panel")).to_be_visible()
+    expect(page.locator("#plan-price-legend .legend-item")).to_have_text(
+        ["Import price (EUR/kWh)", "Export price (EUR/kWh)"]
+    )
+    expect(page.locator("#plan-price-series-paths path")).to_have_count(2)
+    import_price = page.locator("#plan-price-legend [data-series-id=plan_import_price]")
+    import_price.click()
+    expect(import_price).to_have_attribute("aria-pressed", "false")
+    expect(page.locator("#plan-price-series-paths path")).to_have_count(1)

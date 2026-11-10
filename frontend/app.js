@@ -53,6 +53,7 @@
     state: chartDefinition("plan-state"),
     cost: chartDefinition("plan-cost"),
     import: chartDefinition("plan-import"),
+    price: chartDefinition("plan-price"),
   };
   const planPriceAttribution = document.querySelector("#plan-price-attribution");
   const pricePredictionNote = document.querySelector("#price-prediction-note");
@@ -222,6 +223,8 @@
     plan_optimizer_cost: "Cost (optimizer)",
     plan_cumulative_cost: "Cumulative cost",
     plan_import_cost: "Grid import cost",
+    plan_import_price: "Import price",
+    plan_export_price: "Export price",
     plan_cumulative_import_cost: "Cumulative grid import cost",
     export_price_predicted_forecast: "Export price forecast (EPEX Predictor)",
     inverter_charge_efficiency_actual: "Inverter charge efficiency",
@@ -793,6 +796,10 @@
         planSeries(plan, "plan_battery_charge", "kW", (hour) => hour.battery && hour.battery.charge_kw),
         planSeries(plan, "plan_battery_discharge", "kW", (hour) => hour.battery && hour.battery.discharge_kw),
         planSeries(plan, "plan_ev_charge", "kW", (hour) => hour.ev && hour.ev.charge_kw),
+      ],
+      price: [
+        planSeries(plan, "plan_import_price", "EUR/kWh", (hour) => hour.import_price_eur_per_kwh),
+        planSeries(plan, "plan_export_price", "EUR/kWh", (hour) => hour.export_price_eur_per_kwh),
       ],
       state: [
         planSeries(plan, "plan_battery_state", "%", (hour) => hour.battery && hour.battery.state_of_charge_percent),

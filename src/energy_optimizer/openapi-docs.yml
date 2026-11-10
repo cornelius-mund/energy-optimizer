@@ -2100,6 +2100,16 @@ components:
           - $ref: '#/components/schemas/PlannedEvResponse'
           - type: 'null'
           description: EV charging; null when no car is planned
+        import_price_eur_per_kwh:
+          type: number
+          title: Import Price Eur Per Kwh
+          description: Import price the plan uses in EUR/kWh
+          default: 0
+        export_price_eur_per_kwh:
+          type: number
+          title: Export Price Eur Per Kwh
+          description: Export price the plan uses in EUR/kWh
+          default: 0
         optimizer_cost_eur:
           type: number
           title: Optimizer Cost Eur
