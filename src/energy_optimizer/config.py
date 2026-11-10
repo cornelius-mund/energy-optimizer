@@ -611,6 +611,15 @@ class EvChargingConfiguration(_StrictModel):
         ge=0,
         description="`minimum_plus_target`: value of a stored kWh above the minimum",
     )
+    cheap_market_price_ct_per_kwh: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "`daily_minimum`: the car charges to its limit in every hour in which "
+            "the market price is at or below this value (ct/kWh)"
+        ),
+    )
     home_hours: EvHomeHoursConfiguration | None = Field(
         default=None,
         description=(
@@ -649,6 +658,18 @@ class EvChargingConfiguration(_StrictModel):
                 raise ValueError(
                     "ev_charging.target_soc_percent must not be below any minimum"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_cheap_charging(self) -> "EvChargingConfiguration":
+        if (
+            self.cheap_market_price_ct_per_kwh is not None
+            and self.strategy != "daily_minimum"
+        ):
+            raise ValueError(
+                "ev_charging.cheap_market_price_ct_per_kwh needs "
+                "the daily_minimum strategy"
+            )
         return self
 
     def _validate_soft_target(self) -> None:

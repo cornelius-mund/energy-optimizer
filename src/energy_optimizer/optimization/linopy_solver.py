@@ -181,6 +181,10 @@ def _minimize_net_cost(
         assert problem.ev is not None
         stored_value = problem.ev.value_eur_per_kwh * problem.ev.charge_efficiency
         objective = objective - stored_value * variables.ev.charge.sum()
+        bonus = problem.ev.cheap_charge_bonus_eur_per_kwh
+        if bonus is not None:
+            credit = _hourly(bonus, hours) * problem.ev.charge_efficiency
+            objective = objective - (credit * variables.ev.charge).sum()
     model.add_objective(objective)
 
 

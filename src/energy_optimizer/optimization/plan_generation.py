@@ -56,6 +56,8 @@ from energy_optimizer.storage import ProviderDataKey, ProviderDataStore
 logger = logging.getLogger(__name__)
 
 SURPLUS_CHARGING_VALUE_EUR_PER_KWH = 1.0
+# Larger than any import price, so the car charges to its limit in cheap hours.
+CHEAP_CHARGE_VALUE_EUR_PER_KWH = 1.0
 TERMINAL_VALUE_DISCOUNT = 0.02
 ONE_HOUR = timedelta(hours=1)
 PLAN_KEY = ProviderDataKey("optimization-plan", "energy-optimizer", "current")
@@ -228,6 +230,22 @@ def stored_ev_energy_value(import_prices: tuple[float, ...]) -> float:
     return max(min(import_prices), 0.0) if import_prices else 0.0
 
 
+def cheap_charge_bonus(
+    market_prices_eur_per_kwh: tuple[float, ...],
+    cheap_market_price_ct_per_kwh: float | None,
+) -> tuple[float, ...] | None:
+    """Per hour, the bonus for a kWh stored while the market price is at or below
+    the configured threshold; None when no threshold is configured.
+    """
+    if cheap_market_price_ct_per_kwh is None:
+        return None
+    threshold = cheap_market_price_ct_per_kwh / 100
+    return tuple(
+        CHEAP_CHARGE_VALUE_EUR_PER_KWH if price <= threshold else 0.0
+        for price in market_prices_eur_per_kwh
+    )
+
+
 def daily_minimum_charging(
     ev: EvData,
     charging: EvChargingConfiguration,
@@ -235,6 +253,7 @@ def daily_minimum_charging(
     time_zone: ZoneInfo,
     patterns: EvPatterns,
     stored_value_eur_per_kwh: float = 0.0,
+    cheap_bonus: tuple[float, ...] | None = None,
 ) -> EvSpecification:
     """Charge on the cheapest days while every morning keeps its minimum; the
     car is expected home and driving as its learned weekly pattern says.
@@ -265,6 +284,7 @@ def daily_minimum_charging(
         ),
         charge_limit_kwh=charging.limit_soc_percent / 100 * ev.capacity_kwh,
         value_eur_per_kwh=stored_value_eur_per_kwh,
+        cheap_charge_bonus_eur_per_kwh=cheap_bonus,
     )
 
 
@@ -276,6 +296,7 @@ def ev_specification(
     surplus_kw: tuple[float, ...],
     patterns: EvPatterns = NO_PATTERNS,
     import_prices: tuple[float, ...] = (),
+    market_prices: tuple[float, ...] = (),
 ) -> EvSpecification | None:
     if charging.strategy == "daily_minimum":
         return daily_minimum_charging(
@@ -285,6 +306,7 @@ def ev_specification(
             time_zone,
             patterns,
             stored_ev_energy_value(import_prices),
+            cheap_charge_bonus(market_prices, charging.cheap_market_price_ct_per_kwh),
         )
     limit_kwh = charging.limit_soc_percent / 100 * ev.capacity_kwh
     if charging.strategy == "surplus":
@@ -630,7 +652,13 @@ class PlanGenerator:
                 if isinstance(battery, BatteryData)
                 else None
             ),
-            ev=self._ev(snapshot, hour_starts, surplus_kw, import_prices),
+            ev=self._ev(
+                snapshot,
+                hour_starts,
+                surplus_kw,
+                import_prices,
+                tuple(prices.import_price_eur_per_kwh[i] for i in prices_at),
+            ),
         )
         return problem, forecast, price_forecast_from
 
@@ -640,6 +668,7 @@ class PlanGenerator:
         hour_starts: list[datetime],
         surplus_kw: tuple[float, ...],
         import_prices: tuple[float, ...],
+        market_prices: tuple[float, ...],
     ) -> EvSpecification | None:
         ev = snapshot.data.get("ev")
         charging = self.configuration.ev_charging
@@ -653,7 +682,14 @@ class PlanGenerator:
             else NO_PATTERNS
         )
         return ev_specification(
-            ev, charging, hour_starts, time_zone, surplus_kw, patterns, import_prices
+            ev,
+            charging,
+            hour_starts,
+            time_zone,
+            surplus_kw,
+            patterns,
+            import_prices,
+            market_prices,
         )
 
 
