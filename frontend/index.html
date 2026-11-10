@@ -191,6 +191,17 @@
                 </svg>
                 <div id="plan-cost-legend" class="chart-legend" role="group" aria-label="Planned cost series"></div>
               </div>
+              <div id="plan-import-panel" class="chart-panel" hidden>
+                <svg id="plan-import-chart" class="data-chart" viewBox="0 0 800 330" role="img" aria-label="Planned grid import cost (EUR)" aria-describedby="plan-import-chart-description">
+                  <desc id="plan-import-chart-description">Grid import cost per planned hour in EUR, and its running total.</desc>
+                  <text class="axis-unit" id="plan-import-axis-unit" x="4" y="12">EUR</text>
+                  <g id="plan-import-grid-lines"></g>
+                  <g id="plan-import-series-paths"></g>
+                  <g id="plan-import-points"></g>
+                  <g id="plan-import-labels"></g>
+                </svg>
+                <div id="plan-import-legend" class="chart-legend" role="group" aria-label="Planned grid import cost series"></div>
+              </div>
             </div>
             <div class="point-tooltip" role="status" aria-live="polite" hidden></div>
           </div>
