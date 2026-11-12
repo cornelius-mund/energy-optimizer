@@ -42,7 +42,6 @@ def configuration(
                 "state_of_charge": {"entity_id": "sensor.soc", "unit": "%"},
                 "plugged_in": {"entity_id": "binary_sensor.cable"},
                 "capacity_kwh": 60,
-                "minimum_charge_kw": 1.4,
                 "maximum_charge_kw": 11,
                 "control": {
                     "enabled": True,

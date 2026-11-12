@@ -60,7 +60,6 @@ class HomeAssistantEvImporter:
             state_of_charge_kwh=soc_kwh,
             capacity_kwh=ev.capacity_kwh,
             plugged_in=plugged_in,
-            minimum_charge_kw=ev.minimum_charge_kw,
             maximum_charge_kw=ev.maximum_charge_kw,
             charge_efficiency=ev.charge_efficiency,
             unit="kWh",

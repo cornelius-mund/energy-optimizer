@@ -176,7 +176,6 @@ def _ev(
     state_of_charge_kwh: float,
     plugged_in: bool,
     charge_efficiency: float = 1.0,
-    minimum_charge_kw: float = 1.4,
 ) -> EvData:
     return EvData(
         schema_version="1",
@@ -184,7 +183,6 @@ def _ev(
         state_of_charge_kwh=state_of_charge_kwh,
         capacity_kwh=CAPACITY_KWH,
         plugged_in=plugged_in,
-        minimum_charge_kw=minimum_charge_kw,
         maximum_charge_kw=11.0,
         charge_efficiency=charge_efficiency,
         unit="kWh",
@@ -256,16 +254,13 @@ CAR_EFFICIENCY = 0.9
 BATTERY_LEG_EFFICIENCY = 0.9
 
 
-def _valued_car(
-    state_of_charge_kwh: float, hours: int, minimum_charge_kw: float = 1.4
-) -> EvSpecification:
+def _valued_car(state_of_charge_kwh: float, hours: int) -> EvSpecification:
     sunday_noon = MONDAY + timedelta(days=6, hours=12)
     return daily_minimum_charging(
         _ev(
             state_of_charge_kwh=state_of_charge_kwh,
             plugged_in=True,
             charge_efficiency=CAR_EFFICIENCY,
-            minimum_charge_kw=minimum_charge_kw,
         ),
         EvChargingConfiguration(strategy="daily_minimum"),
         _hours(sunday_noon, hours),
@@ -316,9 +311,7 @@ def test_the_car_is_not_charged_from_the_grid_just_to_store_energy() -> None:
     )
 
 
-def test_the_battery_tops_up_pv_surplus_to_the_charger_minimum() -> None:
-    """A full battery cannot take the 3 kW surplus; the wall box needs 4.1 kW, so
-    the battery adds 1.1 kW instead of exporting the surplus for 7 ct."""
+def test_small_pv_surplus_charges_the_car_without_drawing_from_the_battery() -> None:
     full_battery = BatterySpecification(
         minimum_soc_kwh=0.0,
         maximum_soc_kwh=8.0,
@@ -339,14 +332,14 @@ def test_the_battery_tops_up_pv_surplus_to_the_charger_minimum() -> None:
                 export_price_eur_per_kwh=(FEED_IN_EUR_PER_KWH,),
                 battery=full_battery,
             ),
-            ev=_valued_car(state_of_charge_kwh=50.0, hours=1, minimum_charge_kw=4.1),
+            ev=_valued_car(state_of_charge_kwh=50.0, hours=1),
         )
     )
 
     (hour,) = plan.hours
     assert hour.ev is not None and hour.battery is not None
-    assert hour.ev.charge_kw == pytest.approx(4.1)
-    assert hour.battery.discharge_kw == pytest.approx(1.1)
+    assert hour.ev.charge_kw == pytest.approx(3.0)
+    assert hour.battery.discharge_kw == pytest.approx(0.0, abs=TOLERANCE)
     assert hour.grid_import_kw == pytest.approx(0.0, abs=TOLERANCE)
     assert hour.grid_export_kw == pytest.approx(0.0, abs=TOLERANCE)
 

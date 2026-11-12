@@ -52,7 +52,6 @@ TARIFF = {
 }
 EV_CAPACITY_KWH = 60.0
 EV_TARGET_PERCENT = 60.0
-EV_MINIMUM_CHARGE_KW = 1.4
 EV_MAXIMUM_CHARGE_KW = 4.0
 EV_EFFICIENCY = 0.9
 HOURS_UNTIL_EV_DEADLINE = 12
@@ -102,7 +101,6 @@ def _chain_configuration(world_url: str, data_directory: Path) -> dict[str, Any]
         "state_of_charge": {"entity_id": EV_SOC_ENTITY, "unit": "%"},
         "plugged_in": {"entity_id": EV_PLUG_ENTITY},
         "capacity_kwh": EV_CAPACITY_KWH,
-        "minimum_charge_kw": EV_MINIMUM_CHARGE_KW,
         "maximum_charge_kw": EV_MAXIMUM_CHARGE_KW,
         "charge_efficiency": EV_EFFICIENCY,
         "control": {
@@ -307,11 +305,7 @@ def test_the_car_is_charged_to_its_target_before_the_deadline_in_cheap_hours(
     previous = EV_CAPACITY_KWH * EV_SOC_PERCENT / 100
     for index, hour in enumerate(schedule):
         charge_kw = hour["ev"]["charge_kw"]
-        assert charge_kw == pytest.approx(0.0, abs=TOLERANCE) or (
-            EV_MINIMUM_CHARGE_KW - TOLERANCE
-            <= charge_kw
-            <= EV_MAXIMUM_CHARGE_KW + TOLERANCE
-        )
+        assert -TOLERANCE <= charge_kw <= EV_MAXIMUM_CHARGE_KW + TOLERANCE
         if index >= deadline_index:
             assert charge_kw == pytest.approx(0.0, abs=TOLERANCE)
         assert hour["ev"]["state_of_charge_kwh"] == pytest.approx(
@@ -630,7 +624,7 @@ def test_every_morning_keeps_the_daily_minimum_with_the_learned_driving(
             car["expected_plugged_in"]
             and car["charge_kw"] < EV_MAXIMUM_CHARGE_KW - 1e-4
             and car["state_of_charge_percent"] < 100 - 1e-4
-            and hour["grid_export_kw"] >= EV_MINIMUM_CHARGE_KW
+            and hour["grid_export_kw"] > 1e-4
         )
         assert not car_can_take_more
 

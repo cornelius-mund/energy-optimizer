@@ -81,6 +81,13 @@ forecast instead of a published day-ahead price (null when every price is
 published). It returns 404 before the first plan exists and 503
 when persistence is not configured. See the README for how the inputs are derived.
 
+EV `charge_kw` is the mean charging power over an hour: a value of 0.805 kW
+allocates 0.805 kWh and can represent a shorter charging duration at higher power.
+Hourly EV charging has no minimum-power threshold and is bounded by the charger
+maximum, availability, energy and state-of-charge constraints. Immediate charging
+also uses the exact remaining energy in its last hour. The wallbox controller
+currently forwards hourly setpoints; it does not implement timed intrahour pulses.
+
 ## Appliances and general energy history
 
 Heat pumps and other manageable appliances use the same installation-specific
