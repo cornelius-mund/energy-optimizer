@@ -618,6 +618,12 @@ def test_every_morning_keeps_the_daily_minimum_with_the_learned_driving(
     driving = [hour["ev"]["consumption_kwh"] for hour in schedule]
     assert max(driving) == pytest.approx(learned_kwh_per_day, rel=1e-6)
     assert plan["ev_shortfall_kwh"] == pytest.approx(0.0, abs=1e-6)
+    # Surplus charging is optional: exporting can pay more than the credit
+    # for storing energy in the car, depending on the forecast horizon.
+    charging_value = (
+        max(min(hour["import_price_eur_per_kwh"] for hour in schedule), 0.0)
+        * EV_EFFICIENCY
+    )
     for hour in schedule:
         car = hour["ev"]
         car_can_take_more = (
@@ -625,8 +631,9 @@ def test_every_morning_keeps_the_daily_minimum_with_the_learned_driving(
             and car["charge_kw"] < EV_MAXIMUM_CHARGE_KW - 1e-4
             and car["state_of_charge_percent"] < 100 - 1e-4
             and hour["grid_export_kw"] > 1e-4
+            and hour["export_price_eur_per_kwh"] < charging_value - TOLERANCE
         )
-        assert not car_can_take_more
+        assert not car_can_take_more, hour
 
 
 FEED_IN_CT_PER_KWH = 7.0
