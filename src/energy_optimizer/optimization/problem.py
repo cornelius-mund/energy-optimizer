@@ -61,7 +61,9 @@ class EvSpecification:
     A ``fixed_charge_kw`` schedule replaces the choice of hours and power; the
     rest of the plan is optimized around it. ``surplus_kw`` bounds the charge
     power per hour (PV that the household does not use) and ``charge_limit_kwh``
-    the state of charge the car is charged up to. Every kWh stored beyond the
+    the state of charge the car is charged up to (capacity when omitted; zero
+    prevents charging). Existing energy above that limit is retained, but cannot
+    be replenished above the limit after driving. Every kWh stored beyond the
     target is worth ``value_eur_per_kwh`` in the optimization (not in the reported
     objective), which is what makes the car take energy that would be exported.
     ``consumption_kwh`` is the energy the car is expected to use for driving in
