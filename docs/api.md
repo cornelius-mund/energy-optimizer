@@ -81,6 +81,11 @@ forecast instead of a published day-ahead price (null when every price is
 published). It returns 404 before the first plan exists and 503
 when persistence is not configured. See the README for how the inputs are derived.
 
+An EV charging limit bounds added energy, rather than invalidating energy already
+in the car: a state of charge above the configured limit still produces a household
+plan, with no further charging while above the limit. After driving reduces the
+state below the limit, charging can resume up to the limit.
+
 ## Appliances and general energy history
 
 Heat pumps and other manageable appliances use the same installation-specific

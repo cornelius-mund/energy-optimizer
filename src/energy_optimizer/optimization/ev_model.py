@@ -46,7 +46,7 @@ def add_ev(
         ),
         state_of_charge=model.add_variables(
             lower=0,
-            upper=specification.charge_limit_kwh or specification.capacity_kwh,
+            upper=_state_of_charge_bound(specification, hours),
             coords=[hours],
             name="ev_soc_kwh",
         ),
@@ -63,6 +63,22 @@ def add_ev(
     _require_target_at_deadline(model, hours, specification, variables)
     _require_morning_minimums(model, hours, specification, variables)
     return variables
+
+
+def _state_of_charge_bound(
+    specification: EvSpecification, hours: pandas.RangeIndex
+) -> pandas.Series:
+    limit = (
+        specification.capacity_kwh
+        if specification.charge_limit_kwh is None
+        else specification.charge_limit_kwh
+    )
+    consumption = pandas.Series(
+        specification.consumption_kwh or 0.0, index=hours, dtype=float
+    )
+    # Existing energy above the charging limit is usable, but driving must not
+    # create room to recharge back above that limit.
+    return (specification.initial_soc_kwh - consumption.cumsum()).clip(lower=limit)
 
 
 def _power_bound(

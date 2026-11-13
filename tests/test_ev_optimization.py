@@ -182,6 +182,75 @@ def test_surplus_charging_stops_at_the_charge_limit() -> None:
     assert sum(charged_kw(plan)) * 0.9 <= 5.0 + TOLERANCE
 
 
+@pytest.mark.parametrize("prices", [PRICES, (-0.30,) * 4])
+def test_existing_energy_above_the_charge_limit_does_not_block_the_household_plan(
+    prices: tuple[float, ...],
+) -> None:
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        charge_limit_kwh=5.0,
+        value_eur_per_kwh=1.0,
+    )
+    plan = solve(replace(problem((1.0,) * 4, prices), ev=ev))
+
+    assert plan.status is PlanStatus.OPTIMAL
+    assert charged_kw(plan) == pytest.approx([0.0] * 4, abs=TOLERANCE)
+    assert [ev_soc_kwh(plan, i) for i in range(4)] == pytest.approx([10.0] * 4)
+    assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
+    for hour in plan.hours:
+        assert hour.grid_import_kw == pytest.approx(hour.load_kw)
+
+
+def test_driving_does_not_allow_recharging_above_the_limit_to_the_initial_state() -> (
+    None
+):
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        target_soc_kwh=0.0,
+        charge_limit_kwh=5.0,
+        plugged_in=(True, False, False, True),
+        consumption_kwh=(0.0, 2.0, 5.0, 0.0),
+        value_eur_per_kwh=1.0,
+    )
+
+    plan = solve_with(ev, prices=(-0.30,) * 4)
+
+    assert plan.status is PlanStatus.OPTIMAL
+    assert charged_kw(plan) == pytest.approx([0.0, 0.0, 0.0, 2 / 0.9])
+    assert [ev_soc_kwh(plan, i) for i in range(4)] == pytest.approx([10, 8, 3, 5])
+    assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
+
+
+@pytest.mark.parametrize("initial_soc_kwh", [0.0, INITIAL_SOC_KWH])
+def test_a_zero_charge_limit_prevents_charging_even_with_negative_prices(
+    initial_soc_kwh: float,
+) -> None:
+    ev = replace(
+        electric_vehicle(stored_kwh_needed=0.0),
+        initial_soc_kwh=initial_soc_kwh,
+        target_soc_kwh=initial_soc_kwh,
+        charge_limit_kwh=0.0,
+    )
+
+    plan = solve_with(ev, prices=(-0.30,) * 4)
+
+    assert plan.status is PlanStatus.OPTIMAL
+    assert charged_kw(plan) == pytest.approx([0.0] * 4, abs=TOLERANCE)
+    assert [ev_soc_kwh(plan, i) for i in range(4)] == pytest.approx(
+        [initial_soc_kwh] * 4
+    )
+
+
+def test_an_omitted_charge_limit_allows_charging_up_to_capacity() -> None:
+    ev = replace(electric_vehicle(stored_kwh_needed=0.0), initial_soc_kwh=58.0)
+
+    plan = solve_with(ev, prices=(-0.30,) * 4)
+
+    assert plan.status is PlanStatus.OPTIMAL
+    assert ev_soc_kwh(plan, 3) == pytest.approx(ev.capacity_kwh)
+    assert sum(charged_kw(plan)) * ev.charge_efficiency == pytest.approx(2.0)
+
+
 def test_energy_above_the_minimum_is_charged_only_while_it_is_worth_it() -> None:
     ev = replace(
         electric_vehicle(stored_kwh_needed=0.0),

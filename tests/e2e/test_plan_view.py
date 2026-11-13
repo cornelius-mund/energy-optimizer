@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from playwright.sync_api import Page, Route, expect
 
+from energy_optimizer.config import Configuration
 from energy_optimizer.optimization import (
     Plan,
     PlannedBatteryHour,
@@ -17,9 +18,12 @@ from energy_optimizer.optimization import (
 from energy_optimizer.optimization.plan_generation import (
     PLAN_ADAPTER,
     PLAN_KEY,
+    PlanGenerator,
     PlanSnapshot,
 )
 from energy_optimizer.storage import ProviderDataStore
+from test_ev_planning import configuration, ev_responses, importer
+from test_plan_generation import NOW, flat_history, prices, pv_forecast, snapshot
 
 pytestmark = pytest.mark.e2e
 
@@ -127,6 +131,46 @@ def _open_plan(page: Page) -> None:
     page.goto("/dashboard/")
     expect(page.locator("#status")).not_to_contain_text("Loading dashboard")
     page.locator("#plan-tab").click()
+
+
+@pytest.mark.parametrize(
+    "strategy", ["surplus", "minimum_plus_target", "daily_minimum"]
+)
+def test_a_car_above_its_charging_limit_still_has_a_household_plan(
+    page: Page, provider_store: ProviderDataStore, strategy: str
+) -> None:
+    settings = configuration().model_dump(mode="json")
+    settings["ev_charging"] = {
+        "strategy": strategy,
+        "target_soc_percent": 60,
+        "minimum_soc_percent": 30,
+        "value_eur_per_kwh": 0.2,
+        "deadline": "07:00",
+    }
+    car = importer(ev_responses("90", "on")).fetch(now=NOW)
+    stored = PlanGenerator(Configuration.model_validate(settings), provider_store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([4.0] * 18),
+            electricity_prices=prices([-0.30] * 18),
+            ev=car,
+        )
+    )
+    assert stored.plan.status is PlanStatus.OPTIMAL
+
+    _open_plan(page)
+
+    expect(page.locator("#status")).to_contain_text("solver status optimal")
+    rows = page.locator("#plan-rows tr")
+    expect(rows).to_have_count(18)
+    headers = page.locator("#plan-head th").all_text_contents()
+    for row in rows.all():
+        expect(row.locator("td").nth(headers.index("EV charge (kW)"))).to_have_text(
+            "0.00"
+        )
+        expect(row.locator("td").nth(headers.index("EV state (%)"))).to_have_text(
+            "90.0"
+        )
 
 
 def test_the_plan_tab_says_no_plan_exists_before_the_first_one(page: Page) -> None:
