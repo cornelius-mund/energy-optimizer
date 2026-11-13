@@ -15,6 +15,15 @@ controller. No live Home Assistant settings were changed.
   to water (3.8 kW). Cost is 0.12 EUR per useful kWh including efficiency losses;
   do not apply a second fuel-efficiency correction.
 - The requested first outcome is recommendations only, with no actuator writes.
+- Fireplace starts are allowed between 07:00 and 21:00 local time. A burn lasts
+  at least one hour; durations beyond one hour can be extended, for example in
+  15-minute increments. A standalone 15-minute burn is not allowed. The start
+  window is not a mandatory extinguishing time: a 21:00 start may burn past 21:00.
+- The 3.8 kW water share supplies domestic hot water, also heated by the heat
+  pump. The owner reports approximately 600 litres and a 70 C storage ceiling.
+- cmund will configure the other installation independently. Its parameters and
+  sensor mapping remain configurable; its measurements are not a prerequisite
+  for this home's advisory design.
 
 ## Evidence from the connected installation
 
@@ -37,7 +46,7 @@ has not been measured in this investigation.
 | Modes | `sensor.altherma_operation_mode`, `sensor.altherma_defrost_operation` | Separate space heating, hot water and defrost. |
 | Hot-water meters | `sensor.espaltherma_unit_meter_heat_produced_hot_water_kwh`, `sensor.espaltherma_unit_meter_electricity_used_hot_water_kwh` | Separate thermal load/storage, not room heating. |
 | Backup electricity | `sensor.espaltherma_unit_meter_electricity_used_backup_heater_kwh` | Verify inclusion in other meters before summing. |
-| Storage temperatures | `sensor.shellyunispeichertemperaturen_ds18b20_1_temperature` through `_8_temperature` | Tank identity, sensor positions, volume and hydraulic role need confirmation. |
+| Storage temperatures | `sensor.shellyunispeichertemperaturen_ds18b20_2_temperature`, `_3_temperature`, `_4_temperature`, `_8_temperature`, `_5_temperature` | Five labelled tank positions from bottom to top; see the verified mapping below. |
 | Fireplace indication | `sensor.kaminpumpe_leistungsfaktor` | Pump electrical power factor does not measure delivered heat. |
 
 Sample observations, not calibrated parameters:
@@ -90,6 +99,52 @@ Existing controls include `input_boolean.wp_leistungsregelung_aktiv`,
 write them. Verify whether target power is electrical or thermal. Current appliance
 configuration declares a 3 kW electrical maximum and discrete fractions
 [0, 0.3, 0.6, 1]; validate both device limits and controller semantics before use.
+
+## Confirmed domestic hot-water store and sensor mapping
+
+A follow-up read of the actual HA friendly names resolved the previously uncertain
+DS18B20 mapping. The suffix alone is not the physical sensor height:
+
+| DS18B20 suffix | HA-labelled location | Role in the model |
+| --- | --- | --- |
+| 1 | Floor-heating return | Hydraulic diagnostic, not a tank layer. |
+| 2 | Store 1/5, bottom | Lowest observed tank position. |
+| 3 | Store 2/5 | Lower-middle tank position. |
+| 4 | Store 3/5 | Middle/upper tank position. |
+| 8 | Store 4/5 | Upper tank position; numerically out of order. |
+| 5 | Store 5/5, top | Top tank position relevant to hot-water availability. |
+| 6 | Fireplace supply | Source diagnostic, not a tank layer. |
+| 7 | Floor-heating supply | Hydraulic diagnostic, not a tank layer. |
+
+The follow-up tank readings, in height order 2/3/4/8/5, were approximately
+38.75/45.13/46.13/46.94/47.25 C. This confirms meaningful stratification, not a
+uniform 600-litre temperature. The heat pump's own DHW probe read about 45.8 C.
+These are point observations, not a calibrated usable-energy estimate.
+
+Using water density approximately 1 kg/litre and heat capacity 4.186 kJ/(kg K),
+600 litres have a total sensible heat capacity of about 0.698 kWh/K. A uniform
+50-to-70 C rise would store about 13.95 kWh thermal and take about 3.67 hours of
+the fireplace's 3.8 kW water output, ignoring losses and hot-water draw. This is
+a capacity example, not a recommendation to heat the current tank to 70 C.
+
+Represent at least upper and lower tank states, or five calibrated layers using
+the observed heights. Equal 120-litre layer volumes are only an initial geometry
+approximation, not measured volume weights. Include heat injection locations,
+inter-layer exchange, standing losses and hot-water draw/replacement water.
+Top temperature alone cannot establish the whole store's energy or service reserve.
+
+The 70 C ceiling applies to the store, not automatically to the heat pump's
+achievable operating range. The existing `input_number.wp_warmwasser_ziel_c`
+helper currently allows 45-55 C and reads 47 C. Use verified heat-pump DHW
+capabilities and its separate DHW COP map; do not assume it can or should charge
+to 70 C simply because the fireplace can supply a hotter store.
+
+For a single-compressor installation, space heating and DHW production need
+exclusive operating modes and their own heat/electricity balances. Hot-water
+demand should be estimated from retained history and temperature changes with
+uncertainty, not silently assumed zero. A DHW service minimum and forecast draws
+must remain explicit configurable inputs; the helper's current range is evidence,
+not a newly approved service-temperature schedule.
 
 ## Physics and per-house parameters
 
@@ -146,11 +201,10 @@ Q_fireplace_water = (19/30) * Q_fireplace_total
 ```
 
 Do not distribute the 0.2 kW rest-of-house share to each room: it is the total
-share for those rooms together. Its distribution needs identification. Confirm
-whether the water destination is domestic hot water or a heating buffer that
-can later supply rooms. Until that hydraulic mapping is known, do not count the
-3.8 kW as room heating or assume a drinking-water demand can absorb it. Water
-storage needs measured initial state, volume, capacity, losses and upper limits.
+share for those rooms together. Its distribution needs identification. The owner
+confirmed domestic hot water as the water-side use. Do not count the 3.8 kW as
+direct room heating, or assume the hot-water store has unlimited room for it.
+Use the confirmed 600-litre capacity and 70 C ceiling with the mapped sensor layers.
 
 Fit each house independently using stable room sensors, multiple weeks of varied
 weather and operating conditions, and held-out prediction tests. Identify stove
@@ -174,6 +228,18 @@ allowed hours, batch size and minimum burn time.
 Treat lighting/refilling as a manual recommendation requiring confirmation; do
 not assume instantaneous starts, arbitrary modulation or interruptible burns.
 
+Use a quarter-hour fireplace schedule within the hourly electricity horizon:
+binary on/off variables, starts only 07:00-21:00 local, at least four contiguous
+15-minute slots after each start, and optional further slots. Four slots is a
+minimum duration, not a fixed one-hour burn or permission to stop every 15 minutes.
+At nominal output one slot delivers 0.5 kWh living-room heat, 0.05 kWh to other
+rooms and 0.95 kWh to DHW, costing 0.18 EUR in total. Aggregate those energies
+back to the hourly objective without rounding the duration to whole hours.
+Use thermal substeps or conservative bounds to check room/tank temperatures
+throughout a burn, rather than masking an intra-hour overshoot with an hourly mean.
+Actual output variation and cooldown tails need conservative uncertainty or
+observed calibration; a binary model does not make combustion instantly controllable.
+
 For intuition, grid-supplied heat costs approximately electricity price / COP.
 At 0.35 EUR/kWh electric and COP 4 this is 0.0875 EUR/kWh thermal, below 0.12.
 At COP 2 it is 0.175, above 0.12. The crossover is COP = price / 0.12, about
@@ -184,6 +250,10 @@ output the fireplace costs 0.72 EUR/hour, but only 2.2 kW directly heats rooms.
 If the water heat cannot be used, that is about 32.7 ct per directly delivered
 room-heating kWh, before considering room overheating. The joint model must
 value each usable fraction once; it must not credit unusable water heat as savings.
+This accounting example is not permission to discard the fireplace's mandatory
+water output. Without a verified heat-rejection path, a full tank or a predicted
+70 C exceedance makes that burn infeasible; the minimum one-hour burn must fit
+the available room and tank heat capacity throughout its duration.
 
 Optimize both sources inside the joint household problem. Heat-pump power enters
 the electrical balance; useful heat enters the thermal balance; fireplace fuel
@@ -203,8 +273,8 @@ heat-pump load on top.
 1. Advisory scheduling with per-house/per-zone H/C, measured Awair temperatures,
    hourly weather forecast, 20-22 C room bounds for the inspected home, validated
    COP inputs and device limits. Separate baseline electrical load first.
-2. A manual fireplace with the confirmed 2/0.2/3.8 kW distribution and useful
-   heat cost, after attendance, burn duration and water storage are mapped. Show
+2. A manual fireplace with the confirmed 2/0.2/3.8 kW distribution, useful
+   heat cost, start window, minimum duration and 600-litre DHW storage. Show
    source schedules, per-room temperatures, costs, comfort margins and reasons
    while normal local heating stays in charge.
 3. Per-installation calibration and backtesting. Add a second thermal state/zone
@@ -217,19 +287,18 @@ low COP, price spikes, PV, unavailable stove, room overheating, missing sensors,
 infeasible comfort and horizon-end depletion. Compare with the unchanged baseline
 controller under the same weather and comfort assumptions.
 
-## Collected questions
+## Remaining calibration inputs
 
-1. Who can light/refill the fireplace, in which time windows, and what is its
-   minimum batch burn duration? Its useful cost and heat split are now confirmed.
-2. Does the 3.8 kW water share feed domestic hot water or a heating buffer? Which
-   tanks, volumes, hydraulic connections, temperature limits and sensor positions
-   apply? Can the water heat subsequently supply rooms?
-3. Which room, heat and electricity measurements exist at cmund's other house?
-   Which meters include pumps, backup and hot water? Are heat counters calibrated
-   or device estimates, and is the configured 3 kW electrical maximum accurate?
+The owner has answered the comfort, fireplace cost/split/start/duration and DHW
+capacity/ceiling questions. cmund will maintain the other house's configuration;
+its data collection is not a blocking question to this owner.
 
-These answers gate calibrated dispatch and automatic control, not this inventory
-and design. No heating control or fitted building coefficients are claimed here.
+Before claiming reliable recommendations, validate the DHW draw profile/service
+minimum, layer volume weights and heat injection positions, inter-room heat
+distribution, meter boundaries/accuracy, actual heat-pump electrical/thermal limits
+and both COP maps. These can be measured or configured independently per house;
+they are not reasons to hard-code one house's insulation or comfort reserve into
+the optimizer. No automatic actuation or fitted building coefficients are claimed.
 
 ## Sources
 
