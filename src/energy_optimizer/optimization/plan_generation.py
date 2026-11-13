@@ -18,6 +18,7 @@ from energy_optimizer.control.ev_controller import (
     EV_SCHEDULE_KEY,
     merge_schedule,
 )
+from energy_optimizer.ev_targets import active_targets, target_hour
 from energy_optimizer.optimization.battery_reserve import (
     headroom_schedule,
     load_error_kw,
@@ -672,7 +673,12 @@ class PlanGenerator:
     ) -> EvSpecification | None:
         ev = snapshot.data.get("ev")
         charging = self.configuration.ev_charging
-        if not isinstance(ev, EvData) or charging is None:
+        targets = active_targets(self.store, snapshot.captured_at)
+        if not isinstance(ev, EvData):
+            if targets:
+                raise PlanGenerationError(
+                    "dated EV requirements need a current EV snapshot"
+                )
             return None
         time_zone = ZoneInfo(self.configuration.timezone)
         history = snapshot.data.get("ev_history")
@@ -681,19 +687,67 @@ class PlanGenerator:
             if isinstance(history, EvHistoryData)
             else NO_PATTERNS
         )
-        return ev_specification(
-            ev,
-            charging,
-            hour_starts,
-            time_zone,
-            surplus_kw,
-            patterns,
-            import_prices,
-            reference_stored_value(
+        specification = (
+            None
+            if charging is None
+            else ev_specification(
                 ev,
                 charging,
-                self.configuration.tariff,
-                hour_starts[0].astimezone(time_zone).hour,
+                hour_starts,
+                time_zone,
+                surplus_kw,
+                patterns,
+                import_prices,
+                reference_stored_value(
+                    ev,
+                    charging,
+                    self.configuration.tariff,
+                    hour_starts[0].astimezone(time_zone).hour,
+                ),
+            )
+        )
+        requirements: dict[int, float] = {}
+        for target in targets:
+            hour = target_hour(target.deadline, hour_starts[0], len(hour_starts))
+            if hour is None:
+                continue
+            minimum = target.minimum_soc_percent / 100 * ev.capacity_kwh
+            if hour == 0:
+                if ev.state_of_charge_kwh + 1e-6 < minimum:
+                    raise PlanGenerationError(
+                        "EV requirement cannot be met before the first "
+                        "complete planning hour"
+                    )
+                continue
+            requirements[hour] = max(requirements.get(hour, 0.0), minimum)
+        if not requirements:
+            return specification
+        if specification is None:
+            specification = EvSpecification(
+                capacity_kwh=ev.capacity_kwh,
+                initial_soc_kwh=ev.state_of_charge_kwh,
+                target_soc_kwh=0.0,
+                deadline_hours=len(hour_starts),
+                plugged_in=(ev.plugged_in,) * len(hour_starts),
+                minimum_charge_kw=ev.minimum_charge_kw,
+                maximum_charge_kw=ev.maximum_charge_kw,
+                charge_efficiency=ev.charge_efficiency,
+            )
+        limit = specification.charge_limit_kwh
+        return replace(
+            specification,
+            # Dated owner requirements take precedence over a soft charging target.
+            charge_limit_kwh=None
+            if limit is None
+            else max(limit, max(requirements.values())),
+            dated_minimums=tuple(sorted(requirements.items())),
+            charging_horizon_hours=len(hour_starts),
+            fixed_charge_kw=None,
+            surplus_kw=None,
+            value_eur_per_kwh=(
+                0.0
+                if specification.surplus_kw is not None
+                else specification.value_eur_per_kwh
             ),
         )
 

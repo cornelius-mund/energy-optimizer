@@ -54,6 +54,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlanSnapshotResponse'
+  /api/v1/ev/targets:
+    get:
+      summary: List Targets
+      operationId: list_targets_api_v1_ev_targets_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvTargetResponse'
+    post:
+      summary: Create Target
+      operationId: create_target_api_v1_ev_targets_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvTargetInput'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvTargetResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/ev/targets/{target_id}:
+    delete:
+      summary: Delete Target
+      operationId: delete_target_api_v1_ev_targets__target_id__delete
+      parameters:
+      - name: target_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Target Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvTargetResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/appliances:
     get:
       summary: Appliances
@@ -1115,6 +1173,64 @@ components:
       - expires_at
       title: ElectricityPriceResponse
       description: Response returned after electricity-price data passes validation.
+    EvTarget:
+      properties:
+        deadline:
+          type: string
+          format: date-time
+          title: Deadline
+        minimum_soc_percent:
+          type: number
+          maximum: 100.0
+          minimum: 0.0
+          title: Minimum Soc Percent
+        id:
+          type: string
+          format: uuid
+          title: Id
+      additionalProperties: false
+      type: object
+      required:
+      - deadline
+      - minimum_soc_percent
+      title: EvTarget
+    EvTargetInput:
+      properties:
+        deadline:
+          type: string
+          format: date-time
+          title: Deadline
+        minimum_soc_percent:
+          type: number
+          maximum: 100.0
+          minimum: 0.0
+          title: Minimum Soc Percent
+      additionalProperties: false
+      type: object
+      required:
+      - deadline
+      - minimum_soc_percent
+      title: EvTargetInput
+    EvTargetResponse:
+      properties:
+        targets:
+          items:
+            $ref: '#/components/schemas/EvTarget'
+          type: array
+          title: Targets
+        planning_status:
+          type: string
+          title: Planning Status
+          default: unchanged
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
+      type: object
+      required:
+      - targets
+      title: EvTargetResponse
     ExcludedDataPoint:
       properties:
         timestamp:
