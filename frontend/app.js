@@ -967,6 +967,106 @@
     columns.forEach(({ total }) => appendCell(totalRow, total()));
     planFoot.append(totalRow);
   };
+  const targetForm = document.querySelector("#ev-target-form");
+  const targetAdd = document.querySelector("#ev-target-add");
+  const targetStatus = document.querySelector("#ev-target-status");
+  const targetList = document.querySelector("#ev-target-list");
+  let evTargets = [];
+  let targetsBusy = false;
+  const showTargetForm = (show) => {
+    targetForm.hidden = !show;
+    targetAdd.setAttribute("aria-expanded", String(show));
+    if (show) document.querySelector("#ev-target-deadline").focus();
+  };
+  const renderTargets = () => {
+    targetList.replaceChildren();
+    evTargets.filter((target) => Date.parse(target.deadline) > Date.now()).forEach((target) => {
+      const item = document.createElement("li");
+      const label = `${target.minimum_soc_percent}% by ${formatTimestamp(target.deadline)}`;
+      item.append(document.createTextNode(label + " "));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove requirement ${label}`);
+      remove.disabled = targetsBusy;
+      remove.addEventListener("click", () => updateTargets(`/${target.id}`, "DELETE"));
+      item.append(remove);
+      targetList.append(item);
+    });
+  };
+  const targetsRequest = async (suffix = "", method = "GET", body) => {
+    const response = await fetch(`/api/v1/ev/targets${suffix}`, {
+      method, ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Check the deadline and charge percentage.");
+    return data;
+  };
+  const loadTargets = async () => {
+    document.querySelector("#ev-target-zone").textContent = timeZone;
+    try {
+      const data = await targetsRequest();
+      evTargets = data.targets;
+      targetAdd.disabled = false;
+      renderTargets();
+    } catch (error) {
+      targetAdd.disabled = true;
+      targetStatus.textContent = error.message;
+    }
+  };
+  const updateTargets = async (suffix, method, body) => {
+    if (targetsBusy) return;
+    targetsBusy = true;
+    targetAdd.disabled = true;
+    document.querySelector("#ev-target-save").disabled = true;
+    renderTargets();
+    targetStatus.textContent = "Saving requirements and checking the plan...";
+    try {
+      const data = await targetsRequest(suffix, method, body);
+      evTargets = data.targets;
+      showTargetForm(false);
+      targetStatus.textContent = data.planning_status === "created"
+        ? "Saved. The plan has been recalculated."
+        : `Saved. Planning status: ${data.planning_status}. ${data.detail || "Requirements apply to the next optimization."}`;
+      if (scenario === "plan") await loadPlan();
+    } catch (error) {
+      targetStatus.textContent = `Could not update requirements: ${error.message}`;
+    } finally {
+      targetsBusy = false;
+      targetAdd.disabled = false;
+      document.querySelector("#ev-target-save").disabled = false;
+      renderTargets();
+    }
+  };
+  targetAdd.addEventListener("click", () => showTargetForm(true));
+  document.querySelector("#ev-target-cancel").addEventListener("click", () => showTargetForm(false));
+  targetForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const value = document.querySelector("#ev-target-deadline").value;
+    const wall = Date.parse(value + "Z");
+    const instants = instantsForWall(wall);
+    if (instants.length !== 1) {
+      targetStatus.textContent = "Choose an unambiguous local time: this time is skipped or repeated by a clock change.";
+      return;
+    }
+    if (instants[0] <= Date.now()) {
+      targetStatus.textContent = "The requirement deadline must be in the future.";
+      return;
+    }
+    updateTargets("", "POST", {
+      deadline: new Date(instants[0]).toISOString(),
+      minimum_soc_percent: Number(document.querySelector("#ev-target-percent").value),
+    });
+  });
+  setInterval(() => {
+    if (!timeZone) return;
+    const pending = evTargets.filter((target) => Date.parse(target.deadline) > Date.now());
+    if (pending.length !== evTargets.length) {
+      evTargets = pending;
+      renderTargets();
+    }
+  }, 1000);
+
   const loadPlan = async () => {
     await loadPresence();
     if (scenario !== "plan") return;
@@ -1085,6 +1185,7 @@
     excludedContent.hidden = true;
     planContent.hidden = true;
     if (scenario === "plan") {
+      await loadTargets();
       await loadPlan();
       return;
     }

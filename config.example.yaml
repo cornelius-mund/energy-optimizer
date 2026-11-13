@@ -310,7 +310,6 @@ home_assistant:
   #   state_of_charge: {entity_id: sensor.ev_battery_level, unit: '%'}
   #   plugged_in: {entity_id: binary_sensor.ev_charging_cable, plugged_in_states: ['on']}
   #   capacity_kwh: 60
-  #   minimum_charge_kw: 1.4
   #   maximum_charge_kw: 11
   #   charge_efficiency: 0.9
   timeout_seconds: 10

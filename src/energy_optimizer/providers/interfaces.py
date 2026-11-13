@@ -128,7 +128,6 @@ class EvData:
     state_of_charge_kwh: float
     capacity_kwh: float
     plugged_in: bool
-    minimum_charge_kw: float
     maximum_charge_kw: float
     charge_efficiency: float
     unit: Literal["kWh"]
