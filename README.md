@@ -1004,3 +1004,10 @@ uv run pytest -m "not e2e"
 ```
 
 See [`docs/api.md`](docs/api.md) for the endpoint reference and request examples.
+
+## Heating model design
+
+The proposed building heat-storage model, temperature-dependent heat-pump COP,
+manual fireplace economics, inspected Home Assistant data and open configuration
+questions are documented in [Heating model design](docs/heating-model.md).
+This is an advisory design; automated heating control is not implemented.
