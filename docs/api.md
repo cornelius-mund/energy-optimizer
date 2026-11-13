@@ -88,6 +88,11 @@ maximum, availability, energy and state-of-charge constraints. Immediate chargin
 also uses the exact remaining energy in its last hour. The wallbox controller
 currently forwards hourly setpoints; it does not implement timed intrahour pulses.
 
+An EV charging limit bounds added energy, rather than invalidating energy already
+in the car: a state of charge above the configured limit still produces a household
+plan, with no further charging while above the limit. After driving reduces the
+state below the limit, charging can resume up to the limit.
+
 ## Appliances and general energy history
 
 Heat pumps and other manageable appliances use the same installation-specific
