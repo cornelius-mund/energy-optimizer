@@ -41,7 +41,6 @@ def _configuration(world_url: str, data_directory: Path) -> Configuration:
                     "state_of_charge": {"entity_id": EV_SOC_ENTITY, "unit": "%"},
                     "plugged_in": {"entity_id": EV_PLUG_ENTITY},
                     "capacity_kwh": 60,
-                    "minimum_charge_kw": 1.4,
                     "maximum_charge_kw": 11,
                 },
             },

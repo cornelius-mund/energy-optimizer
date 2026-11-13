@@ -480,7 +480,6 @@ class HomeAssistantEvConfiguration(_StrictModel):
     state_of_charge: HomeAssistantBatteryEntityConfiguration
     plugged_in: HomeAssistantEvPlugConfiguration
     capacity_kwh: float = Field(gt=0)
-    minimum_charge_kw: float = Field(gt=0)
     maximum_charge_kw: float = Field(gt=0)
     charge_efficiency: float = Field(default=0.9, gt=0, le=1)
     control: HomeAssistantEvControlConfiguration | None = None
@@ -489,8 +488,6 @@ class HomeAssistantEvConfiguration(_StrictModel):
     def validate_units_and_power(self) -> "HomeAssistantEvConfiguration":
         if self.state_of_charge.unit not in {"%", "kWh"}:
             raise ValueError("ev.state_of_charge must use % or kWh")
-        if self.minimum_charge_kw > self.maximum_charge_kw:
-            raise ValueError("ev.minimum_charge_kw must not exceed maximum_charge_kw")
         return self
 
 

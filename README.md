@@ -34,6 +34,13 @@ package structure, dependency direction, and request flow are documented in
 [`docs/architecture.md`](docs/architecture.md). These boundaries are targets for
 the implementation, not a claim that all of the modules exist today.
 
+### Heating model design
+
+The proposed building heat-storage model, temperature-dependent heat-pump COP,
+manual fireplace economics, inspected Home Assistant data and open configuration
+questions are documented in [Heating model design](docs/heating-model.md).
+This is an advisory design; automated heating control is not implemented.
+
 ## Input and Output
 
 The API should accept household electrical load, PV generation forecast,
@@ -444,7 +451,6 @@ home_assistant:
     state_of_charge: {entity_id: sensor.ev9_battery_level, unit: "%"}  # or kWh
     plugged_in: {entity_id: binary_sensor.ev9_charging_cable, plugged_in_states: ["on"]}
     capacity_kwh: 99.8
-    minimum_charge_kw: 1.4   # lowest power the wall box delivers
     maximum_charge_kw: 11
     charge_efficiency: 0.9
 ev_charging:
@@ -454,7 +460,7 @@ ev_charging:
 
 Strategies (`ev_charging.strategy`): `deadline` (default), `immediate`, `surplus`, `minimum_plus_target` and `daily_minimum`. With
 `immediate` the car charges at full power from the first hour while plugged in until
-`minimum_soc_percent` is stored (the last hour is rounded up to the charger minimum);
+`minimum_soc_percent` is stored (the last hour uses only the remaining energy);
 no deadline is needed and the rest of the plan is optimized around that fixed load.
 
 Targets per weekday: instead of (or on top of) the general `minimum_soc_percent` and
@@ -477,7 +483,7 @@ With `minimum_plus_target`, `target_soc_percent` must not be below any minimum.
 With `surplus` the car charges only with PV that the household load leaves over
 (forecast PV minus forecast load, per hour), up to `minimum_soc_percent` (default
 100). It has no deadline and no target; each kWh stored is valued above exporting
-it, so the car takes the surplus whenever the charger minimum power is reached.
+it, so the car can take even a small hourly surplus.
 It never draws from the grid because its power is bounded by the surplus.
 
 With `minimum_plus_target` the car must hold `minimum_soc_percent` at the deadline
@@ -491,11 +497,23 @@ The `deadline` strategy: the car must hold `minimum_soc_percent` at the next
 local `deadline`. The plan charges it in the cheapest hours before then, using PV
 surplus first because exporting it pays less than importing costs. Charging is
 planned only while the car is plugged in (the current plug state is assumed for the
-whole horizon) and only before the deadline. The charger delivers either nothing or
-a power between its minimum and maximum. If the target cannot be reached, the plan
+whole horizon) and only before the deadline. Hourly charge power is an average
+between zero and `maximum_charge_kw`. If the target cannot be reached, the plan
 charges as much as possible and reports `ev_shortfall_kwh` instead of failing. A
 deadline beyond the planning horizon is not planned yet. The plan hours carry an
 `ev` object with `charge_kw`, `state_of_charge_kwh` and `state_of_charge_percent`.
+
+An hourly average of 0.805 kW means 0.805 kWh during that hour, which can be
+delivered by charging at a higher power for part of the hour. There is no minimum
+hourly charging power. For example, 11.805 kWh across two hours priced at 35 and
+40 ct/kWh can be scheduled as 11 kW in the cheaper hour and 0.805 kW in the next.
+Remove `home_assistant.ev.minimum_charge_kw` from existing configuration files
+when upgrading; the removed setting is rejected as an unknown field.
+
+The existing wallbox controller forwards the hourly average as a power setpoint;
+it does not convert it into timed charging pulses or schedule intrahour switching.
+Such execution requires a controller that implements the planned hourly energy
+using the wallbox's supported instantaneous power range.
 
 #### Soft battery reserve
 
@@ -560,8 +578,8 @@ source (see EV history from InfluxDB) the plan learns from the history:
 
 Every kWh stored in the car is worth the cheapest import price of the plan (what
 charging it later costs at best), so PV surplus goes into the car while it is home
-instead of being exported for less, also with the battery adding the rest up to
-the charger minimum power, and the plan no longer ends with an almost empty car.
+instead of being exported for less, without requiring the battery to top up small
+hourly charging amounts, and the plan no longer ends with an almost empty car.
 Charging from the grid only to store energy never pays because of the charging
 losses. `target_soc_percent` (default 100) caps the state of charge; the credit is
 not part of the reported objective.

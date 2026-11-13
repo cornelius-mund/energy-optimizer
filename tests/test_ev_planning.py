@@ -41,7 +41,6 @@ EV_SETTINGS = {
     "state_of_charge": {"entity_id": "sensor.ev_soc", "unit": "%"},
     "plugged_in": {"entity_id": "binary_sensor.ev_cable"},
     "capacity_kwh": 60,
-    "minimum_charge_kw": 1.4,
     "maximum_charge_kw": 4.0,
 }
 
@@ -135,7 +134,7 @@ def test_an_unusable_state_of_charge_is_rejected(state: str) -> None:
         importer(ev_responses(state_of_charge=state)).fetch(now=NOW)
 
 
-def test_a_minimum_charge_power_above_the_maximum_is_rejected() -> None:
+def test_the_removed_minimum_charge_power_setting_is_rejected() -> None:
     with pytest.raises(ValidationError):
         HomeAssistantEvConfiguration.model_validate(
             {**EV_SETTINGS, "minimum_charge_kw": 5.0}
@@ -223,8 +222,8 @@ def test_immediate_charging_ends_with_the_remaining_energy() -> None:
     assert schedule == pytest.approx((3 / 0.9,) + (0.0,) * 7)
 
 
-def test_immediate_charging_rounds_a_tiny_remainder_up_to_the_charger_minimum() -> None:
-    assert immediate_schedule("50", 50.5)[0] == pytest.approx(1.4)
+def test_immediate_charging_preserves_a_tiny_remainder_as_an_hourly_average() -> None:
+    assert immediate_schedule("50", 50.5) == pytest.approx((0.3 / 0.9,) + (0.0,) * 7)
 
 
 def test_immediate_charging_never_charges_an_unplugged_car() -> None:

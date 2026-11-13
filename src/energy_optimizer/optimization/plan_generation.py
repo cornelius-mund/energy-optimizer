@@ -150,8 +150,8 @@ def next_deadline(
 def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecification:
     """Charge at full power from now on until the target is stored.
 
-    The last hour is rounded up to the charger minimum, as a wall box would, but
-    never beyond the capacity of the car.
+    The last hour uses the average power needed to reach the target without
+    rounding up; it can represent charging for only part of that hour.
     """
     schedule: list[float] = []
     stored_kwh = ev.state_of_charge_kwh
@@ -162,9 +162,7 @@ def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecifica
         power_kw = (
             0.0
             if not ev.plugged_in or missing_kwh <= 1e-9
-            else min(
-                ev.maximum_charge_kw, max(ev.minimum_charge_kw, wanted_kw), room_kw
-            )
+            else min(ev.maximum_charge_kw, wanted_kw, room_kw)
         )
         schedule.append(power_kw)
         stored_kwh += power_kw * ev.charge_efficiency
@@ -174,7 +172,6 @@ def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecifica
         target_soc_kwh=target_kwh,
         deadline_hours=hours,
         plugged_in=(ev.plugged_in,) * hours,
-        minimum_charge_kw=ev.minimum_charge_kw,
         maximum_charge_kw=ev.maximum_charge_kw,
         charge_efficiency=ev.charge_efficiency,
         fixed_charge_kw=tuple(schedule),
@@ -192,7 +189,6 @@ def pv_surplus_charging(
         target_soc_kwh=0.0,
         deadline_hours=hours,
         plugged_in=(ev.plugged_in,) * hours,
-        minimum_charge_kw=ev.minimum_charge_kw,
         maximum_charge_kw=ev.maximum_charge_kw,
         charge_efficiency=ev.charge_efficiency,
         surplus_kw=surplus_kw,
@@ -281,7 +277,6 @@ def daily_minimum_charging(
         target_soc_kwh=0.0,
         deadline_hours=len(hour_starts),
         plugged_in=plugged_in,
-        minimum_charge_kw=ev.minimum_charge_kw,
         maximum_charge_kw=ev.maximum_charge_kw,
         charge_efficiency=ev.charge_efficiency,
         consumption_kwh=driving_consumption(patterns, local_hours, plugged_in),
@@ -339,7 +334,6 @@ def ev_specification(
         target_soc_kwh=upcoming[1] / 100 * ev.capacity_kwh,
         deadline_hours=hours_until_deadline,
         plugged_in=(ev.plugged_in,) * len(hour_starts),
-        minimum_charge_kw=ev.minimum_charge_kw,
         maximum_charge_kw=ev.maximum_charge_kw,
         charge_efficiency=ev.charge_efficiency,
         charge_limit_kwh=limit_kwh if soft_target else None,
