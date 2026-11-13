@@ -25,9 +25,17 @@ class EvVariables:
 def add_ev(
     model: Model, hours: pandas.RangeIndex, specification: EvSpecification
 ) -> EvVariables:
+    charging_horizon = (
+        specification.deadline_hours
+        if specification.charging_horizon_hours is None
+        else specification.charging_horizon_hours
+    )
+    last_dated_requirement = max(
+        (until for until, _ in specification.dated_minimums), default=0
+    )
     can_charge = pandas.Series(
         [
-            float(plugged and hour < specification.deadline_hours)
+            float(plugged and hour < charging_horizon)
             for hour, plugged in zip(hours, specification.plugged_in, strict=True)
         ],
         index=hours,
@@ -52,12 +60,26 @@ def add_ev(
         ),
         shortfall=model.add_variables(lower=0, name="ev_shortfall_kwh"),
         missing_energy=model.add_variables(
-            lower=0, coords=[hours], name="ev_missing_energy_kwh"
+            lower=0,
+            upper=pandas.Series(
+                [
+                    0.0 if hour < last_dated_requirement else float("inf")
+                    for hour in hours
+                ],
+                index=hours,
+            ),
+            coords=[hours],
+            name="ev_missing_energy_kwh",
         ),
     )
     _add_state_of_charge_dynamics(model, hours, specification, variables)
     _require_target_at_deadline(model, hours, specification, variables)
     _require_morning_minimums(model, hours, specification, variables)
+    for until, minimum in specification.dated_minimums:
+        model.add_constraints(
+            variables.state_of_charge.loc[hours[until - 1]] >= minimum,
+            name=f"ev_dated_minimum_{until}",
+        )
     return variables
 
 

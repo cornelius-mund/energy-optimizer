@@ -72,6 +72,9 @@ class EvSpecification:
     minimum kWh) pairs the state of charge must reach. Energy the plan cannot
     provide for them is reported as shortfall instead of making the plan
     infeasible.
+    Dated owner minimums are hard requirements at completed-hour boundaries.
+    They forbid synthetic missing energy before their last deadline and may
+    extend the charging horizon beyond the strategy's ordinary deadline.
     """
 
     capacity_kwh: KilowattHour
@@ -87,6 +90,8 @@ class EvSpecification:
     value_eur_per_kwh: EuroPerKilowattHour = 0.0
     consumption_kwh: tuple[KilowattHour, ...] | None = None
     morning_minimums: tuple[tuple[int, KilowattHour], ...] = ()
+    charging_horizon_hours: int | None = None
+    dated_minimums: tuple[tuple[int, KilowattHour], ...] = ()
 
 
 @dataclass(frozen=True)

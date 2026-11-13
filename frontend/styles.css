@@ -189,3 +189,7 @@ a { color: var(--accent-dark); font-weight: 700; }
 .legend-7 .legend-swatch { background: #8a8f2a; }
 .legend-8 .legend-swatch { background: #b83f8a; }
 #plan-charts[hidden] { display: none; }
+.ev-targets { border-block: 1px solid var(--border, #ddd); margin-block: 1rem; padding-block: 1rem; }
+#ev-target-form:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; margin-top: 1rem; }
+#ev-target-list li { margin-block: .5rem; }
+#ev-target-status { overflow-wrap: anywhere; }

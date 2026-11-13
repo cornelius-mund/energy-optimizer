@@ -12,7 +12,9 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert '<main class="shell">' in document
     assert "<title>Energy dashboard | Energy Optimizer</title>" in document
     assert "<h1>Energy dashboard</h1>" in document
-    assert document.count('type="datetime-local"') == 2
+    assert document.count('type="datetime-local"') == 3
+    assert 'for="ev-target-deadline"' in document
+    assert 'aria-label="Add EV charge requirement"' in document
     assert document.count('step="3600"') == 2
     assert 'id="end-label">End (exclusive)' in document
     assert "The end time is exclusive" in document

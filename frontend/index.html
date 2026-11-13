@@ -147,6 +147,21 @@
         <article class="card plan-card">
           <p class="eyebrow">Optimization plan</p>
           <h2 id="plan-heading">Recommended schedule</h2>
+          <section aria-labelledby="ev-target-heading" class="ev-targets">
+            <h3 id="ev-target-heading">EV charge requirements</h3>
+            <p>Require a minimum charge by a date and time. Times use <span id="ev-target-zone">the configured zone</span>. Between whole hours, charging must finish by the preceding hour. Expired requirements disappear automatically.</p>
+            <button id="ev-target-add" type="button" aria-label="Add EV charge requirement" aria-expanded="false" aria-controls="ev-target-form" disabled>+ Add requirement</button>
+            <form id="ev-target-form" hidden>
+              <label for="ev-target-deadline">Required by</label>
+              <input id="ev-target-deadline" type="datetime-local" required>
+              <label for="ev-target-percent">Minimum state of charge (%)</label>
+              <input id="ev-target-percent" type="number" min="0" max="100" step="0.1" value="70" required>
+              <button id="ev-target-save" type="submit">Save requirement</button>
+              <button id="ev-target-cancel" type="button">Cancel</button>
+            </form>
+            <p id="ev-target-status" role="status"></p>
+            <ul id="ev-target-list" aria-label="Active EV charge requirements"></ul>
+          </section>
           <p class="excluded-lede">
             This is the plan the optimizer computed from the forecast inputs, not
             a measurement. Each row is one planned hour; flows are planned kW,

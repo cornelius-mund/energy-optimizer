@@ -1022,3 +1022,41 @@ uv run pytest -m "not e2e"
 ```
 
 See [`docs/api.md`](docs/api.md) for the endpoint reference and request examples.
+
+### Dated EV charge requirements
+
+In the Plan view, use **+ Add requirement** to require an EV minimum state of
+charge by a particular date and time, for example 70% by 16 November at 08:00.
+You can add several requirements and remove individual ones. Requirements are
+stored on the service and survive restarts; expired ones are hidden automatically,
+including on an open page. Existing dated records may remain on disk until the
+next change prunes expired entries. At most 100 active requirements are accepted.
+
+Input uses the configured dashboard timezone, regardless of the browser timezone.
+Skipped or repeated local times at daylight-saving changes are rejected; choose
+an unambiguous time instead. The API accepts explicit timezone-aware deadlines.
+The hourly model completes charging at the preceding hour boundary for deadlines
+between whole hours (08:30 means ready at 08:00). A requirement before the first
+complete planning hour must already be met by the current snapshot.
+
+Dated requirements are hard constraints alongside ordinary strategy targets and
+learned availability. They can extend charging beyond a strategy's ordinary
+charging window and override its optional surplus-only/fixed-hour behavior and
+soft charge ceiling, while retaining physical capacity, power and plug limits.
+Impossible dated requirements produce an explicit planning failure; simulated
+missing energy cannot be used to satisfy them. A previous stored plan remains
+available after a failed recalculation, so check the save status before relying
+on its schedule. Requirements beyond the current forecast horizon remain pending
+and apply when their deadlines enter that horizon.
+
+Adding or removing a requirement requests replanning from current fresh provider
+data without contacting live providers. If inputs are stale, a cycle is busy or
+optimization is disabled, the dashboard reports that outcome. The saved requirement
+will be considered on the next scheduled plan. EV configuration and durable
+persistence must be enabled; provider integrations are not reconfigured by the UI.
+
+HTTP endpoints: `GET /api/v1/ev/targets`, `POST /api/v1/ev/targets` with
+`{"deadline":"2026-11-16T07:00:00Z","minimum_soc_percent":70}`, and
+`DELETE /api/v1/ev/targets/{id}`. Responses contain active `targets`,
+`planning_status` and optional `detail`. Invalid input returns 422, an unknown
+active requirement returns 404, and unavailable configuration/storage returns 503.
