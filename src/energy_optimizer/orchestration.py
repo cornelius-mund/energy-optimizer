@@ -492,6 +492,18 @@ class ProviderOrchestrator:
             registration.name, "failed", attempt_started, attempt_completed, message
         )
 
+    def replan(self, now: datetime) -> tuple[PlanStatus, str | None]:
+        """Apply changed requirements using fresh retained inputs without fetching."""
+        if not self._cycle_lock.acquire(blocking=False):
+            return (
+                "not-ready",
+                "A provider cycle is running; requirements apply on the next plan.",
+            )
+        try:
+            return self._trigger_plan(now, self._latest_data, set())
+        finally:
+            self._cycle_lock.release()
+
     def _trigger_plan(
         self,
         captured_at: datetime,

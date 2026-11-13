@@ -12,8 +12,12 @@ def test_dashboard_document_preserves_structure_and_accessibility_contract() -> 
     assert '<main class="shell">' in document
     assert "<title>Energy dashboard | Energy Optimizer</title>" in document
     assert "<h1>Energy dashboard</h1>" in document
-    assert document.count('type="datetime-local"') == 2
-    assert document.count('step="3600"') == 2
+    for identifier in ("start-date", "end-date"):
+        range_input = next(
+            line for line in document.splitlines() if f'id="{identifier}"' in line
+        )
+        assert 'type="datetime-local"' in range_input
+        assert 'step="3600"' in range_input
     assert 'id="end-label">End (exclusive)' in document
     assert "The end time is exclusive" in document
     assert 'aria-live="polite"' in document

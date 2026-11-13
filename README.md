@@ -612,6 +612,41 @@ ev_charging:
   deadline: "07:00"
 ```
 
+#### Dated EV presence overrides
+
+In the Plan view, use **+ Add presence override** to mark a dated interval as
+**Present** (available to charge) or **Absent** (no charging). Enter whole local
+hours using the configured dashboard time zone; the start is inclusive and the
+end exclusive. The interface rejects skipped/repeated local clock-change hours.
+The API requires timezone-aware boundaries aligned to whole UTC hours.
+
+Manual availability takes precedence over learned presence, configured home hours
+and extrapolated current plug state. It changes expected charging availability,
+not the physical cable sensor, and neither invents nor edits driving energy.
+An override does not bypass charger power/SOC limits or ordinary charging targets.
+Immediate charging is rescheduled into available hours instead of retaining a
+fixed charge in an absent hour or losing that energy request.
+
+Overrides persist across restarts, can be removed individually and disappear
+from an open page after their end. Expired stored records are pruned on the next
+change. Up to 100 active intervals are accepted. Adjacent intervals are allowed;
+overlap is rejected even if the values agree, so remove or split the earlier
+interval before replacing it. The current hour can be overridden if its end is
+still in the future; an interval that has already ended is rejected.
+
+Saving/removing requests replanning from fresh retained provider data without
+fetching external providers. If optimization is disabled, a cycle is busy or
+inputs are stale, the saved override remains pending and the displayed planning
+status explains why. A failed recalculation preserves the previous stored plan;
+check the status before relying on it. EV configuration and durable persistence
+are required; the UI does not reconfigure the provider or charging strategy.
+
+HTTP endpoints are `GET /api/v1/ev/presence`, `POST /api/v1/ev/presence` with
+`{"start_time":"2026-11-16T07:00:00Z","end_time":"2026-11-16T10:00:00Z","present":false}`,
+and `DELETE /api/v1/ev/presence/{id}`. Responses contain active `overrides`,
+`planning_status` and optional `detail`. Invalid/overlapping intervals return 422,
+unknown active overrides 404, and unavailable EV/persistence/storage 503.
+
 #### Controlling the wall box
 
 Planning only shows what to do. To execute the plan, add an opt-in `control` block
