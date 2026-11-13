@@ -18,6 +18,7 @@ from energy_optimizer.control.ev_controller import (
     EV_SCHEDULE_KEY,
     merge_schedule,
 )
+from energy_optimizer.ev_presence import active_presence, overridden_availability
 from energy_optimizer.ev_targets import active_targets, target_hour
 from energy_optimizer.optimization.battery_reserve import (
     headroom_schedule,
@@ -147,7 +148,13 @@ def next_deadline(
     return None
 
 
-def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecification:
+def immediate_charging(
+    ev: EvData,
+    target_kwh: float,
+    hours: int,
+    *,
+    availability: tuple[bool, ...] | None = None,
+) -> EvSpecification:
     """Charge at full power from now on until the target is stored.
 
     The last hour uses the average power needed to reach the target without
@@ -155,13 +162,14 @@ def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecifica
     """
     schedule: list[float] = []
     stored_kwh = ev.state_of_charge_kwh
-    for _ in range(hours):
+    plugged_in = (ev.plugged_in,) * hours if availability is None else availability
+    for available in plugged_in:
         missing_kwh = min(target_kwh, ev.capacity_kwh) - stored_kwh
         wanted_kw = missing_kwh / ev.charge_efficiency
         room_kw = (ev.capacity_kwh - stored_kwh) / ev.charge_efficiency
         power_kw = (
             0.0
-            if not ev.plugged_in or missing_kwh <= 1e-9
+            if not available or missing_kwh <= 1e-9
             else min(ev.maximum_charge_kw, wanted_kw, room_kw)
         )
         schedule.append(power_kw)
@@ -171,7 +179,7 @@ def immediate_charging(ev: EvData, target_kwh: float, hours: int) -> EvSpecifica
         initial_soc_kwh=ev.state_of_charge_kwh,
         target_soc_kwh=target_kwh,
         deadline_hours=hours,
-        plugged_in=(ev.plugged_in,) * hours,
+        plugged_in=plugged_in,
         maximum_charge_kw=ev.maximum_charge_kw,
         charge_efficiency=ev.charge_efficiency,
         fixed_charge_kw=tuple(schedule),
@@ -656,6 +664,26 @@ class PlanGenerator:
             ),
             ev=self._ev(snapshot, hour_starts, surplus_kw, import_prices),
         )
+        if problem.ev is not None:
+            entries = active_presence(self.store, snapshot.captured_at)
+            if entries:
+                availability = overridden_availability(
+                    problem.ev.plugged_in, hour_starts, entries
+                )
+                fixed = problem.ev.fixed_charge_kw
+                if fixed is not None:
+                    fixed = immediate_charging(
+                        _required(snapshot, "ev", EvData),
+                        problem.ev.target_soc_kwh,
+                        len(hour_starts),
+                        availability=availability,
+                    ).fixed_charge_kw
+                problem = replace(
+                    problem,
+                    ev=replace(
+                        problem.ev, plugged_in=availability, fixed_charge_kw=fixed
+                    ),
+                )
         return problem, forecast, price_forecast_from
 
     def _ev(

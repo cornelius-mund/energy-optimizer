@@ -15,6 +15,7 @@ from energy_optimizer.api.middleware import log_requests
 from energy_optimizer.api.routers import appliances as appliance_routes
 from energy_optimizer.api.routers import core as core_routes
 from energy_optimizer.api.routers import dashboard as dashboard_routes
+from energy_optimizer.api.routers import ev_presence as ev_presence_routes
 from energy_optimizer.api.routers import ev_targets as ev_target_routes
 from energy_optimizer.api.routers import provider as provider_routes
 
@@ -48,6 +49,7 @@ class RevalidatedStaticFiles(StaticFiles):
 
 app.middleware("http")(log_requests)
 app.include_router(core_routes.router)
+app.include_router(ev_presence_routes.router)
 app.include_router(ev_target_routes.router)
 app.include_router(appliance_routes.router)
 app.include_router(provider_routes.router)

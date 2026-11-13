@@ -169,6 +169,23 @@
             a cost, negative a revenue).
           </p>
           <dl id="plan-summary" class="plan-summary" aria-label="Plan summary"></dl>
+          <section class="ev-presence" aria-labelledby="ev-presence-heading">
+            <h3 id="ev-presence-heading">EV presence overrides</h3>
+            <p>Override expected charging availability in <span id="ev-presence-zone">the configured time zone</span>. Start is inclusive; end is exclusive. These hours take precedence over learned presence and home hours. They do not change the physical cable state or predicted driving energy. Expired overrides disappear automatically.</p>
+            <button id="ev-presence-add" type="button" aria-label="Add EV presence override" aria-expanded="false" aria-controls="ev-presence-form" disabled>+ Add presence override</button>
+            <form id="ev-presence-form" hidden>
+              <label for="ev-presence-start">From</label>
+              <input id="ev-presence-start" type="datetime-local" step="3600" required>
+              <label for="ev-presence-end">Until (exclusive)</label>
+              <input id="ev-presence-end" type="datetime-local" step="3600" required>
+              <label for="ev-presence-value">Availability</label>
+              <select id="ev-presence-value"><option value="true">Present — available to charge</option><option value="false">Absent — no charging</option></select>
+              <button id="ev-presence-save" type="submit">Save presence override</button>
+              <button id="ev-presence-cancel" type="button">Cancel</button>
+            </form>
+            <p id="ev-presence-status" role="status"></p>
+            <ul id="ev-presence-list" aria-label="Active EV presence overrides"></ul>
+          </section>
           <p id="plan-empty" class="excluded-empty" hidden>No plan has been created yet. A plan appears after the first complete refresh of all planning inputs.</p>
           <p id="plan-price-attribution" class="excluded-lede" hidden>Prices after the published day-ahead prices are forecasts by EPEX Predictor (prices CC-BY-4.0 energy-charts.info and ENTSO-E, weather data Open-Meteo.com).</p>
           <div id="plan-charts" class="chart-wrap" hidden>

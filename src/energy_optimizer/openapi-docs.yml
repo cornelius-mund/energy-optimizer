@@ -54,6 +54,64 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlanSnapshotResponse'
+  /api/v1/ev/presence:
+    get:
+      summary: List Presence
+      operationId: list_presence_api_v1_ev_presence_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvPresenceResponse'
+    post:
+      summary: Create Presence
+      operationId: create_presence_api_v1_ev_presence_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvPresenceInput'
+        required: true
+      responses:
+        '201':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvPresenceResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/ev/presence/{entry_id}:
+    delete:
+      summary: Delete Presence
+      operationId: delete_presence_api_v1_ev_presence__entry_id__delete
+      parameters:
+      - name: entry_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+          title: Entry Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvPresenceResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/ev/targets:
     get:
       summary: List Targets
@@ -1173,6 +1231,70 @@ components:
       - expires_at
       title: ElectricityPriceResponse
       description: Response returned after electricity-price data passes validation.
+    EvPresence:
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        end_time:
+          type: string
+          format: date-time
+          title: End Time
+        present:
+          type: boolean
+          title: Present
+        id:
+          type: string
+          format: uuid
+          title: Id
+      additionalProperties: false
+      type: object
+      required:
+      - start_time
+      - end_time
+      - present
+      title: EvPresence
+    EvPresenceInput:
+      properties:
+        start_time:
+          type: string
+          format: date-time
+          title: Start Time
+        end_time:
+          type: string
+          format: date-time
+          title: End Time
+        present:
+          type: boolean
+          title: Present
+      additionalProperties: false
+      type: object
+      required:
+      - start_time
+      - end_time
+      - present
+      title: EvPresenceInput
+    EvPresenceResponse:
+      properties:
+        overrides:
+          items:
+            $ref: '#/components/schemas/EvPresence'
+          type: array
+          title: Overrides
+        planning_status:
+          type: string
+          title: Planning Status
+          default: unchanged
+        detail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detail
+      type: object
+      required:
+      - overrides
+      title: EvPresenceResponse
     EvTarget:
       properties:
         deadline:

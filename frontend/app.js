@@ -161,6 +161,106 @@
     + "When the clocks go back, a time in the repeated hour means its first occurrence; "
     + "when they go forward, a skipped time moves ahead by the length of the gap.";
 
+  const presenceForm = document.querySelector("#ev-presence-form");
+  const presenceAdd = document.querySelector("#ev-presence-add");
+  const presenceStatus = document.querySelector("#ev-presence-status");
+  const presenceList = document.querySelector("#ev-presence-list");
+  let presenceEntries = [];
+  let presenceBusy = false;
+  const showPresenceForm = (show) => {
+    presenceForm.hidden = !show;
+    presenceAdd.setAttribute("aria-expanded", String(show));
+    if (show) document.querySelector("#ev-presence-start").focus();
+  };
+  const renderPresence = () => {
+    presenceList.replaceChildren();
+    presenceEntries.filter((item) => Date.parse(item.end_time) > Date.now()).forEach((item) => {
+      const row = document.createElement("li");
+      const label = `${item.present ? "Present" : "Absent"}: ${formatTimestamp(item.start_time)} to ${formatTimestamp(item.end_time)}`;
+      row.append(document.createTextNode(label + " "));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.setAttribute("aria-label", `Remove presence override ${label}`);
+      remove.disabled = presenceBusy;
+      remove.addEventListener("click", () => updatePresence(`/${item.id}`, "DELETE"));
+      row.append(remove);
+      presenceList.append(row);
+    });
+  };
+  const presenceRequest = async (suffix = "", method = "GET", body) => {
+    const response = await fetch(`/api/v1/ev/presence${suffix}`, {
+      method, ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Check the start and end hours.");
+    return data;
+  };
+  const loadPresence = async () => {
+    document.querySelector("#ev-presence-zone").textContent = timeZone;
+    try {
+      const data = await presenceRequest();
+      presenceEntries = data.overrides;
+      presenceAdd.disabled = presenceBusy;
+      renderPresence();
+    } catch (error) {
+      presenceAdd.disabled = true;
+      presenceStatus.textContent = error.message;
+    }
+  };
+  const updatePresence = async (suffix, method, body) => {
+    if (presenceBusy) return;
+    presenceBusy = true;
+    presenceAdd.disabled = true;
+    document.querySelector("#ev-presence-save").disabled = true;
+    renderPresence();
+    presenceStatus.textContent = "Saving availability and checking the plan...";
+    try {
+      const data = await presenceRequest(suffix, method, body);
+      presenceEntries = data.overrides;
+      showPresenceForm(false);
+      presenceStatus.textContent = data.planning_status === "created"
+        ? "Saved. The plan has been recalculated."
+        : `Saved. Planning status: ${data.planning_status}. ${data.detail || "The next plan will use the override."}`;
+      if (scenario === "plan") await loadPlan();
+    } catch (error) {
+      presenceStatus.textContent = `Could not update presence: ${error.message}`;
+    } finally {
+      presenceBusy = false;
+      presenceAdd.disabled = false;
+      document.querySelector("#ev-presence-save").disabled = false;
+      renderPresence();
+    }
+  };
+  presenceAdd.addEventListener("click", () => showPresenceForm(true));
+  document.querySelector("#ev-presence-cancel").addEventListener("click", () => showPresenceForm(false));
+  presenceForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const times = ["#ev-presence-start", "#ev-presence-end"].map((id) =>
+      instantsForWall(Date.parse(document.querySelector(id).value + "Z")));
+    if (times.some((candidates) => candidates.length !== 1)) {
+      presenceStatus.textContent = "Choose unambiguous local hours: a selected time is skipped or repeated by a clock change.";
+      return;
+    }
+    const [start, end] = times.map((candidates) => candidates[0]);
+    if (end <= start || end <= Date.now()) {
+      presenceStatus.textContent = "End must be later than start and in the future.";
+      return;
+    }
+    updatePresence("", "POST", {
+      start_time: new Date(start).toISOString(), end_time: new Date(end).toISOString(),
+      present: document.querySelector("#ev-presence-value").value === "true",
+    });
+  });
+  setInterval(() => {
+    if (!timeZone) return;
+    const pending = presenceEntries.filter((item) => Date.parse(item.end_time) > Date.now());
+    if (pending.length !== presenceEntries.length) {
+      presenceEntries = pending;
+      renderPresence();
+    }
+  }, 1000);
+
   const setStatus = (message, kind = "") => {
     status.className = `status ${kind}`;
     status.textContent = message;
@@ -968,6 +1068,8 @@
   }, 1000);
 
   const loadPlan = async () => {
+    await loadPresence();
+    if (scenario !== "plan") return;
     setStatus("Loading the plan...");
     diagnostic("debug", "data_load_started", { scenario });
     let requestId = "none";
