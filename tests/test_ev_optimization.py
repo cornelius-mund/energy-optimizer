@@ -15,7 +15,6 @@ def electric_vehicle(
     stored_kwh_needed: float,
     deadline_hours: int = 4,
     plugged_in: tuple[bool, ...] = (True, True, True, True),
-    minimum_charge_kw: float = 1.4,
     maximum_charge_kw: float = 4.0,
     charge_efficiency: float = 0.9,
 ) -> EvSpecification:
@@ -25,7 +24,6 @@ def electric_vehicle(
         target_soc_kwh=INITIAL_SOC_KWH + stored_kwh_needed,
         deadline_hours=deadline_hours,
         plugged_in=plugged_in,
-        minimum_charge_kw=minimum_charge_kw,
         maximum_charge_kw=maximum_charge_kw,
         charge_efficiency=charge_efficiency,
     )
@@ -65,12 +63,44 @@ def test_the_car_adds_the_next_cheapest_hour_when_the_charger_power_is_not_enoug
     assert plan.objective_eur == pytest.approx(4.0 * 0.10 + 3.0 * 0.20)
 
 
-def test_the_charger_minimum_power_forces_more_energy_than_needed() -> None:
+def test_a_small_target_is_met_without_rounding_up_the_hourly_energy() -> None:
     plan = solve_with(electric_vehicle(stored_kwh_needed=1.0))
 
-    assert charged_kw(plan) == pytest.approx([0.0, 1.4, 0.0, 0.0], abs=TOLERANCE)
-    assert ev_soc_kwh(plan, 1) == pytest.approx(10.0 + 1.4 * 0.9)
-    assert plan.objective_eur == pytest.approx(1.4 * 0.10)
+    assert plan.status is PlanStatus.OPTIMAL
+    assert charged_kw(plan) == pytest.approx([0.0, 1 / 0.9, 0.0, 0.0], abs=TOLERANCE)
+    assert ev_soc_kwh(plan, 1) == pytest.approx(11.0)
+    assert plan.objective_eur == pytest.approx(0.10 / 0.9)
+
+
+def test_the_cheapest_hour_is_full_before_a_small_remainder_uses_the_next_hour() -> (
+    None
+):
+    ev = electric_vehicle(
+        stored_kwh_needed=11.805 * 0.9,
+        deadline_hours=2,
+        plugged_in=(True, True),
+        maximum_charge_kw=11.0,
+    )
+
+    plan = solve(
+        replace(problem((0.0, 0.0), (0.35, 0.40), maximum_import_kw=20.0), ev=ev)
+    )
+
+    assert plan.status is PlanStatus.OPTIMAL
+    assert charged_kw(plan) == pytest.approx([11.0, 0.805], abs=TOLERANCE)
+    assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
+    assert ev_soc_kwh(plan, 1) == pytest.approx(ev.target_soc_kwh)
+    assert plan.objective_eur == pytest.approx(11 * 0.35 + 0.805 * 0.40)
+    previous = ev.initial_soc_kwh
+    for hour in plan.hours:
+        assert hour.ev is not None
+        assert hour.ev.state_of_charge_kwh == pytest.approx(
+            previous + hour.ev.charge_kw * ev.charge_efficiency
+        )
+        assert hour.pv_generation_kw + hour.grid_import_kw == pytest.approx(
+            hour.load_kw + hour.grid_export_kw + hour.ev.charge_kw
+        )
+        previous = hour.ev.state_of_charge_kwh
 
 
 def test_the_car_does_not_charge_while_it_is_unplugged() -> None:
@@ -165,7 +195,7 @@ def test_surplus_charging_never_uses_more_than_the_pv_that_the_household_leaves(
 
     # Charging is worth it whenever the export revenue forgone (0.05) is below
     # nothing: it is free energy otherwise lost, so the car takes what it can.
-    assert charged_kw(plan) == pytest.approx([0.0, 3.0, 0.0, 0.0], abs=TOLERANCE)
+    assert charged_kw(plan) == pytest.approx([0.0, 3.0, 0.5, 0.0], abs=TOLERANCE)
     assert all(hour.grid_import_kw <= TOLERANCE for hour in plan.hours)
 
 

@@ -35,7 +35,6 @@ def ev(unit: str = "%") -> HomeAssistantEvConfiguration:
             "state_of_charge": {"entity_id": "sensor.ev_soc", "unit": unit},
             "plugged_in": {"entity_id": "binary_sensor.ev_cable"},
             "capacity_kwh": CAPACITY_KWH,
-            "minimum_charge_kw": 1.4,
             "maximum_charge_kw": 11,
         }
     )

@@ -1,5 +1,6 @@
 """Browser coverage of the plan view in the dashboard."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Final
 from zoneinfo import ZoneInfo
@@ -131,6 +132,42 @@ def _open_plan(page: Page) -> None:
     page.goto("/dashboard/")
     expect(page.locator("#status")).not_to_contain_text("Loading dashboard")
     page.locator("#plan-tab").click()
+
+
+def test_the_plan_fills_a_cheap_hour_before_showing_a_small_hourly_remainder(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    settings = configuration().model_dump(mode="json")
+    settings["grid"]["maximum_import_kw"] = 20
+    settings["ev_charging"] = {
+        "minimum_soc_percent": (30 + 11.805 * 0.9) / 60 * 100,
+        "deadline": "16:00",
+    }
+    car = importer(ev_responses("50", "on")).fetch(now=NOW)
+    car = replace(car, maximum_charge_kw=11.0)
+    stored = PlanGenerator(Configuration.model_validate(settings), provider_store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.35, 0.40]),
+            ev=car,
+        )
+    )
+    assert stored.plan.status is PlanStatus.OPTIMAL
+    assert [
+        hour.ev.charge_kw for hour in stored.plan.hours if hour.ev
+    ] == pytest.approx([11.0, 0.805])
+
+    _open_plan(page)
+
+    expect(page.locator("#status")).to_contain_text("solver status optimal")
+    rows = page.locator("#plan-rows tr")
+    expect(rows).to_have_count(2)
+    column = page.locator("#plan-head th").all_text_contents().index("EV charge (kW)")
+    expect(rows.nth(0).locator("td").nth(column)).to_have_text("11.00")
+    assert float(rows.nth(1).locator("td").nth(column).inner_text()) == pytest.approx(
+        0.805, abs=0.0051
+    )
 
 
 @pytest.mark.parametrize(

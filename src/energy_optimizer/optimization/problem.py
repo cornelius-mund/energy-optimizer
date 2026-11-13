@@ -55,8 +55,9 @@ class EvSpecification:
     """An electric vehicle that charges while plugged in and leaves at a deadline.
 
     Charging is only planned before ``deadline_hours``; the car must hold
-    ``target_soc_kwh`` by then. A charger delivers either nothing or a power
-    between its minimum and maximum. A target that cannot be reached is not an
+    ``target_soc_kwh`` by then. Charge power is an hourly average from zero to
+    the charger maximum; small values can represent shorter charging durations.
+    A target that cannot be reached is not an
     error: the plan charges as much as possible and reports the shortfall.
     A ``fixed_charge_kw`` schedule replaces the choice of hours and power; the
     rest of the plan is optimized around it. ``surplus_kw`` bounds the charge
@@ -78,7 +79,6 @@ class EvSpecification:
     target_soc_kwh: KilowattHour
     deadline_hours: int
     plugged_in: tuple[bool, ...]
-    minimum_charge_kw: Kilowatt
     maximum_charge_kw: Kilowatt
     charge_efficiency: float
     fixed_charge_kw: tuple[Kilowatt, ...] | None = None
