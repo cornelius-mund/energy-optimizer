@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from energy_optimizer.api import app
@@ -22,7 +23,7 @@ from energy_optimizer.optimization.plan_generation import (
 from energy_optimizer.orchestration import ProviderDataSnapshot
 from energy_optimizer.storage import ProviderDataStore
 from energy_optimizer.storage_errors import ProviderDataStoreError
-from test_ev_planning import configuration, ev_responses, importer
+from test_ev_planning import EV_SETTINGS, configuration, ev_responses, importer
 from test_orchestration import START, data, orchestrator_for
 from test_plan_generation import (
     FIRST_PLANNED_HOUR,
@@ -192,15 +193,20 @@ def test_an_unreachable_dated_requirement_is_explicitly_infeasible(
 def target_client(minimal_configuration: Path) -> TestClient:
     with minimal_configuration.open("a", encoding="utf-8") as output:
         output.write(
-            f"\npersistence:\n  directory: {minimal_configuration.parent / 'targets'}\n"
-        )
-        output.write(
-            "home_assistant:\n  base_url: http://ha.test\n  token: test\n"
-            "  timeout_seconds: 5\n  ev:\n"
-            "    state_of_charge: {entity_id: sensor.car, unit: '%'}\n"
-            "    plugged_in: {entity_id: binary_sensor.car}\n"
-            "    capacity_kwh: 60\n    minimum_charge_kw: 1.4\n"
-            "    maximum_charge_kw: 11\n"
+            "\n"
+            + yaml.safe_dump(
+                {
+                    "persistence": {
+                        "directory": str(minimal_configuration.parent / "targets")
+                    },
+                    "home_assistant": {
+                        "base_url": "http://ha.test",
+                        "token": "test",
+                        "timeout_seconds": 5,
+                        "ev": EV_SETTINGS,
+                    },
+                }
+            )
         )
     return TestClient(app)
 

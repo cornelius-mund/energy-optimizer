@@ -723,16 +723,7 @@ class PlanGenerator:
         if not requirements:
             return specification
         if specification is None:
-            specification = EvSpecification(
-                capacity_kwh=ev.capacity_kwh,
-                initial_soc_kwh=ev.state_of_charge_kwh,
-                target_soc_kwh=0.0,
-                deadline_hours=len(hour_starts),
-                plugged_in=(ev.plugged_in,) * len(hour_starts),
-                minimum_charge_kw=ev.minimum_charge_kw,
-                maximum_charge_kw=ev.maximum_charge_kw,
-                charge_efficiency=ev.charge_efficiency,
-            )
+            specification = immediate_charging(ev, 0.0, len(hour_starts))
         limit = specification.charge_limit_kwh
         return replace(
             specification,
