@@ -34,6 +34,13 @@ package structure, dependency direction, and request flow are documented in
 [`docs/architecture.md`](docs/architecture.md). These boundaries are targets for
 the implementation, not a claim that all of the modules exist today.
 
+### Heating model design
+
+The proposed building heat-storage model, temperature-dependent heat-pump COP,
+manual fireplace economics, inspected Home Assistant data and open configuration
+questions are documented in [Heating model design](docs/heating-model.md).
+This is an advisory design; automated heating control is not implemented.
+
 ## Input and Output
 
 The API should accept household electrical load, PV generation forecast,
@@ -1004,10 +1011,3 @@ uv run pytest -m "not e2e"
 ```
 
 See [`docs/api.md`](docs/api.md) for the endpoint reference and request examples.
-
-## Heating model design
-
-The proposed building heat-storage model, temperature-dependent heat-pump COP,
-manual fireplace economics, inspected Home Assistant data and open configuration
-questions are documented in [Heating model design](docs/heating-model.md).
-This is an advisory design; automated heating control is not implemented.
