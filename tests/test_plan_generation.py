@@ -521,3 +521,26 @@ def test_the_battery_supplies_the_cheapest_hour_instead_of_the_grid(
     assert cheapest_hour.grid_import_kw == pytest.approx(0.0, abs=1e-6)
     assert cheapest_hour.battery is not None
     assert cheapest_hour.battery.discharge_kw == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("end_of_horizon", ["restore_initial", "value_stored_energy"])
+def test_a_battery_below_its_minimum_is_planned_without_buying_energy_to_refill_it(
+    store: ProviderDataStore, end_of_horizon: str
+) -> None:
+    configuration = _battery_configuration(end_of_horizon=end_of_horizon)
+    drifted = replace(battery(initial_soc_kwh=0.9), minimum_soc_kwh=1.0)
+
+    stored = PlanGenerator(configuration, store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0, 0.0]),
+            electricity_prices=prices([0.30, 0.30]),
+            battery=drifted,
+        )
+    )
+
+    assert stored.plan.status is PlanStatus.OPTIMAL
+    for hour in stored.plan.hours:
+        assert hour.battery is not None
+        assert hour.battery.state_of_charge_kwh == pytest.approx(0.9, abs=1e-6)
+        assert hour.grid_import_kw == pytest.approx(1.0, abs=1e-6)

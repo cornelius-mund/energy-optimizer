@@ -49,6 +49,20 @@ class BatterySpecification:
         0.0,
     )
 
+    def starts_below_minimum(self) -> bool:
+        """Standby consumption lets an idle battery drift below its operating
+        minimum; such a reading is valid and must not block planning."""
+        return self.initial_soc_kwh < self.minimum_soc_kwh
+
+    def starts_above_maximum(self) -> bool:
+        return self.initial_soc_kwh > self.maximum_soc_kwh
+
+    def lowest_soc_kwh(self) -> KilowattHour:
+        return min(self.minimum_soc_kwh, self.initial_soc_kwh)
+
+    def highest_soc_kwh(self) -> KilowattHour:
+        return max(self.maximum_soc_kwh, self.initial_soc_kwh)
+
 
 @dataclass(frozen=True)
 class EvSpecification:

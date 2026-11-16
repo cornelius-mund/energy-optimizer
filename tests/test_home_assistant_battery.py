@@ -401,3 +401,30 @@ def test_fetch_uses_the_calculated_battery_efficiency_or_the_95_percent_default(
         data = provider.fetch(now=START, efficiency_data=efficiency_data)
 
     assert data.battery_efficiency == expected
+
+
+def test_a_state_of_charge_below_the_operating_minimum_is_still_imported() -> None:
+    data = fetch(serve(standard_payloads(payload("sensor.battery_soc", 15))))
+
+    assert data.initial_soc_kwh == pytest.approx(1.5)
+    assert data.minimum_soc_kwh == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    ("state_of_charge_percent", "message"),
+    [
+        pytest.param(120, "exceeds the battery capacity", id="above-capacity"),
+        pytest.param(-5, "must be non-negative", id="negative"),
+    ],
+)
+def test_a_physically_impossible_state_of_charge_is_rejected(
+    state_of_charge_percent: float, message: str
+) -> None:
+    with pytest.raises(HomeAssistantError, match=message):
+        fetch(
+            serve(
+                standard_payloads(
+                    payload("sensor.battery_soc", state_of_charge_percent)
+                )
+            )
+        )

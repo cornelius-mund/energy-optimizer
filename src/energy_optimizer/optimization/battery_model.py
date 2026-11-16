@@ -44,16 +44,74 @@ def add_battery(
             name="battery_discharge_kw",
         ),
         state_of_charge=model.add_variables(
-            lower=specification.minimum_soc_kwh,
-            upper=specification.maximum_soc_kwh,
+            lower=specification.lowest_soc_kwh(),
+            upper=specification.highest_soc_kwh(),
             coords=[hours],
             name="battery_soc_kwh",
         ),
     )
     _forbid_simultaneous_charge_and_discharge(model, hours, specification, variables)
     _add_state_of_charge_dynamics(model, hours, specification, variables)
+    _keep_out_of_band_state_from_moving_further_out(
+        model, hours, specification, variables
+    )
     _require_final_state_of_charge(model, hours, specification, variables)
     return _add_soft_limits(model, hours, specification, variables)
+
+
+def _state_before_each_hour(
+    hours: pandas.RangeIndex,
+    specification: BatterySpecification,
+    variables: BatteryVariables,
+) -> LinearExpression:
+    initial_state = pandas.Series(0.0, index=hours)
+    initial_state.iloc[0] = specification.initial_soc_kwh
+    return (
+        variables.state_of_charge.shift({HOUR_DIMENSION: 1}).fillna(0) + initial_state
+    )
+
+
+def _keep_out_of_band_state_from_moving_further_out(
+    model: Model,
+    hours: pandas.RangeIndex,
+    specification: BatterySpecification,
+    variables: BatteryVariables,
+) -> None:
+    """A battery below its minimum may not discharge further and one above its
+    maximum may not charge further, which is what the battery management does.
+    It is never forced back into the band: refilling it from the grid only to
+    satisfy a limit could cost more than the limit protects.
+
+    Each hour's state is at least ``min(previous state, minimum)`` and at most
+    ``max(previous state, maximum)``; a binary per hour picks the binding side.
+    """
+    big_m = specification.highest_soc_kwh() - specification.lowest_soc_kwh()
+    previous = _state_before_each_hour(hours, specification, variables)
+    state = variables.state_of_charge
+    if specification.starts_below_minimum():
+        minimum_applies = model.add_variables(
+            binary=True, coords=[hours], name="battery_minimum_applies"
+        )
+        model.add_constraints(
+            state >= specification.minimum_soc_kwh - big_m * (1 - minimum_applies),
+            name="battery_minimum_once_reached",
+        )
+        model.add_constraints(
+            state >= previous - big_m * minimum_applies,
+            name="battery_no_discharge_below_minimum",
+        )
+    if specification.starts_above_maximum():
+        maximum_applies = model.add_variables(
+            binary=True, coords=[hours], name="battery_maximum_applies"
+        )
+        model.add_constraints(
+            state <= specification.maximum_soc_kwh + big_m * (1 - maximum_applies),
+            name="battery_maximum_once_reached",
+        )
+        model.add_constraints(
+            state <= previous + big_m * maximum_applies,
+            name="battery_no_charge_above_maximum",
+        )
 
 
 def _add_soft_limits(
@@ -77,7 +135,7 @@ def _add_soft_limits(
             "reserve",
             lambda first, second, band, day_hours: (
                 variables.state_of_charge.loc[day_hours] + first + second
-                >= specification.minimum_soc_kwh + band.loc[day_hours]
+                >= specification.lowest_soc_kwh() + band.loc[day_hours]
             ),
         )
     )
@@ -91,7 +149,7 @@ def _add_soft_limits(
             "headroom",
             lambda first, second, band, day_hours: (
                 variables.state_of_charge.loc[day_hours] - first - second
-                <= specification.maximum_soc_kwh - band.loc[day_hours]
+                <= specification.highest_soc_kwh() - band.loc[day_hours]
             ),
         )
     )
@@ -184,14 +242,11 @@ def _add_state_of_charge_dynamics(
     specification: BatterySpecification,
     variables: BatteryVariables,
 ) -> None:
-    initial_state = pandas.Series(0.0, index=hours)
-    initial_state.iloc[0] = specification.initial_soc_kwh
     stored_kwh = variables.charge * specification.charge_efficiency
     drawn_kwh = variables.discharge / specification.discharge_efficiency
     model.add_constraints(
         variables.state_of_charge
-        == variables.state_of_charge.shift({HOUR_DIMENSION: 1}).fillna(0)
-        + initial_state
+        == _state_before_each_hour(hours, specification, variables)
         + stored_kwh
         - drawn_kwh,
         name="state_of_charge_dynamics",

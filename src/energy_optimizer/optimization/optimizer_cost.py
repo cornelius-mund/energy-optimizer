@@ -54,7 +54,7 @@ def _reserve_penalties(
     first, second = variables.reserve_deficits
     first_penalty, second_penalty = specification.reserve_penalties_eur_per_kwh
     above_reserve = state_of_charge - (
-        specification.minimum_soc_kwh + numpy.asarray(specification.reserve_kwh)
+        specification.lowest_soc_kwh() + numpy.asarray(specification.reserve_kwh)
     )
     penalties = []
     for day, (first_kwh, second_kwh) in enumerate(
@@ -82,7 +82,7 @@ def _headroom_penalties(
     first, second = variables.headroom_overshoots
     first_penalty, second_penalty = specification.headroom_penalties_eur_per_kwh
     into_headroom = state_of_charge - (
-        specification.maximum_soc_kwh - numpy.asarray(specification.headroom_kwh)
+        specification.highest_soc_kwh() - numpy.asarray(specification.headroom_kwh)
     )
     penalties = []
     for day, (first_kwh, second_kwh) in enumerate(
