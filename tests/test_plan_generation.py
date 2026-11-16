@@ -142,7 +142,7 @@ def test_the_load_forecast_is_the_mean_of_the_same_hour_over_the_last_seven_days
         ZoneInfo("UTC"),
     )
 
-    assert forecast == pytest.approx((5.0 + 3.0, 6.0 + 3.0))
+    assert forecast.load_kw == pytest.approx((5.0 + 3.0, 6.0 + 3.0))
 
 
 def test_excluded_hours_do_not_contribute_to_the_load_forecast() -> None:
@@ -155,16 +155,29 @@ def test_excluded_hours_do_not_contribute_to_the_load_forecast() -> None:
         history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("UTC")
     )
 
-    assert forecast == pytest.approx(((2.0 * 5 + 4.0) / 6,))
+    assert forecast.load_kw == pytest.approx(((2.0 * 5 + 4.0) / 6,))
 
 
-def test_an_hour_of_day_without_any_sample_cannot_be_forecast() -> None:
+def test_an_hour_of_day_without_any_sample_is_filled_from_its_neighbours() -> None:
     values: list[float | None] = [1.0 for _ in range(24 * 7)]
     for day in range(7):
+        values[day * 24 + 4] = 3.0
         values[day * 24 + 5] = None
+        values[day * 24 + 6] = 5.0
     history = household_load(values, datetime(2026, 3, 3, tzinfo=UTC))
 
-    with pytest.raises(LoadForecastError, match="local hour 5"):
+    forecast = seven_day_mean_forecast(
+        history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("UTC")
+    )
+
+    assert forecast.load_kw == pytest.approx((4.0,))
+    assert forecast.filled_local_hours == frozenset({5})
+
+
+def test_a_history_without_any_sample_cannot_be_forecast() -> None:
+    history = household_load([None] * 24, datetime(2026, 3, 3, tzinfo=UTC))
+
+    with pytest.raises(LoadForecastError, match="no valid sample"):
         seven_day_mean_forecast(
             history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("UTC")
         )
@@ -178,7 +191,7 @@ def test_the_forecast_uses_the_local_hour_of_day() -> None:
         history, [datetime(2026, 3, 10, 5, tzinfo=UTC)], ZoneInfo("Europe/Berlin")
     )
 
-    assert forecast == pytest.approx((5.0,))
+    assert forecast.load_kw == pytest.approx((5.0,))
 
 
 def test_the_plan_covers_the_hours_with_prices_and_a_pv_forecast(

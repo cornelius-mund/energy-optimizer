@@ -9,7 +9,6 @@ import pytest
 
 from energy_optimizer.config import Configuration
 from energy_optimizer.optimization.load_forecast import (
-    FILLED_PROFILE,
     SEVEN_DAY_MEAN,
     WEEKDAY_PROFILE,
     LoadForecastError,
@@ -65,8 +64,9 @@ def test_the_weekday_profile_predicts_a_weekday_and_a_weekend_day_exactly() -> N
     monday = weekday_profile_forecast(history, day_hours(history, 0), UTC_ZONE)
     saturday = weekday_profile_forecast(history, day_hours(history, 5), UTC_ZONE)
 
-    assert monday == pytest.approx((WEEKDAY_KW,) * 24)
-    assert saturday == pytest.approx((WEEKEND_KW,) * 24)
+    assert monday.load_kw == pytest.approx((WEEKDAY_KW,) * 24)
+    assert saturday.load_kw == pytest.approx((WEEKEND_KW,) * 24)
+    assert not monday.filled_local_hours and not saturday.filled_local_hours
 
 
 def test_the_seven_day_mean_cannot_tell_weekdays_from_weekends() -> None:
@@ -75,7 +75,7 @@ def test_the_seven_day_mean_cannot_tell_weekdays_from_weekends() -> None:
 
     monday = seven_day_mean_forecast(history, day_hours(history, 0), UTC_ZONE)
 
-    assert monday == pytest.approx((expected,) * 24)
+    assert monday.load_kw == pytest.approx((expected,) * 24)
 
 
 def test_the_weekday_profile_beats_the_seven_day_mean_in_the_backtest() -> None:
@@ -122,11 +122,14 @@ def test_auto_falls_back_when_the_best_method_cannot_forecast_the_day() -> None:
     assert forecast.load_kw == pytest.approx((WEEKDAY_KW,) * 24)
 
 
-def test_the_weekday_profile_needs_samples_for_the_kind_of_day() -> None:
+def test_a_kind_of_day_without_samples_is_filled_from_the_mean_of_its_hours() -> None:
     history = weekly_history(days=5)
 
-    with pytest.raises(LoadForecastError, match="weekend local hour 0"):
-        weekday_profile_forecast(history, day_hours(history, 0), UTC_ZONE)
+    # The five-day history ends on a Friday, so the next day is a Saturday.
+    saturday = weekday_profile_forecast(history, day_hours(history, 0), UTC_ZONE)
+
+    assert saturday.load_kw == pytest.approx((WEEKDAY_KW,) * 24)
+    assert saturday.filled_local_hours == frozenset(range(24))
 
 
 def test_a_history_too_short_to_backtest_is_reported() -> None:
@@ -195,8 +198,8 @@ def test_an_hour_excluded_every_day_is_filled_from_its_neighbouring_hours() -> N
 
     forecast = forecast_load(history, day_hours(history, 0), UTC_ZONE)
 
-    assert forecast.method == FILLED_PROFILE
-    assert forecast.mean_absolute_error_kw is None
+    assert forecast.method in (SEVEN_DAY_MEAN, WEEKDAY_PROFILE)
+    assert forecast.mean_absolute_error_kw is not None
     assert forecast.load_kw[19] == pytest.approx(3.0)
     assert forecast.load_kw[18] == pytest.approx(2.0)
 
@@ -206,3 +209,28 @@ def test_a_history_without_any_valid_hour_cannot_be_forecast() -> None:
 
     with pytest.raises(LoadForecastError, match="no valid sample"):
         forecast_load(history, day_hours(history, 0), UTC_ZONE)
+
+
+def test_a_nightly_meter_dropout_keeps_the_backtested_seven_day_mean(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    days = 10
+    history = replace(
+        weekly_history(days=days),
+        load_kw=tuple(
+            None if hour % 24 == 1 and hour >= (days - 7) * 24 else 2.0 + hour % 24
+            for hour in range(days * 24)
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="energy_optimizer.optimization"):
+        forecast = forecast_load(
+            history, day_hours(history, 0), UTC_ZONE, method=SEVEN_DAY_MEAN
+        )
+
+    assert forecast.method == SEVEN_DAY_MEAN
+    assert forecast.mean_absolute_error_kw == pytest.approx(0.0, abs=1e-9)
+    assert forecast.load_kw[1] == pytest.approx(3.0)
+    assert forecast.load_kw[2] == pytest.approx(4.0)
+    assert caplog.text.count("event=load_forecast_gaps_filled") == 1
+    assert "filled_local_hours=1" in caplog.text
