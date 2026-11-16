@@ -81,15 +81,23 @@ def _hourly(values: Sequence[float], hours: pandas.RangeIndex) -> pandas.Series:
     return pandas.Series(values, index=hours, dtype=float)
 
 
+def _durations(problem: PlanningProblem, hours: pandas.RangeIndex) -> pandas.Series:
+    return _hourly(problem.hour_durations(), hours)
+
+
 def _add_variables(
     model: Model, hours: pandas.RangeIndex, problem: PlanningProblem
 ) -> _GridAndPvVariables:
     return _GridAndPvVariables(
-        ev=None if problem.ev is None else add_ev(model, hours, problem.ev),
+        ev=(
+            None
+            if problem.ev is None
+            else add_ev(model, hours, problem.ev, _durations(problem, hours))
+        ),
         battery=(
             None
             if problem.battery is None
-            else add_battery(model, hours, problem.battery)
+            else add_battery(model, hours, problem.battery, _durations(problem, hours))
         ),
         grid_import=model.add_variables(
             lower=0,
@@ -165,18 +173,19 @@ def _minimize_net_cost(
     problem: PlanningProblem,
     hours: pandas.RangeIndex,
 ) -> None:
-    import_cost = variables.grid_import * _hourly(
-        problem.import_price_eur_per_kwh, hours
+    durations = _durations(problem, hours)
+    import_cost = variables.grid_import * (
+        _hourly(problem.import_price_eur_per_kwh, hours) * durations
     )
-    export_revenue = variables.grid_export * _hourly(
-        problem.export_price_eur_per_kwh, hours
+    export_revenue = variables.grid_export * (
+        _hourly(problem.export_price_eur_per_kwh, hours) * durations
     )
     objective = (import_cost - export_revenue).sum()
     if variables.battery is not None:
         assert problem.battery is not None
         objective = objective + (
             problem.battery.throughput_cost_eur_per_kwh
-            * variables.battery.discharge.sum()
+            * (variables.battery.discharge * durations).sum()
         )
         objective = objective + reserve_penalty(variables.battery, problem.battery)
         final_state_kwh = variables.battery.state_of_charge.loc[hours[-1]]
@@ -189,7 +198,7 @@ def _minimize_net_cost(
         )
         assert problem.ev is not None
         stored_value = problem.ev.value_eur_per_kwh * problem.ev.charge_efficiency
-        objective = objective - stored_value * variables.ev.charge.sum()
+        objective = objective - stored_value * (variables.ev.charge * durations).sum()
     model.add_objective(objective)
 
 
@@ -228,6 +237,7 @@ def _read_plan(
     exported_kw = variables.grid_export.solution.values
     pv_used_kw = variables.pv_used.solution.values
     storage_costs = _storage_hourly_costs(problem, variables)
+    durations = problem.hour_durations()
     hours = tuple(
         PlannedHour(
             start_time=problem.start_time + timedelta(hours=hour),
@@ -242,8 +252,10 @@ def _read_plan(
             grid_import_kw=float(imported_kw[hour]),
             grid_export_kw=float(exported_kw[hour]),
             import_cost_eur=float(imported_kw[hour])
+            * durations[hour]
             * problem.import_price_eur_per_kwh[hour],
             export_revenue_eur=float(exported_kw[hour])
+            * durations[hour]
             * problem.export_price_eur_per_kwh[hour],
             battery=(
                 None
@@ -254,6 +266,7 @@ def _read_plan(
                     _throughput_cost(problem),
                     _reserve_kwh(problem, hour),
                     _headroom_kwh(problem, hour),
+                    durations[hour],
                 )
             ),
             ev=(
@@ -261,11 +274,14 @@ def _read_plan(
                 if variables.ev is None or problem.ev is None
                 else read_ev_hour(variables.ev, problem.ev, hour)
             ),
+            duration_hours=durations[hour],
             import_price_eur_per_kwh=problem.import_price_eur_per_kwh[hour],
             export_price_eur_per_kwh=problem.export_price_eur_per_kwh[hour],
-            optimizer_cost_eur=float(imported_kw[hour])
-            * problem.import_price_eur_per_kwh[hour]
-            - float(exported_kw[hour]) * problem.export_price_eur_per_kwh[hour]
+            optimizer_cost_eur=(
+                float(imported_kw[hour]) * problem.import_price_eur_per_kwh[hour]
+                - float(exported_kw[hour]) * problem.export_price_eur_per_kwh[hour]
+            )
+            * durations[hour]
             + storage_costs[hour],
         )
         for hour in range(problem.hours())
@@ -280,7 +296,9 @@ def _read_plan(
         ),
         hours=hours,
         battery_throughput_kwh=sum(
-            hour.battery.discharge_kw for hour in hours if hour.battery
+            hour.battery.discharge_kw * duration
+            for hour, duration in zip(hours, durations, strict=True)
+            if hour.battery
         ),
         degradation_cost_eur=sum(
             hour.battery.degradation_cost_eur for hour in hours if hour.battery
@@ -304,7 +322,9 @@ def _storage_hourly_costs(
             cost + battery_cost
             for cost, battery_cost in zip(
                 costs,
-                battery_hourly_costs(variables.battery, problem.battery),
+                battery_hourly_costs(
+                    variables.battery, problem.battery, problem.hour_durations()
+                ),
                 strict=True,
             )
         ]
@@ -312,7 +332,9 @@ def _storage_hourly_costs(
         costs = [
             cost + ev_cost
             for cost, ev_cost in zip(
-                costs, ev_hourly_costs(variables.ev, problem.ev), strict=True
+                costs,
+                ev_hourly_costs(variables.ev, problem.ev, problem.hour_durations()),
+                strict=True,
             )
         ]
     return costs

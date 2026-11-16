@@ -764,6 +764,16 @@ class PlannedHourResponse(_StrictModel):
             "and penalties minus the value of the energy stored in the hour"
         ),
     )
+    duration_hours: float = Field(
+        default=1.0,
+        gt=0,
+        le=1,
+        description=(
+            "Planned part of the hour; below 1 for the running hour of a plan "
+            "made during it. Energy and costs of the hour are its kW values "
+            "times this duration"
+        ),
+    )
 
 
 class OptimizationResponse(_StrictModel):

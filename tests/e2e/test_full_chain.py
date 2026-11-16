@@ -228,9 +228,8 @@ def test_the_battery_dispatch_respects_its_limits_and_buys_cheap_energy(
     previous = INITIAL_SOC_KWH
     for hour in schedule:
         battery = hour["battery"]
-        expected = (
-            previous
-            + battery["charge_kw"] * leg_efficiency
+        expected = previous + hour["duration_hours"] * (
+            battery["charge_kw"] * leg_efficiency
             - battery["discharge_kw"] / leg_efficiency
         )
         assert battery["state_of_charge_kwh"] == pytest.approx(expected, abs=1e-4)
@@ -252,10 +251,12 @@ def test_imports_are_priced_with_the_grid_tariff_and_exports_at_the_market(
 
     for hour in schedule:
         assert hour["import_cost_eur"] == pytest.approx(
-            hour["grid_import_kw"] * _gross_price(hour), abs=1e-6
+            hour["grid_import_kw"] * hour["duration_hours"] * _gross_price(hour),
+            abs=1e-6,
         )
         assert hour["export_revenue_eur"] == pytest.approx(
-            hour["grid_export_kw"] * _market_price(hour), abs=1e-6
+            hour["grid_export_kw"] * hour["duration_hours"] * _market_price(hour),
+            abs=1e-6,
         )
 
 
@@ -309,7 +310,7 @@ def test_the_car_is_charged_to_its_target_before_the_deadline_in_cheap_hours(
         if index >= deadline_index:
             assert charge_kw == pytest.approx(0.0, abs=TOLERANCE)
         assert hour["ev"]["state_of_charge_kwh"] == pytest.approx(
-            previous + charge_kw * EV_EFFICIENCY, abs=1e-4
+            previous + charge_kw * hour["duration_hours"] * EV_EFFICIENCY, abs=1e-4
         )
         previous = hour["ev"]["state_of_charge_kwh"]
 
@@ -382,6 +383,9 @@ def test_the_immediate_strategy_charges_at_full_power_from_the_first_hour(
 ) -> None:
     plan = _wait_for_plan(immediate_chain[0])
     charged_kw = [hour["ev"]["charge_kw"] for hour in plan["schedule"]]
+    charged_kwh = [
+        hour["ev"]["charge_kw"] * hour["duration_hours"] for hour in plan["schedule"]
+    ]
     needed_kwh = EV_CAPACITY_KWH * (EV_TARGET_PERCENT - EV_SOC_PERCENT) / 100
     full_power_hours = int(needed_kwh / EV_EFFICIENCY // EV_MAXIMUM_CHARGE_KW)
 
@@ -389,7 +393,7 @@ def test_the_immediate_strategy_charges_at_full_power_from_the_first_hour(
     assert charged_kw[:full_power_hours] == pytest.approx(
         [EV_MAXIMUM_CHARGE_KW] * full_power_hours
     )
-    assert sum(charged_kw) * EV_EFFICIENCY == pytest.approx(needed_kwh)
+    assert sum(charged_kwh) * EV_EFFICIENCY == pytest.approx(needed_kwh)
     assert all(kw == pytest.approx(0.0, abs=TOLERANCE) for kw in charged_kw[6:])
 
 
@@ -428,7 +432,7 @@ def test_the_soft_target_charges_cheap_hours_above_the_minimum_but_never_beyond_
     )
     worth_it = SOFT_VALUE_EUR_PER_KWH * EV_EFFICIENCY
     expensive_stored_kwh = sum(
-        h["ev"]["charge_kw"] * EV_EFFICIENCY
+        h["ev"]["charge_kw"] * h["duration_hours"] * EV_EFFICIENCY
         for h in schedule
         if _gross_price(h) >= worth_it
     )
@@ -522,8 +526,10 @@ def test_forecast_prices_extend_the_plan_beyond_the_published_day_ahead_prices(
             if starts >= forecast_from
             else market_price_eur_per_mwh(starts.hour)
         )
-        expected_cost = hour["grid_import_kw"] * tariff.import_price_eur_per_kwh(
-            market_eur_per_mwh / 1000, starts.hour
+        expected_cost = (
+            hour["grid_import_kw"]
+            * hour["duration_hours"]
+            * tariff.import_price_eur_per_kwh(market_eur_per_mwh / 1000, starts.hour)
         )
         assert hour["import_cost_eur"] == pytest.approx(expected_cost, abs=TOLERANCE)
 
@@ -658,7 +664,8 @@ def test_exports_earn_the_fixed_feed_in_tariff_and_the_battery_is_not_sold(
 
     for hour in schedule:
         assert hour["export_revenue_eur"] == pytest.approx(
-            hour["grid_export_kw"] * FEED_IN_CT_PER_KWH / 100, abs=1e-6
+            hour["grid_export_kw"] * hour["duration_hours"] * FEED_IN_CT_PER_KWH / 100,
+            abs=1e-6,
         )
         sells_battery_energy = (
             hour["battery"]["discharge_kw"] > 1e-6 and hour["grid_export_kw"] > 1e-6

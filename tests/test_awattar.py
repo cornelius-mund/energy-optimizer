@@ -80,9 +80,10 @@ def test_fetch_normalizes_market_prices_and_source(importer: Importer) -> None:
 
     data = importer(handler).fetch(START, now=NOW)
 
-    assert data.timestamps == (START + timedelta(hours=1),)
-    assert data.import_price_eur_per_kwh == (0.12,)
-    assert data.export_price_eur_per_kwh == (0.12,)
+    # The running hour is kept, because a plan made during it starts with it.
+    assert data.timestamps == (START, START + timedelta(hours=1))
+    assert data.import_price_eur_per_kwh == (0.1, 0.12)
+    assert data.export_price_eur_per_kwh == (0.1, 0.12)
     assert data.unit == "EUR/kWh"
     assert data.source.provider == "awattar.de"
     assert data.source.entity_id == "de"
@@ -152,7 +153,7 @@ def test_fetch_accepts_a_response_that_ends_at_the_local_end_of_today(
 
     data = provider.fetch(first, now=now)
 
-    assert data.timestamps[0] == datetime(2026, 9, 30, 10, tzinfo=timezone.utc)
+    assert data.timestamps[0] == datetime(2026, 9, 30, 9, tzinfo=timezone.utc)
     assert data.timestamps[-1] == datetime(2026, 9, 30, 21, tzinfo=timezone.utc)
     assert data.expires_at == datetime(2026, 9, 30, 22, tzinfo=timezone.utc)
 

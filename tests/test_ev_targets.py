@@ -1,5 +1,6 @@
 """Dated owner requirements: persistence, HTTP validation and real solver behavior."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -113,8 +114,24 @@ def test_an_expired_or_out_of_horizon_target_does_not_change_the_problem(
         ev=importer(ev_responses("50")).fetch(now=NOW),
     )
     if expired:
+        later = timedelta(days=8)
+        published = prices([0.1] * 4)
+        forecast = pv_forecast([0.0] * 4)
         inputs = ProviderDataSnapshot(
-            captured_at=NOW + timedelta(days=8), data=inputs.data
+            captured_at=NOW + later,
+            data={
+                **inputs.data,
+                "electricity_prices": replace(
+                    published,
+                    timestamps=tuple(start + later for start in published.timestamps),
+                    expires_at=published.expires_at + later,
+                ),
+                "pv_generation": replace(
+                    forecast,
+                    start_time=forecast.start_time + later,
+                    expires_at=forecast.expires_at + later,
+                ),
+            },
         )
     assert generator.planning_problem(inputs).ev is None
 

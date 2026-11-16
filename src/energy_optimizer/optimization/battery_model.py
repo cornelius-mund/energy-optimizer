@@ -28,7 +28,10 @@ class BatteryVariables:
 
 
 def add_battery(
-    model: Model, hours: pandas.RangeIndex, specification: BatterySpecification
+    model: Model,
+    hours: pandas.RangeIndex,
+    specification: BatterySpecification,
+    durations: pandas.Series,
 ) -> BatteryVariables:
     variables = BatteryVariables(
         charge=model.add_variables(
@@ -51,7 +54,7 @@ def add_battery(
         ),
     )
     _forbid_simultaneous_charge_and_discharge(model, hours, specification, variables)
-    _add_state_of_charge_dynamics(model, hours, specification, variables)
+    _add_state_of_charge_dynamics(model, hours, specification, variables, durations)
     _keep_out_of_band_state_from_moving_further_out(
         model, hours, specification, variables
     )
@@ -242,9 +245,10 @@ def _add_state_of_charge_dynamics(
     hours: pandas.RangeIndex,
     specification: BatterySpecification,
     variables: BatteryVariables,
+    durations: pandas.Series,
 ) -> None:
-    stored_kwh = variables.charge * specification.charge_efficiency
-    drawn_kwh = variables.discharge / specification.discharge_efficiency
+    stored_kwh = variables.charge * specification.charge_efficiency * durations
+    drawn_kwh = variables.discharge / specification.discharge_efficiency * durations
     model.add_constraints(
         variables.state_of_charge
         == _state_before_each_hour(hours, specification, variables)
@@ -273,12 +277,15 @@ def read_battery_hour(
     throughput_cost_eur_per_kwh: float = 0.0,
     reserve_kwh: float = 0.0,
     headroom_kwh: float = 0.0,
+    duration_hours: float = 1.0,
 ) -> PlannedBatteryHour:
     discharge_kw = float(variables.discharge.solution.values[hour])
     return PlannedBatteryHour(
         charge_kw=float(variables.charge.solution.values[hour]),
         discharge_kw=discharge_kw,
-        degradation_cost_eur=discharge_kw * throughput_cost_eur_per_kwh,
+        degradation_cost_eur=discharge_kw
+        * duration_hours
+        * throughput_cost_eur_per_kwh,
         state_of_charge_kwh=float(variables.state_of_charge.solution.values[hour]),
         reserve_kwh=reserve_kwh,
         headroom_kwh=headroom_kwh,

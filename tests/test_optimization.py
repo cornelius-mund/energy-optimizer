@@ -307,3 +307,23 @@ def test_pv_self_consumption_is_never_negative_when_the_battery_is_sold() -> Non
 
     assert sum(hour.grid_export_kw for hour in plan.hours) > 1
     assert all(hour.pv_self_consumption_kw >= 0 for hour in plan.hours)
+
+
+def test_the_running_hour_costs_only_its_remaining_part() -> None:
+    plan = solve(
+        PlanningProblem(
+            start_time=START,
+            load_kw=(2.0, 2.0),
+            pv_forecast_kw=(0.0, 0.0),
+            import_price_eur_per_kwh=(0.3, 0.3),
+            export_price_eur_per_kwh=(0.05, 0.05),
+            maximum_import_kw=10,
+            maximum_export_kw=10,
+            time_limit_seconds=30,
+            first_hour_fraction=0.5,
+        )
+    )
+
+    assert [hour.grid_import_kw for hour in plan.hours] == pytest.approx([2.0, 2.0])
+    assert [hour.import_cost_eur for hour in plan.hours] == pytest.approx([0.3, 0.6])
+    assert plan.objective_eur == pytest.approx(0.9)

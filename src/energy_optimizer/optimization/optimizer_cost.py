@@ -24,7 +24,9 @@ HOURS_PER_DAY = 24
 
 
 def battery_hourly_costs(
-    variables: BatteryVariables, specification: BatterySpecification
+    variables: BatteryVariables,
+    specification: BatterySpecification,
+    durations: tuple[float, ...],
 ) -> list[float]:
     """Wear, the value of the stored energy given up, and the reserve penalty of
     each planned day at the hour that is furthest below the reserve."""
@@ -34,7 +36,7 @@ def battery_hourly_costs(
         ([specification.initial_soc_kwh], state_of_charge[:-1])
     )
     costs = (
-        specification.throughput_cost_eur_per_kwh * discharge
+        specification.throughput_cost_eur_per_kwh * discharge * numpy.asarray(durations)
         - specification.terminal_value_eur_per_kwh * (state_of_charge - previous)
     ).tolist()
     for hour, penalty in _reserve_penalties(variables, specification, state_of_charge):
@@ -101,11 +103,13 @@ def _headroom_penalties(
 
 
 def ev_hourly_costs(
-    variables: EvVariables, specification: EvSpecification
+    variables: EvVariables,
+    specification: EvSpecification,
+    durations: tuple[float, ...],
 ) -> list[float]:
     """The value of the charged energy as a credit, and penalties for energy
     missing for driving or a morning minimum and at the deadline."""
-    charge = variables.charge.solution.values.astype(float)
+    charge = variables.charge.solution.values.astype(float) * numpy.asarray(durations)
     missing = variables.missing_energy.solution.values.astype(float)
     stored_value = specification.value_eur_per_kwh * specification.charge_efficiency
     costs = (SHORTFALL_PENALTY_EUR_PER_KWH * missing - stored_value * charge).tolist()

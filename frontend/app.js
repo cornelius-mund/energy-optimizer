@@ -778,6 +778,9 @@
   const isForecastPrice = (plan, hour) => Boolean(plan.price_forecast_from) && new Date(hour.start_time) >= new Date(plan.price_forecast_from);
   const hourCost = (hour) => hour.import_cost_eur - hour.export_revenue_eur;
   const sumOf = (schedule, read) => schedule.reduce((sum, hour) => sum + (read(hour) || 0), 0);
+  // The running hour of a plan made during it is planned only for its rest, so
+  // its power counts with that duration in an energy total.
+  const energyOf = (hour, read) => (read(hour) || 0) * (hour.duration_hours ?? 1);
   const planColumns = (plan) => {
     const schedule = plan.schedule;
     const cumulative = [];
@@ -789,6 +792,11 @@
       title,
       value: (hour) => planNumber(read(hour), digits),
       total: () => planNumber(sumOf(schedule, read), digits),
+    });
+    const power = (title, read, digits = 2) => ({
+      title,
+      value: (hour) => planNumber(read(hour), digits),
+      total: () => planNumber(sumOf(schedule, (hour) => energyOf(hour, read)), digits),
     });
     const state = (title, read, digits = 1) => ({ title, value: (hour) => planNumber(read(hour), digits), total: () => "" });
     const stateChange = (title, read, digits = 1) => ({
@@ -803,15 +811,15 @@
     });
     const columns = [
       { title: `Hour (${timeZone})`, value: (hour) => formatTimestamp(hour.start_time), total: () => "Total" },
-      flow("Load (kW)", (hour) => hour.load_kw),
-      flow("PV (kW)", (hour) => hour.pv_generation_kw),
-      flow("Grid import (kW)", (hour) => hour.grid_import_kw),
-      flow("Grid export (kW)", (hour) => hour.grid_export_kw),
+      power("Load (kW)", (hour) => hour.load_kw),
+      power("PV (kW)", (hour) => hour.pv_generation_kw),
+      power("Grid import (kW)", (hour) => hour.grid_import_kw),
+      power("Grid export (kW)", (hour) => hour.grid_export_kw),
     ];
     if (schedule.some((hour) => hour.battery)) {
       columns.push(
-        flow("Battery charge (kW)", (hour) => hour.battery && hour.battery.charge_kw),
-        flow("Battery discharge (kW)", (hour) => hour.battery && hour.battery.discharge_kw),
+        power("Battery charge (kW)", (hour) => hour.battery && hour.battery.charge_kw),
+        power("Battery discharge (kW)", (hour) => hour.battery && hour.battery.discharge_kw),
         stateChange("Battery state (%)", (hour) => hour.battery && hour.battery.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.battery && hour.battery.reserve_percent > 0)) {
@@ -823,7 +831,7 @@
     }
     if (schedule.some((hour) => hour.ev)) {
       columns.push(
-        flow("EV charge (kW)", (hour) => hour.ev && hour.ev.charge_kw),
+        power("EV charge (kW)", (hour) => hour.ev && hour.ev.charge_kw),
         stateChange("EV state (%)", (hour) => hour.ev && hour.ev.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.ev && (!hour.ev.expected_plugged_in || hour.ev.consumption_kwh > 0))) {

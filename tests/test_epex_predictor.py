@@ -50,11 +50,17 @@ def answering(body: Any, status: int = 200) -> Handler:
     return lambda _: httpx.Response(status, json=body)
 
 
-def test_future_hours_are_imported_in_eur_per_kwh() -> None:
-    data = importer(answering(payload([100.0, 250.0, 80.0]))).fetch(now=NOW)
+def test_the_running_and_future_hours_are_imported_in_eur_per_kwh() -> None:
+    data = importer(
+        answering(payload([90.0, 100.0, 250.0, 80.0], RUNNING_HOUR - ONE_HOUR))
+    ).fetch(now=NOW)
 
-    assert data.timestamps == (RUNNING_HOUR + ONE_HOUR, RUNNING_HOUR + 2 * ONE_HOUR)
-    assert data.import_price_eur_per_kwh == pytest.approx((0.25, 0.08))
+    assert data.timestamps == (
+        RUNNING_HOUR,
+        RUNNING_HOUR + ONE_HOUR,
+        RUNNING_HOUR + 2 * ONE_HOUR,
+    )
+    assert data.import_price_eur_per_kwh == pytest.approx((0.1, 0.25, 0.08))
     assert data.export_price_eur_per_kwh == data.import_price_eur_per_kwh
     assert data.expires_at == RUNNING_HOUR + 3 * ONE_HOUR
     assert data.source.provider == "epex-predictor"
@@ -84,7 +90,7 @@ def test_the_request_asks_for_hourly_utc_prices_of_the_configured_region() -> No
     ("body", "message"),
     [
         ({"data": []}, "prices array"),
-        (payload([100.0]), "no future prices"),
+        (payload([100.0], RUNNING_HOUR - ONE_HOUR), "no future prices"),
         ({"prices": [{"startsAt": "yesterday", "total": 1.0}]}, "startsAt is invalid"),
         ({"prices": [{"total": 1.0}]}, "needs a startsAt"),
         (

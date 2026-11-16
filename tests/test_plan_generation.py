@@ -583,3 +583,50 @@ def test_a_discarded_price_forecast_is_logged(
 
     assert "event=price_forecast_discarded" in caplog.text
     assert "reason=gap_after_published_prices" in caplog.text
+
+
+def test_a_plan_made_during_an_hour_starts_with_it_and_plans_only_its_rest(
+    store: ProviderDataStore,
+) -> None:
+    captured_at = FIRST_PLANNED_HOUR + timedelta(minutes=20)
+
+    stored = PlanGenerator(_battery_configuration(), store)(
+        ProviderDataSnapshot(
+            captured_at=captured_at,
+            data={
+                "household_load": flat_history(1.0),
+                "pv_generation": pv_forecast([0.0, 0.0, 0.0]),
+                "electricity_prices": prices([0.50, 0.10, 0.10]),
+                "battery": battery(efficiency=1.0),
+            },
+        )
+    )
+
+    first = stored.plan.hours[0]
+    assert stored.start_time == FIRST_PLANNED_HOUR
+    assert first.battery is not None
+    assert first.battery.discharge_kw == pytest.approx(1.0)
+    assert first.battery.state_of_charge_kwh == pytest.approx(5.0 - 40 / 60)
+    assert first.grid_import_kw == pytest.approx(0.0, abs=1e-6)
+
+
+def test_hours_that_ended_before_the_plan_is_made_are_not_planned(
+    configuration: Configuration, store: ProviderDataStore
+) -> None:
+    captured_at = FIRST_PLANNED_HOUR + timedelta(hours=2, minutes=10)
+
+    problem = PlanGenerator(configuration, store).planning_problem(
+        ProviderDataSnapshot(
+            captured_at=captured_at,
+            data={
+                "household_load": flat_history(1.0),
+                "pv_generation": pv_forecast([0.0] * 5),
+                "electricity_prices": prices([0.30] * 5),
+            },
+        )
+    )
+
+    assert problem.start_time == FIRST_PLANNED_HOUR + 2 * ONE_HOUR
+    assert problem.hours() == 3
+    assert problem.first_hour_fraction == pytest.approx(50 / 60)
+    assert problem.hour_durations() == pytest.approx((50 / 60, 1.0, 1.0))

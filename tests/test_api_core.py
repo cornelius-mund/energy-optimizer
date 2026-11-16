@@ -70,6 +70,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 import_price_eur_per_kwh=0.3,
                 export_price_eur_per_kwh=0.08,
                 optimizer_cost_eur=0.36,
+                duration_hours=1.0,
             ),
             planned_hour(
                 start_time="2026-01-01T01:00:00Z",
@@ -86,6 +87,7 @@ def test_optimize_returns_the_cheapest_schedule_for_a_feasible_request(
                 import_price_eur_per_kwh=0.25,
                 export_price_eur_per_kwh=0.08,
                 optimizer_cost_eur=0.15,
+                duration_hours=1.0,
             ),
         ],
     }
