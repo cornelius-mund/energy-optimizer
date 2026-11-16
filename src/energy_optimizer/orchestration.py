@@ -1,7 +1,5 @@
 """Application orchestration for scheduled provider retrieval and planning."""
 
-import asyncio
-import contextlib
 import logging
 import threading
 from dataclasses import dataclass
@@ -166,7 +164,7 @@ class ProviderOrchestrator:
     """Run configured providers, persist valid results, and trigger planning.
 
     ``run_due`` is synchronous so it can be driven by a deterministic clock in
-    tests. ``run_forever`` supplies the asynchronous service lifecycle wrapper.
+    tests. The service runs it as a supervised background loop.
     A cycle never catches up missed intervals: a source that is due is fetched
     once and its next due time starts at the end of that attempt.
 
@@ -631,21 +629,6 @@ class ProviderOrchestrator:
                 "normalized provider data must expose SourceMetadata as source"
             )
         return ProviderDataKey(data_type, source.provider, source.entity_id)
-
-    async def run_forever(self, stop_event: asyncio.Event) -> None:
-        """Run scheduled collection until the application requests shutdown."""
-        logger.info(
-            "event=orchestration_started component=orchestration operation=run_forever"
-        )
-        while not stop_event.is_set():
-            await asyncio.to_thread(self.run_due)
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=self.poll_interval_seconds
-                )
-        logger.info(
-            "event=orchestration_stopped component=orchestration operation=run_forever"
-        )
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:

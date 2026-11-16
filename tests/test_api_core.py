@@ -24,7 +24,11 @@ def test_health_returns_service_status_and_version(client: TestClient) -> None:
         response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "0.1.0"}
+    assert response.json() == {
+        "status": "ok",
+        "version": "0.1.0",
+        "background_loops": {},
+    }
 
 
 def planned_hour(**values: object) -> dict[str, object]:

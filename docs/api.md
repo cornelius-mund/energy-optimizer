@@ -2,8 +2,27 @@
 
 The OpenAPI contract, `src/energy_optimizer/openapi-docs.yml`, defines every
 request and response field, type, range, and status enum; this reference documents
-behavior, limits, and examples. `GET /health` returns the service status and
-version: `{"status":"ok","version":"0.1.0"}`.
+behavior, limits, and examples.
+
+`GET /health` returns the service status, the version, and the state of every
+background loop the configuration starts (`orchestration`, `ev_control`,
+`plug_in_reminder`):
+
+```json
+{"status": "ok", "version": "0.1.0", "background_loops": {"orchestration":
+  {"running": true, "stopped_unexpectedly": false, "consecutive_failures": 0,
+   "last_success_at": "2026-11-16T07:00:02Z", "last_error": null}}}
+```
+
+A loop runs one cycle, waits its interval, and repeats. A cycle that raises is
+logged as `background_cycle_failed` with a traceback and retried after its
+interval, at most 60 seconds later; the loop keeps running, and the failure is
+visible as `consecutive_failures` and `last_error`. Provider outages are
+handled inside the orchestration cycle and never count as a failed cycle. Only a
+loop that has stopped while the service is running makes the status `degraded`
+with HTTP 503, so the container healthcheck restarts the service. At shutdown
+every loop is signalled and awaited, a loop that does not end within 30 seconds
+is cancelled, and the failure of one loop never prevents waiting for the others.
 
 All versioned `POST /api/v1/*` endpoints below (electricity prices, battery,
 household load, PV generation, grid flow) take `schema_version: "1"` and

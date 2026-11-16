@@ -6,7 +6,13 @@ paths:
   /health:
     get:
       summary: Health
-      description: Return the service health and running version.
+      description: 'Return the service health, the running version and its background
+        loops.
+
+
+        A loop whose cycle fails keeps running and retries; the failure is listed
+
+        in `background_loops`. Only a loop that stopped makes the service degraded.'
       operationId: health_health_get
       responses:
         '200':
@@ -14,10 +20,13 @@ paths:
           content:
             application/json:
               schema:
-                additionalProperties:
-                  type: string
-                type: object
-                title: Response Health Health Get
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: A background loop stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
   /optimize:
     post:
       summary: Optimize
@@ -618,6 +627,38 @@ components:
       - control
       title: ApplianceCapabilities
       description: Continuous power or enumerated fractions of rated maximum power.
+    BackgroundLoopHealthResponse:
+      properties:
+        running:
+          type: boolean
+          title: Running
+        stopped_unexpectedly:
+          type: boolean
+          title: Stopped Unexpectedly
+        consecutive_failures:
+          type: integer
+          title: Consecutive Failures
+        last_success_at:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Last Success At
+        last_error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Error
+      type: object
+      required:
+      - running
+      - stopped_unexpectedly
+      - consecutive_failures
+      - last_success_at
+      - last_error
+      title: BackgroundLoopHealthResponse
+      description: One background loop; a failing cycle is retried and does not stop
+        it.
     BatteryRequest:
       properties:
         schema_version:
@@ -1773,6 +1814,28 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - degraded
+          title: Status
+        version:
+          type: string
+          title: Version
+        background_loops:
+          additionalProperties:
+            $ref: '#/components/schemas/BackgroundLoopHealthResponse'
+          type: object
+          title: Background Loops
+      type: object
+      required:
+      - status
+      - version
+      title: HealthResponse
+      description: '`degraded` (HTTP 503) means a background loop has stopped.'
     HistoricHouseholdLoadResponse:
       properties:
         status:

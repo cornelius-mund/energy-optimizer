@@ -1,6 +1,5 @@
 """Tests for operational logging configuration and safe log context."""
 
-import asyncio
 import logging
 import re
 import sys
@@ -469,8 +468,10 @@ def test_api_startup_logs_each_lifecycle_phase_in_order(
     tmp_path: Path, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
 ) -> None:
     class StubOrchestrator:
-        async def run_forever(self, stop_event: asyncio.Event) -> None:
-            await stop_event.wait()
+        poll_interval_seconds = 3600.0
+
+        def run_due(self) -> None:
+            return None
 
     monkeypatch.setattr(
         "energy_optimizer.api.lifecycle.build_configured_orchestrator",

@@ -1,10 +1,14 @@
 """Core HTTP API routes."""
 
+from dataclasses import asdict
+
 from fastapi import APIRouter, HTTPException, Request
-from starlette.responses import RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 from energy_optimizer import __version__
 from energy_optimizer.api.schemas import (
+    BackgroundLoopHealthResponse,
+    HealthResponse,
     HourlyOptimizationRequest,
     LoadForecastResponse,
     OptimizationResponse,
@@ -14,6 +18,7 @@ from energy_optimizer.api.schemas import (
     PlanningBatteryRequest,
     PlanSnapshotResponse,
 )
+from energy_optimizer.background import BackgroundLoops
 from energy_optimizer.config import Configuration
 from energy_optimizer.optimization import (
     BatterySpecification,
@@ -30,10 +35,35 @@ router = APIRouter()
 PLAN_SOLVER: PlanSolver = LinopyPlanSolver()
 
 
-@router.get("/health")
-def health() -> dict[str, str]:
-    """Return the service health and running version."""
-    return {"status": "ok", "version": __version__}
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    responses={
+        503: {"model": HealthResponse, "description": "A background loop stopped"}
+    },
+)
+def health(http_request: Request) -> JSONResponse:
+    """Return the service health, the running version and its background loops.
+
+    A loop whose cycle fails keeps running and retries; the failure is listed
+    in `background_loops`. Only a loop that stopped makes the service degraded.
+    """
+    loops: BackgroundLoops | None = getattr(
+        http_request.app.state, "background_loops", None
+    )
+    stopped = [] if loops is None else loops.stopped_unexpectedly()
+    response = HealthResponse(
+        status="degraded" if stopped else "ok",
+        version=__version__,
+        background_loops={
+            name: BackgroundLoopHealthResponse(**asdict(status))
+            for name, status in ({} if loops is None else loops.statuses()).items()
+        },
+    )
+    return JSONResponse(
+        status_code=503 if stopped else 200,
+        content=response.model_dump(mode="json"),
+    )
 
 
 @router.get("/dashboard", include_in_schema=False)
