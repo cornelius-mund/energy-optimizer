@@ -30,6 +30,7 @@ from energy_optimizer.optimization import (
     PlanSolver,
 )
 from energy_optimizer.optimization.plan_generation import PLAN_ADAPTER, PLAN_KEY
+from energy_optimizer.storage import ProviderDataStoreError
 
 router = APIRouter()
 PLAN_SOLVER: PlanSolver = LinopyPlanSolver()
@@ -103,6 +104,7 @@ def _planning_problem(
         maximum_import_kw=configuration.grid.maximum_import_kw,
         maximum_export_kw=configuration.grid.maximum_export_kw,
         time_limit_seconds=configuration.solver.time_limit_seconds,
+        mip_relative_gap=configuration.solver.mip_relative_gap,
         battery=None if request.battery is None else _battery(request.battery),
     )
 
@@ -181,7 +183,12 @@ def current_plan(http_request: Request) -> PlanSnapshotResponse:
         raise HTTPException(
             status_code=503, detail="provider data persistence is not configured"
         )
-    stored = store.load(PLAN_KEY, PLAN_ADAPTER)
+    try:
+        stored = store.load(PLAN_KEY, PLAN_ADAPTER)
+    except ProviderDataStoreError as error:
+        raise HTTPException(
+            status_code=503, detail=f"the stored plan cannot be read: {error}"
+        ) from error
     if stored is None:
         raise HTTPException(status_code=404, detail="no plan has been created yet")
     return PlanSnapshotResponse(

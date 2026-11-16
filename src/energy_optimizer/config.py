@@ -82,6 +82,15 @@ class GridConfiguration(_StrictModel):
 class SolverConfiguration(_StrictModel):
     name: str = Field(min_length=1)
     time_limit_seconds: float = Field(gt=0)
+    mip_relative_gap: float = Field(
+        default=1e-4,
+        ge=0,
+        lt=1,
+        description=(
+            "Relative MIP gap at which the solver stops; a feasible plan found "
+            "before the time limit is used as well"
+        ),
+    )
 
 
 class HomeAssistantEnergyEntityConfiguration(_StrictModel):

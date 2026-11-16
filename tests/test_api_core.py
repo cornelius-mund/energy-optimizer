@@ -300,3 +300,19 @@ def test_plan_returns_the_stored_plan_with_the_battery_level_in_percent(
     assert body["schedule"][0]["battery"]["state_of_charge_percent"] == pytest.approx(
         25.0
     )
+
+
+def test_an_unreadable_stored_plan_is_reported_as_unavailable(
+    persistence_client: TestClient,
+) -> None:
+    with persistence_client:
+        store = app.state.provider_data_store
+        store.directory.mkdir(parents=True, exist_ok=True)
+        primary, backup = store._paths(PLAN_KEY)
+        primary.write_text("not json", encoding="utf-8")
+        backup.write_text("not json", encoding="utf-8")
+
+        response = persistence_client.get("/plan")
+
+    assert response.status_code == 503
+    assert "the stored plan cannot be read" in response.json()["detail"]

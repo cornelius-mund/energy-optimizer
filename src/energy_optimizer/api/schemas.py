@@ -769,10 +769,11 @@ class PlannedHourResponse(_StrictModel):
 class OptimizationResponse(_StrictModel):
     """Plan calculated for a validated hourly request.
 
-    The schedule is present only when the solver proved the plan optimal.
+    The schedule is present when the solver proved the plan optimal, or found a
+    feasible plan before its time limit (`feasible`).
     """
 
-    status: Literal["optimal", "infeasible", "time_limit"]
+    status: Literal["optimal", "feasible", "infeasible", "time_limit"]
     start_time: datetime
     interval_minutes: Literal[60]
     hours: int = Field(ge=1, le=168)

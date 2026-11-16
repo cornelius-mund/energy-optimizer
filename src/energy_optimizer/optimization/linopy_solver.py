@@ -1,8 +1,10 @@
 """Linopy and HiGHS implementation of the planning solver port."""
 
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 import pandas
 from linopy import LinearExpression, Model, Variable
@@ -37,8 +39,10 @@ PLAN_STATUS_BY_TERMINATION: dict[str, PlanStatus] = {
     "optimal": PlanStatus.OPTIMAL,
     "infeasible": PlanStatus.INFEASIBLE,
     "infeasible_or_unbounded": PlanStatus.INFEASIBLE,
-    "time_limit": PlanStatus.TIME_LIMIT,
 }
+STOPPED_BY_A_LIMIT = frozenset({"time_limit", "terminated_by_limit"})
+
+type SolverOptions = Mapping[str, float | int | str | bool]
 
 
 class UnexpectedSolverResult(RuntimeError):
@@ -55,6 +59,11 @@ class _GridAndPvVariables:
 
 
 class LinopyPlanSolver:
+    def __init__(self, solver_options: SolverOptions | None = None) -> None:
+        """``solver_options`` are passed to HiGHS in addition to the time limit
+        and the relative MIP gap of each problem."""
+        self.solver_options: SolverOptions = solver_options or {}
+
     def solve(self, problem: PlanningProblem) -> Plan:
         model = Model()
         hours = pandas.RangeIndex(problem.hours(), name=HOUR_DIMENSION)
@@ -62,10 +71,10 @@ class LinopyPlanSolver:
         _forbid_simultaneous_import_and_export(model, hours, problem, variables)
         _add_energy_balance(model, variables, _hourly(problem.load_kw, hours))
         _minimize_net_cost(model, variables, problem, hours)
-        status = _solve(model, problem.time_limit_seconds)
-        if status is not PlanStatus.OPTIMAL:
+        status = _solve(model, problem, self.solver_options)
+        if status not in (PlanStatus.OPTIMAL, PlanStatus.FEASIBLE):
             return Plan(status=status, objective_eur=None, hours=())
-        return _read_plan(problem, model, variables)
+        return _read_plan(problem, model, variables, status)
 
 
 def _hourly(values: Sequence[float], hours: pandas.RangeIndex) -> pandas.Series:
@@ -184,21 +193,36 @@ def _minimize_net_cost(
     model.add_objective(objective)
 
 
-def _solve(model: Model, time_limit_seconds: float) -> PlanStatus:
+def _solve(
+    model: Model, problem: PlanningProblem, solver_options: SolverOptions
+) -> PlanStatus:
+    highs_options: dict[str, Any] = {
+        "time_limit": problem.time_limit_seconds,
+        "mip_rel_gap": problem.mip_relative_gap,
+        "output_flag": False,
+        **solver_options,
+    }
     _, termination = model.solve(
-        solver_name=SOLVER_NAME,
-        io_api="direct",
-        time_limit=time_limit_seconds,
-        output_flag=False,
+        solver_name=SOLVER_NAME, io_api="direct", **highs_options
     )
+    if termination in STOPPED_BY_A_LIMIT:
+        return PlanStatus.FEASIBLE if _has_incumbent(model) else PlanStatus.TIME_LIMIT
     status = PLAN_STATUS_BY_TERMINATION.get(termination)
     if status is None:
         raise UnexpectedSolverResult(f"solver terminated with {termination!r}")
     return status
 
 
+def _has_incumbent(model: Model) -> bool:
+    objective_value = model.objective.value
+    return objective_value is not None and math.isfinite(objective_value)
+
+
 def _read_plan(
-    problem: PlanningProblem, model: Model, variables: _GridAndPvVariables
+    problem: PlanningProblem,
+    model: Model,
+    variables: _GridAndPvVariables,
+    status: PlanStatus,
 ) -> Plan:
     imported_kw = variables.grid_import.solution.values
     exported_kw = variables.grid_export.solution.values
@@ -209,7 +233,11 @@ def _read_plan(
             start_time=problem.start_time + timedelta(hours=hour),
             load_kw=problem.load_kw[hour],
             pv_generation_kw=float(pv_used_kw[hour]),
-            pv_self_consumption_kw=float(pv_used_kw[hour] - exported_kw[hour]),
+            # Exports are attributed to PV first; battery energy that is sold
+            # does not make PV self-consumption negative.
+            pv_self_consumption_kw=max(
+                float(pv_used_kw[hour] - exported_kw[hour]), 0.0
+            ),
             pv_curtailment_kw=problem.pv_forecast_kw[hour] - float(pv_used_kw[hour]),
             grid_import_kw=float(imported_kw[hour]),
             grid_export_kw=float(exported_kw[hour]),
@@ -243,7 +271,7 @@ def _read_plan(
         for hour in range(problem.hours())
     )
     return Plan(
-        status=PlanStatus.OPTIMAL,
+        status=status,
         objective_eur=sum(
             hour.import_cost_eur
             - hour.export_revenue_eur
