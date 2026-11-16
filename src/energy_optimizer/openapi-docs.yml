@@ -2422,6 +2422,15 @@ components:
           description: 'Cost of the hour as the optimizer values it: cash cost plus
             wear and penalties minus the value of the energy stored in the hour'
           default: 0
+        duration_hours:
+          type: number
+          maximum: 1.0
+          exclusiveMinimum: 0.0
+          title: Duration Hours
+          description: Planned part of the hour; below 1 for the running hour of a
+            plan made during it. Energy and costs of the hour are its kW values times
+            this duration
+          default: 1.0
       additionalProperties: false
       type: object
       required:

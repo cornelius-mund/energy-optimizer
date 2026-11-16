@@ -170,6 +170,7 @@ def _planned_hours(
             import_price_eur_per_kwh=hour.import_price_eur_per_kwh,
             export_price_eur_per_kwh=hour.export_price_eur_per_kwh,
             optimizer_cost_eur=hour.optimizer_cost_eur,
+            duration_hours=hour.duration_hours,
         )
         for hour in plan.hours
     ]

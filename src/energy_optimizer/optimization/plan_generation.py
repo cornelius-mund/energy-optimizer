@@ -163,26 +163,29 @@ def immediate_charging(
     hours: int,
     *,
     availability: tuple[bool, ...] | None = None,
+    first_hour_fraction: float = 1.0,
 ) -> EvSpecification:
     """Charge at full power from now on until the target is stored.
 
     The last hour uses the average power needed to reach the target without
-    rounding up; it can represent charging for only part of that hour.
+    rounding up; it can represent charging for only part of that hour. The
+    running hour stores energy only for its remaining part.
     """
     schedule: list[float] = []
     stored_kwh = ev.state_of_charge_kwh
     plugged_in = (ev.plugged_in,) * hours if availability is None else availability
-    for available in plugged_in:
+    for hour, available in enumerate(plugged_in):
+        duration_hours = first_hour_fraction if hour == 0 else 1.0
         missing_kwh = min(target_kwh, ev.capacity_kwh) - stored_kwh
-        wanted_kw = missing_kwh / ev.charge_efficiency
-        room_kw = (ev.capacity_kwh - stored_kwh) / ev.charge_efficiency
+        wanted_kw = missing_kwh / ev.charge_efficiency / duration_hours
+        room_kw = (ev.capacity_kwh - stored_kwh) / ev.charge_efficiency / duration_hours
         power_kw = (
             0.0
             if not available or missing_kwh <= 1e-9
             else min(ev.maximum_charge_kw, wanted_kw, room_kw)
         )
         schedule.append(power_kw)
-        stored_kwh += power_kw * ev.charge_efficiency
+        stored_kwh += power_kw * ev.charge_efficiency * duration_hours
     return EvSpecification(
         capacity_kwh=ev.capacity_kwh,
         initial_soc_kwh=ev.state_of_charge_kwh,
@@ -314,6 +317,7 @@ def ev_specification(
     patterns: EvPatterns = NO_PATTERNS,
     import_prices: tuple[float, ...] = (),
     stored_value_eur_per_kwh: float | None = None,
+    first_hour_fraction: float = 1.0,
 ) -> EvSpecification | None:
     if charging.strategy == "daily_minimum":
         return daily_minimum_charging(
@@ -332,7 +336,9 @@ def ev_specification(
     if charging.strategy == "surplus":
         return pv_surplus_charging(ev, limit_kwh, surplus_kw)
     if charging.strategy == "immediate":
-        return immediate_charging(ev, limit_kwh, len(hour_starts))
+        return immediate_charging(
+            ev, limit_kwh, len(hour_starts), first_hour_fraction=first_hour_fraction
+        )
     soft_target = charging.strategy == "minimum_plus_target"
     upcoming = next_deadline(
         charging.day_targets(), hour_starts[0].astimezone(time_zone)
@@ -673,11 +679,12 @@ class PlanGenerator:
             for pv_kw, consumed_kw in zip(pv_forecast_kw, load_kw, strict=True)
         )
         import_prices = self._import_prices(prices, hour_starts, prices_at)
+        first_hour_fraction = remaining_fraction_of_first_hour(
+            hour_starts[0], snapshot.captured_at
+        )
         problem = PlanningProblem(
             start_time=hour_starts[0],
-            first_hour_fraction=remaining_fraction_of_first_hour(
-                hour_starts[0], snapshot.captured_at
-            ),
+            first_hour_fraction=first_hour_fraction,
             load_kw=load_kw,
             pv_forecast_kw=pv_forecast_kw,
             import_price_eur_per_kwh=import_prices,
@@ -696,7 +703,9 @@ class PlanGenerator:
                 if isinstance(battery, BatteryData)
                 else None
             ),
-            ev=self._ev(snapshot, hour_starts, surplus_kw, import_prices),
+            ev=self._ev(
+                snapshot, hour_starts, surplus_kw, import_prices, first_hour_fraction
+            ),
         )
         if problem.ev is not None:
             entries = active_presence(self.store, snapshot.captured_at)
@@ -711,6 +720,7 @@ class PlanGenerator:
                         problem.ev.target_soc_kwh,
                         len(hour_starts),
                         availability=availability,
+                        first_hour_fraction=first_hour_fraction,
                     ).fixed_charge_kw
                 problem = replace(
                     problem,
@@ -726,6 +736,7 @@ class PlanGenerator:
         hour_starts: list[datetime],
         surplus_kw: tuple[float, ...],
         import_prices: tuple[float, ...],
+        first_hour_fraction: float,
     ) -> EvSpecification | None:
         ev = snapshot.data.get("ev")
         charging = self.configuration.ev_charging
@@ -760,6 +771,7 @@ class PlanGenerator:
                     self.configuration.tariff,
                     hour_starts[0].astimezone(time_zone).hour,
                 ),
+                first_hour_fraction,
             )
         )
         requirements: dict[int, float] = {}
@@ -779,7 +791,9 @@ class PlanGenerator:
         if not requirements:
             return specification
         if specification is None:
-            specification = immediate_charging(ev, 0.0, len(hour_starts))
+            specification = immediate_charging(
+                ev, 0.0, len(hour_starts), first_hour_fraction=first_hour_fraction
+            )
         limit = specification.charge_limit_kwh
         return replace(
             specification,

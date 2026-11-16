@@ -170,6 +170,7 @@ class PlannedHour:
     optimizer_cost_eur: Euro = 0.0
     import_price_eur_per_kwh: EuroPerKilowattHour = 0.0
     export_price_eur_per_kwh: EuroPerKilowattHour = 0.0
+    duration_hours: float = 1.0
 
 
 @dataclass(frozen=True)

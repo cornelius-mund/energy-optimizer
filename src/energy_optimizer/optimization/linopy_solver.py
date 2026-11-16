@@ -274,6 +274,7 @@ def _read_plan(
                 if variables.ev is None or problem.ev is None
                 else read_ev_hour(variables.ev, problem.ev, hour)
             ),
+            duration_hours=durations[hour],
             import_price_eur_per_kwh=problem.import_price_eur_per_kwh[hour],
             export_price_eur_per_kwh=problem.export_price_eur_per_kwh[hour],
             optimizer_cost_eur=(
