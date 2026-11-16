@@ -1,4 +1,10 @@
-"""Household-load forecasts for the planning horizon, chosen by backtesting."""
+"""Household-load forecasts for the planning horizon, chosen by backtesting.
+
+A method forecasts every hour of day it has enough samples for. An hour of day
+it lacks, for example one that a short meter dropout excludes every night, is
+filled from the mean of that hour over four weeks, or of its nearest hours, so
+one bad hour never discards a method and its backtested error.
+"""
 
 import logging
 import math
@@ -17,20 +23,31 @@ ONE_HOUR = timedelta(hours=1)
 HOURS_PER_DAY = 24
 SEVEN_DAY_MEAN = "seven_day_mean"
 WEEKDAY_PROFILE = "weekday_profile"
-FILLED_PROFILE = "filled_profile"
 AUTO = "auto"
 SEVEN_DAY_WINDOW = 7
 WEEKDAY_PROFILE_WINDOW = 28
+GAP_FILL_WINDOW = 28
 MINIMUM_SAMPLES_PER_PROFILE_HOUR = 2
 SATURDAY = 5
+
+type LocalHour = int
 
 
 class LoadForecastError(RuntimeError):
     """Raised when the history cannot support a forecast."""
 
 
+@dataclass(frozen=True)
+class HourlyForecast:
+    """Forecast load per planned hour and the local hours filled from the
+    longer window because the method had no sample for them."""
+
+    load_kw: tuple[Kilowatt, ...]
+    filled_local_hours: frozenset[LocalHour] = frozenset()
+
+
 type Forecaster = Callable[
-    [HouseholdLoadData, list[datetime], ZoneInfo], tuple[Kilowatt, ...]
+    [HouseholdLoadData, list[datetime], ZoneInfo], HourlyForecast
 ]
 
 
@@ -52,28 +69,89 @@ def _recent_samples(
             yield history.start_time + ONE_HOUR * index, load_kw
 
 
+def _mean(values: list[float]) -> float:
+    return math.fsum(values) / len(values)
+
+
+def _circular_hour_distance(first: LocalHour, second: LocalHour) -> int:
+    difference = abs(first - second)
+    return min(difference, HOURS_PER_DAY - difference)
+
+
+def _fill_from_neighbouring_hours(
+    means: dict[LocalHour, float],
+) -> dict[LocalHour, float]:
+    """Give every hour of day without a sample the mean of its nearest hours."""
+    filled = dict(means)
+    for hour in range(HOURS_PER_DAY):
+        if hour in means:
+            continue
+        nearest_distance = min(_circular_hour_distance(hour, known) for known in means)
+        filled[hour] = _mean(
+            [
+                means[known]
+                for known in means
+                if _circular_hour_distance(hour, known) == nearest_distance
+            ]
+        )
+    return filled
+
+
+def gap_profile(
+    history: HouseholdLoadData, time_zone: ZoneInfo
+) -> dict[LocalHour, float]:
+    """Mean of each local hour over four weeks, gaps from neighbouring hours."""
+    samples_by_hour: dict[LocalHour, list[float]] = defaultdict(list)
+    for hour_start, load_kw in _recent_samples(history, GAP_FILL_WINDOW):
+        samples_by_hour[hour_start.astimezone(time_zone).hour].append(load_kw)
+    if not samples_by_hour:
+        raise LoadForecastError(
+            f"the household-load history has no valid sample in the last "
+            f"{GAP_FILL_WINDOW} days"
+        )
+    return _fill_from_neighbouring_hours(
+        {hour: _mean(samples) for hour, samples in samples_by_hour.items()}
+    )
+
+
+def _forecast_with_gaps_filled(
+    history: HouseholdLoadData,
+    hour_starts: list[datetime],
+    time_zone: ZoneInfo,
+    own_forecast: Callable[[datetime], float | None],
+) -> HourlyForecast:
+    """Use the method's own value where it has one; fill the rest."""
+    profile: dict[LocalHour, float] | None = None
+    filled: set[LocalHour] = set()
+    load_kw: list[Kilowatt] = []
+    for hour_start in hour_starts:
+        value = own_forecast(hour_start)
+        if value is None:
+            if profile is None:
+                profile = gap_profile(history, time_zone)
+            local_hour = hour_start.astimezone(time_zone).hour
+            filled.add(local_hour)
+            value = profile[local_hour]
+        load_kw.append(value)
+    return HourlyForecast(tuple(load_kw), frozenset(filled))
+
+
 def seven_day_mean_forecast(
     history: HouseholdLoadData, hour_starts: list[datetime], time_zone: ZoneInfo
-) -> tuple[Kilowatt, ...]:
+) -> HourlyForecast:
     """Mean of the same local hour over the last seven days.
 
-    Hours excluded from the history do not contribute; an hour of day without
-    any sample is an error.
+    Hours excluded from the history do not contribute.
     """
-    samples_by_hour: dict[int, list[float]] = defaultdict(list)
+    samples_by_hour: dict[LocalHour, list[float]] = defaultdict(list)
     for hour_start, load_kw in _recent_samples(history, SEVEN_DAY_WINDOW):
         samples_by_hour[hour_start.astimezone(time_zone).hour].append(load_kw)
-    forecast: list[Kilowatt] = []
-    for hour_start in hour_starts:
-        local_hour = hour_start.astimezone(time_zone).hour
-        samples = samples_by_hour.get(local_hour)
-        if not samples:
-            raise LoadForecastError(
-                f"the household-load history has no sample for local hour "
-                f"{local_hour} in the last {SEVEN_DAY_WINDOW} days"
-            )
-        forecast.append(math.fsum(samples) / len(samples))
-    return tuple(forecast)
+
+    def own_forecast(hour_start: datetime) -> float | None:
+        samples = samples_by_hour.get(hour_start.astimezone(time_zone).hour)
+        return _mean(samples) if samples else None
+
+    return _forecast_with_gaps_filled(history, hour_starts, time_zone, own_forecast)
 
 
 def _is_weekend(moment: datetime, time_zone: ZoneInfo) -> bool:
@@ -82,87 +160,25 @@ def _is_weekend(moment: datetime, time_zone: ZoneInfo) -> bool:
 
 def weekday_profile_forecast(
     history: HouseholdLoadData, hour_starts: list[datetime], time_zone: ZoneInfo
-) -> tuple[Kilowatt, ...]:
+) -> HourlyForecast:
     """Mean of the same local hour on the same kind of day (weekday or weekend).
 
     Four weeks of history give the profile at least eight samples per weekday
-    hour and four per weekend hour; fewer than two is an error.
+    hour and four per weekend hour; with fewer than two the hour is filled.
     """
-    samples: dict[tuple[bool, int], list[float]] = defaultdict(list)
+    samples: dict[tuple[bool, LocalHour], list[float]] = defaultdict(list)
     for hour_start, load_kw in _recent_samples(history, WEEKDAY_PROFILE_WINDOW):
         local = hour_start.astimezone(time_zone)
         samples[(_is_weekend(hour_start, time_zone), local.hour)].append(load_kw)
-    forecast: list[Kilowatt] = []
-    for hour_start in hour_starts:
-        key = (
-            _is_weekend(hour_start, time_zone),
-            hour_start.astimezone(time_zone).hour,
+
+    def own_forecast(hour_start: datetime) -> float | None:
+        kind_of_day = _is_weekend(hour_start, time_zone)
+        values = samples.get((kind_of_day, hour_start.astimezone(time_zone).hour), [])
+        return (
+            _mean(values) if len(values) >= MINIMUM_SAMPLES_PER_PROFILE_HOUR else None
         )
-        values = samples.get(key, [])
-        if len(values) < MINIMUM_SAMPLES_PER_PROFILE_HOUR:
-            kind = "weekend" if key[0] else "weekday"
-            raise LoadForecastError(
-                f"the household-load history has fewer than "
-                f"{MINIMUM_SAMPLES_PER_PROFILE_HOUR} samples for {kind} local hour "
-                f"{key[1]} in the last {WEEKDAY_PROFILE_WINDOW} days"
-            )
-        forecast.append(math.fsum(values) / len(values))
-    return tuple(forecast)
 
-
-def _circular_hour_distance(first: int, second: int) -> int:
-    difference = abs(first - second)
-    return min(difference, HOURS_PER_DAY - difference)
-
-
-def _fill_from_neighbouring_hours(means: dict[int, float]) -> dict[int, float]:
-    """Give every hour of day without a sample the mean of its nearest hours."""
-    filled = dict(means)
-    for hour in range(HOURS_PER_DAY):
-        if hour in means:
-            continue
-        nearest_distance = min(_circular_hour_distance(hour, known) for known in means)
-        nearest = [
-            means[known]
-            for known in means
-            if _circular_hour_distance(hour, known) == nearest_distance
-        ]
-        filled[hour] = math.fsum(nearest) / len(nearest)
-    return filled
-
-
-def filled_profile_forecast(
-    history: HouseholdLoadData, hour_starts: list[datetime], time_zone: ZoneInfo
-) -> tuple[Kilowatt, ...]:
-    """Mean of the same local hour over four weeks, gaps from neighbouring hours.
-
-    The last resort when no backtested method can forecast every planned hour:
-    an hour of day without any valid sample (for example one that is excluded
-    every day) must not stop planning.
-    """
-    samples_by_hour: dict[int, list[float]] = defaultdict(list)
-    for hour_start, load_kw in _recent_samples(history, WEEKDAY_PROFILE_WINDOW):
-        samples_by_hour[hour_start.astimezone(time_zone).hour].append(load_kw)
-    if not samples_by_hour:
-        raise LoadForecastError(
-            f"the household-load history has no valid sample in the last "
-            f"{WEEKDAY_PROFILE_WINDOW} days"
-        )
-    means = {
-        hour: math.fsum(samples) / len(samples)
-        for hour, samples in samples_by_hour.items()
-    }
-    missing_hours = sorted(set(range(HOURS_PER_DAY)) - means.keys())
-    if missing_hours:
-        logger.warning(
-            "event=load_forecast_gaps_filled component=optimization operation=plan "
-            "missing_local_hours=%s",
-            ",".join(str(hour) for hour in missing_hours),
-        )
-    profile = _fill_from_neighbouring_hours(means)
-    return tuple(
-        profile[hour_start.astimezone(time_zone).hour] for hour_start in hour_starts
-    )
+    return _forecast_with_gaps_filled(history, hour_starts, time_zone, own_forecast)
 
 
 FORECASTERS: dict[str, Forecaster] = {
@@ -188,7 +204,7 @@ def backtest_mean_absolute_error_kw(
         known = replace(history, load_kw=history.load_kw[:cut])
         hours = [window_start + ONE_HOUR * i for i in range(HOURS_PER_DAY)]
         try:
-            predicted = forecaster(known, hours, time_zone)
+            predicted = forecaster(known, hours, time_zone).load_kw
         except LoadForecastError:
             continue
         actual = history.load_kw[cut : cut + HOURS_PER_DAY]
@@ -202,14 +218,10 @@ def backtest_mean_absolute_error_kw(
     return math.fsum(errors) / len(errors)
 
 
-def forecast_load(
-    history: HouseholdLoadData,
-    hour_starts: list[datetime],
-    time_zone: ZoneInfo,
-    method: str = AUTO,
-    backtest_days: int = 7,
-) -> LoadForecast:
-    """Forecast the load with ``method``, or with the method that backtests best."""
+def _ranked_methods(
+    history: HouseholdLoadData, time_zone: ZoneInfo, method: str, backtest_days: int
+) -> list[tuple[float | None, str]]:
+    """Candidate methods by backtest error; unscored when none can be tested."""
     candidates = list(FORECASTERS) if method == AUTO else [method]
     scored: list[tuple[float, str]] = []
     for name in candidates:
@@ -220,32 +232,32 @@ def forecast_load(
         except LoadForecastError:
             continue
         scored.append((error, name))
-    ranked: list[tuple[float | None, str]] = [
-        (error, name) for error, name in sorted(scored)
-    ]
-    if not ranked:
-        ranked = [(None, SEVEN_DAY_MEAN if method == AUTO else method)]
-    failure: LoadForecastError | None = None
-    for mean_error, chosen in ranked:
-        try:
-            load_kw = FORECASTERS[chosen](history, hour_starts, time_zone)
-        except LoadForecastError as error:
-            failure = error
-            continue
-        logger.info(
-            "event=load_forecast_selected component=optimization operation=plan "
-            "method=%s mean_absolute_error_kw=%s",
+    if scored:
+        return [(error, name) for error, name in sorted(scored)]
+    return [(None, SEVEN_DAY_MEAN if method == AUTO else method)]
+
+
+def forecast_load(
+    history: HouseholdLoadData,
+    hour_starts: list[datetime],
+    time_zone: ZoneInfo,
+    method: str = AUTO,
+    backtest_days: int = 7,
+) -> LoadForecast:
+    """Forecast the load with ``method``, or with the method that backtests best."""
+    mean_error, chosen = _ranked_methods(history, time_zone, method, backtest_days)[0]
+    forecast = FORECASTERS[chosen](history, hour_starts, time_zone)
+    if forecast.filled_local_hours:
+        logger.warning(
+            "event=load_forecast_gaps_filled component=optimization operation=plan "
+            "method=%s filled_local_hours=%s",
             chosen,
-            "unknown" if mean_error is None else f"{mean_error:.3f}",
+            ",".join(str(hour) for hour in sorted(forecast.filled_local_hours)),
         )
-        return LoadForecast(chosen, load_kw, mean_error)
-    assert failure is not None
-    logger.warning(
-        "event=load_forecast_fallback component=optimization operation=plan "
-        "method=%s reason=%s",
-        FILLED_PROFILE,
-        failure,
+    logger.info(
+        "event=load_forecast_selected component=optimization operation=plan "
+        "method=%s mean_absolute_error_kw=%s",
+        chosen,
+        "unknown" if mean_error is None else f"{mean_error:.3f}",
     )
-    return LoadForecast(
-        FILLED_PROFILE, filled_profile_forecast(history, hour_starts, time_zone), None
-    )
+    return LoadForecast(chosen, forecast.load_kw, mean_error)
