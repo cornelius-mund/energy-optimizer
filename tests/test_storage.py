@@ -1159,3 +1159,43 @@ def test_store_persists_converted_efficiency_history_without_quality(
         "flagged_by_earlier_version"
     )
     assert ProviderDataStore(tmp_path).load(EFFICIENCY_KEY, EFFICIENCY_ADAPTER) == saved
+
+
+def test_a_replace_refused_briefly_by_windows_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_replace = os.replace
+    refusals = [PermissionError("[WinError 5] Access is denied")] * 2
+
+    def flaky_replace(source: Path, target: Path) -> None:
+        if refusals:
+            raise refusals.pop()
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    monkeypatch.setattr(storage_module, "REPLACE_RETRY_DELAY_SECONDS", 0.0)
+    store = ProviderDataStore(tmp_path)
+    key = ProviderDataKey("ev-schedule", "energy-optimizer", "current")
+
+    store.save(key, TypeAdapter(dict[str, int]), {"hours": 3})
+
+    assert refusals == []
+    assert store.load(key, TypeAdapter(dict[str, int])) == {"hours": 3}
+
+
+def test_a_replace_refused_every_time_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refusing_replace(source: Path, target: Path) -> None:
+        raise PermissionError("[WinError 5] Access is denied")
+
+    monkeypatch.setattr(os, "replace", refusing_replace)
+    monkeypatch.setattr(storage_module, "REPLACE_RETRY_DELAY_SECONDS", 0.0)
+    store = ProviderDataStore(tmp_path)
+
+    with pytest.raises(ProviderDataStoreError, match="could not atomically write"):
+        store.save(
+            ProviderDataKey("ev-schedule", "energy-optimizer", "current"),
+            TypeAdapter(dict[str, int]),
+            {"hours": 3},
+        )

@@ -875,3 +875,10 @@ def test_home_assistant_refresh_failure_omits_expected_traceback(
     assert "status" not in failure.getMessage()
     assert "timed out" in failure.getMessage()
     assert failure.exc_info is None
+
+
+def test_solver_libraries_log_only_warnings() -> None:
+    configure_logging("INFO")
+
+    assert logging.getLogger("linopy").getEffectiveLevel() == logging.WARNING
+    assert logging.getLogger("numexpr").getEffectiveLevel() == logging.WARNING
