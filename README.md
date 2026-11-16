@@ -31,8 +31,10 @@ domain models, external integrations, and optimization. The optimizer should
 remain independent of specific external data providers, with providers returning
 normalized internal data before it reaches the optimization model. The planned
 package structure, dependency direction, and request flow are documented in
-[`docs/architecture.md`](docs/architecture.md). These boundaries are targets for
-the implementation, not a claim that all of the modules exist today.
+[`docs/architecture.md`](docs/architecture.md), which also lists where the code
+still deviates from them. The optimization model (variables, constraints,
+objective terms, rolling horizon, simplifications, and a glossary of the cost
+terms) is described in [`docs/optimization-model.md`](docs/optimization-model.md).
 
 ### Heating model design
 
