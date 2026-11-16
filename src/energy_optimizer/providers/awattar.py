@@ -15,7 +15,6 @@ from energy_optimizer.providers.interfaces import (
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import (
-    align_to_next_hour,
     as_utc,
     is_fresh,
     validate_hourly_period,
@@ -153,7 +152,8 @@ def _normalize(
     if not intervals:
         raise AwattarError("aWATTar response contains no market-data intervals")
 
-    effective_start = max(start, align_to_next_hour(retrieved))
+    # The running hour is kept: a plan made during it starts with it.
+    effective_start = max(start, retrieved.replace(minute=0, second=0, microsecond=0))
     selected = [
         interval for interval in intervals if effective_start <= interval[0] < end
     ]

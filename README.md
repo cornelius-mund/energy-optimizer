@@ -382,10 +382,15 @@ and persistence is configured. Every cycle in which at least one required source
 refreshed creates a plan, provided every required source holds current, valid
 data, whether refreshed now or restored from persistence after a restart. Require `household_load`, `pv_generation` and
 `electricity_prices`; add `battery` to plan its dispatch. The plan generator
-receives one coherent `ProviderDataSnapshot`, plans every future hour covered by
-both the prices and the PV forecast, and stores the latest optimal plan, which
+receives one coherent `ProviderDataSnapshot`, plans every hour that has not ended
+when the snapshot is taken and is covered by both the prices and the PV forecast,
+and stores the latest optimal plan, which
 `GET /plan` returns (404 before the first plan). A snapshot the solver cannot
-satisfy is reported as `plan_status: failed` and keeps the previous plan. The load
+satisfy is reported as `plan_status: failed` and keeps the previous plan. The first
+planned hour is the running hour: the measured battery and car states are its
+starting point, and only its remaining part is planned (its kW values are powers,
+its energy and cost are scaled by the remaining fraction). Price importers keep
+the running hour for this. The load
 forecast is chosen by a backtest (`load_forecast.method`, default `auto`): each
 method forecasts the last `backtest_days` (default 7) days from the history before
 them and the one with the smallest mean absolute error wins. Methods are
@@ -712,9 +717,9 @@ locked cable alone does not mean a car is connected.
 Every `poll_interval_seconds` the service looks up the planned power of the running
 hour and sends the command only when it changed: `homeassistant.turn_on` plus the
 power for charging, `homeassistant.turn_off` for a pause (without
-`enable_entity_id` the limit is set to 0). A plan starts at the next full hour, so
-the running hour comes from the most recent earlier plan that covers it; the hours
-of all plans are kept in an EV schedule. If no plan covers the hour or the schedule
+`enable_entity_id` the limit is set to 0). A plan starts with the running hour, so
+the newest plan normally covers it; the hours of earlier plans before it are kept
+in an EV schedule. If no plan covers the hour or the schedule
 is older than `max_plan_age_seconds`, the charger is handed back to its own
 behaviour once (enabled at `maximum_charge_kw`). A rejected command is logged and
 retried at the next run.

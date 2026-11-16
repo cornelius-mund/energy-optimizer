@@ -124,9 +124,16 @@ class PlanningProblem:
     battery: BatterySpecification | None = None
     ev: EvSpecification | None = None
     mip_relative_gap: float = 1e-4
+    first_hour_fraction: float = 1.0
 
     def hours(self) -> int:
         return len(self.load_kw)
+
+    def hour_durations(self) -> tuple[float, ...]:
+        """Hours each interval lasts. A plan computed during an hour starts with
+        that running hour, of which only the remaining part is planned; flows
+        stay powers in kW and turn into energy and cost by this duration."""
+        return (self.first_hour_fraction,) + (1.0,) * (self.hours() - 1)
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,6 @@ from energy_optimizer.providers.interfaces import (
     SourceMetadata,
 )
 from energy_optimizer.providers.normalization import (
-    align_to_next_hour,
     as_utc,
     is_fresh,
 )
@@ -112,11 +111,11 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _normalize(payload: Any, retrieved_at: datetime) -> ElectricityPriceData:
-    first_future_hour = align_to_next_hour(retrieved_at)
+    running_hour = retrieved_at.replace(minute=0, second=0, microsecond=0)
     hourly_prices = [
         (start, price)
         for start, price in _parse_prices(payload)
-        if start >= first_future_hour
+        if start >= running_hour
     ]
     if not hourly_prices:
         raise EpexPredictorError("EPEX Predictor returned no future prices")

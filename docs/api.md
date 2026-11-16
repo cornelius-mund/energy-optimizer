@@ -676,8 +676,8 @@ the request log without recording query payloads or provider credentials.
 ### Plan view
 
 The Plan tab shows the latest plan from `GET /plan` (see [Current plan](#current-plan))
-and has no range controls: the plan always covers the future hours for which prices
-and the PV forecast exist. When forecast prices extend the plan, the summary shows
+and has no range controls: the plan covers the running hour and the following hours
+for which prices and the PV forecast exist. When forecast prices extend the plan, the summary shows
 where they start, a Price column marks each hour as published or forecast, and
 the forecast source is credited below the summary. It is marked as an "Optimization plan" so that it is not
 mistaken for historic actuals or forecast inputs.

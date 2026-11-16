@@ -22,8 +22,10 @@ from energy_optimizer.optimization.plan_generation import (
     PlanGenerator,
     PlanSnapshot,
 )
+from energy_optimizer.orchestration import ProviderDataSnapshot
 from energy_optimizer.storage import ProviderDataStore
 from test_ev_planning import configuration, ev_responses, importer
+from test_plan_generation import FIRST_PLANNED_HOUR as FIRST_PLANNED_HOUR_OF_INPUTS
 from test_plan_generation import (
     NOW,
     flat_history,
@@ -638,3 +640,28 @@ def test_the_prices_per_kwh_are_drawn_beside_the_power_chart(
     import_price.click()
     expect(import_price).to_have_attribute("aria-pressed", "false")
     expect(page.locator("#plan-price-series-paths path")).to_have_count(1)
+
+
+def test_a_plan_made_during_an_hour_starts_with_that_hour(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    captured_at = FIRST_PLANNED_HOUR_OF_INPUTS + timedelta(hours=1, minutes=10)
+    stored = PlanGenerator(configuration(), provider_store)(
+        ProviderDataSnapshot(
+            captured_at=captured_at,
+            data={
+                "household_load": flat_history(1.0),
+                "pv_generation": pv_forecast([0.0] * 3),
+                "electricity_prices": prices([0.30] * 3),
+            },
+        )
+    )
+    assert stored.start_time == FIRST_PLANNED_HOUR_OF_INPUTS + timedelta(hours=1)
+
+    _open_plan(page)
+
+    rows = page.locator("#plan-rows tr")
+    expect(rows).to_have_count(2)
+    expect(rows.nth(0).locator("td").nth(0)).to_have_text(
+        _stamp(FIRST_PLANNED_HOUR_OF_INPUTS + timedelta(hours=1))
+    )

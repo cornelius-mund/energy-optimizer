@@ -35,9 +35,9 @@ class EvControlError(RuntimeError):
 class EvSchedule:
     """The charge power chosen for each hour by the latest plan that covers it.
 
-    A new plan starts at the next full hour, so the running hour is only known
-    from an earlier plan. The schedule therefore keeps the hours of earlier plans
-    that the new plan does not cover.
+    A new plan starts with the running hour of its snapshot. A plan made from
+    older prices may start later, so the schedule keeps the hours of earlier
+    plans before the new plan's first hour.
     """
 
     updated_at: datetime

@@ -23,7 +23,10 @@ class EvVariables:
 
 
 def add_ev(
-    model: Model, hours: pandas.RangeIndex, specification: EvSpecification
+    model: Model,
+    hours: pandas.RangeIndex,
+    specification: EvSpecification,
+    durations: pandas.Series,
 ) -> EvVariables:
     charging_horizon = (
         specification.deadline_hours
@@ -72,7 +75,7 @@ def add_ev(
             name="ev_missing_energy_kwh",
         ),
     )
-    _add_state_of_charge_dynamics(model, hours, specification, variables)
+    _add_state_of_charge_dynamics(model, hours, specification, variables, durations)
     _require_target_at_deadline(model, hours, specification, variables)
     _require_morning_minimums(model, hours, specification, variables)
     for until, minimum in specification.dated_minimums:
@@ -114,6 +117,7 @@ def _add_state_of_charge_dynamics(
     hours: pandas.RangeIndex,
     specification: EvSpecification,
     variables: EvVariables,
+    durations: pandas.Series,
 ) -> None:
     """Driving draws ``consumption_kwh``; ``missing_energy`` is what the car
     would have to get elsewhere (penalized), so driving never makes the plan
@@ -128,7 +132,7 @@ def _add_state_of_charge_dynamics(
         variables.state_of_charge
         == variables.state_of_charge.shift({HOUR_DIMENSION: 1}).fillna(0)
         + initial_state
-        + variables.charge * specification.charge_efficiency
+        + variables.charge * specification.charge_efficiency * durations
         - consumption
         + variables.missing_energy,
         name="ev_state_of_charge_dynamics",

@@ -362,15 +362,27 @@ def planning_horizon(
     prices: ElectricityPriceData,
     pv: PvGenerationData,
     maximum_hours: int | None = None,
+    now: datetime | None = None,
 ) -> list[datetime]:
-    """Return the hours for which both prices and the PV forecast exist."""
+    """Return the hours that have not ended by ``now`` and for which both prices
+    and the PV forecast exist; the first may be the running hour."""
     pv_end = pv.start_time + ONE_HOUR * len(pv.generation_kw)
     covered = [
         hour_start
         for hour_start in prices.timestamps
         if pv.start_time <= hour_start < pv_end
+        and (now is None or hour_start + ONE_HOUR > now)
     ]
     return covered if maximum_hours is None else covered[:maximum_hours]
+
+
+def remaining_fraction_of_first_hour(
+    first_hour: datetime, captured_at: datetime
+) -> float:
+    """The part of the first planned hour still ahead when the plan is made."""
+    if captured_at <= first_hour:
+        return 1.0
+    return (first_hour + ONE_HOUR - captured_at) / ONE_HOUR
 
 
 def extend_with_forecast(
@@ -641,7 +653,9 @@ class PlanGenerator:
             else None,
         )
         battery = snapshot.data.get("battery")
-        hour_starts = planning_horizon(prices, pv, self._horizon_hours())
+        hour_starts = planning_horizon(
+            prices, pv, self._horizon_hours(), snapshot.captured_at
+        )
         if not hour_starts:
             raise PlanGenerationError(
                 "prices and the PV forecast do not overlap in any future hour"
@@ -661,6 +675,9 @@ class PlanGenerator:
         import_prices = self._import_prices(prices, hour_starts, prices_at)
         problem = PlanningProblem(
             start_time=hour_starts[0],
+            first_hour_fraction=remaining_fraction_of_first_hour(
+                hour_starts[0], snapshot.captured_at
+            ),
             load_kw=load_kw,
             pv_forecast_kw=pv_forecast_kw,
             import_price_eur_per_kwh=import_prices,
