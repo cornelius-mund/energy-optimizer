@@ -19,6 +19,7 @@ from energy_optimizer.optimization.plan_generation import (
     PLAN_KEY,
     PlanGenerationError,
     PlanGenerator,
+    terminal_value_of_stored_energy,
 )
 from energy_optimizer.orchestration import ProviderDataSnapshot
 from energy_optimizer.providers.interfaces import (
@@ -557,3 +558,28 @@ def test_a_battery_below_its_minimum_is_planned_without_buying_energy_to_refill_
         assert hour.battery is not None
         assert hour.battery.state_of_charge_kwh == pytest.approx(0.9, abs=1e-6)
         assert hour.grid_import_kw == pytest.approx(1.0, abs=1e-6)
+
+
+def test_stored_battery_energy_is_never_worth_less_than_nothing() -> None:
+    assert terminal_value_of_stored_energy(battery(), (0.30, -0.02, 0.40)) == 0.0
+
+
+def test_a_discarded_price_forecast_is_logged(
+    configuration: Configuration,
+    store: ProviderDataStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("WARNING", logger="energy_optimizer.optimization"):
+        PlanGenerator(configuration, store)(
+            snapshot(
+                household_load=flat_history(1.0),
+                pv_generation=pv_forecast([0.0] * 5),
+                electricity_prices=prices([0.30, 0.20]),
+                electricity_price_forecast=_forecast(
+                    [0.40, 0.50], FIRST_PLANNED_HOUR + 3 * ONE_HOUR
+                ),
+            )
+        )
+
+    assert "event=price_forecast_discarded" in caplog.text
+    assert "reason=gap_after_published_prices" in caplog.text

@@ -45,7 +45,8 @@ with linopy). PV use is bounded by `pv_generation_kw`; the part that is neither
 consumed nor exported is curtailed, which is chosen when the export price is
 negative or the export limit is reached. Grid import and export are limited by
 `grid.maximum_import_kw` and `grid.maximum_export_kw`, and the solver stops after
-`solver.time_limit_seconds`, all from the configuration. The grid is never used to
+`solver.time_limit_seconds` or once the relative MIP gap falls to
+`solver.mip_relative_gap` (default `0.0001`), all from the configuration. The grid is never used to
 import and export in the same hour, even if the export price exceeds the import
 price.
 
@@ -71,7 +72,8 @@ The response contains `status`, `start_time`, `interval_minutes`, `hours`,
 - `optimal`: `objective_eur` is the import cost minus the export revenue in EUR, and
   `schedule` holds one entry per hour with `start_time`, `load_kw`,
   `pv_generation_kw` (the PV power used), `pv_self_consumption_kw` (the part of it
-  that is not exported), `pv_curtailment_kw` (forecast minus used), `grid_import_kw`,
+  that is not exported; exports count against PV first, so it is never negative
+  when the battery exports), `pv_curtailment_kw` (forecast minus used), `grid_import_kw`,
   `grid_export_kw`, `import_cost_eur`, and `export_revenue_eur`. Every hour
   balances: `pv_generation_kw + grid_import_kw + battery.discharge_kw = load_kw +
   grid_export_kw + battery.charge_kw`. With a battery, each entry also has
@@ -82,8 +84,11 @@ The response contains `status`, `start_time`, `interval_minutes`, `hours`,
   `load_kw` that the PV forecast cannot cover exceeds `grid.maximum_import_kw` in an
   hour. The status is returned with HTTP 200, `objective_eur` is `null`, and
   `schedule` is empty.
-- `time_limit`: the solver stopped before proving optimality; `objective_eur` is
-  `null` and `schedule` is empty.
+- `feasible`: the solver reached its time limit (or another solver limit) after
+  finding a valid plan but before proving it optimal. The schedule and
+  `objective_eur` are those of the best plan found; every constraint holds.
+- `time_limit`: the solver stopped at a limit before finding any plan;
+  `objective_eur` is `null` and `schedule` is empty.
 
 A solver result that is neither of these is an unexpected error and returns HTTP 500.
 
@@ -679,7 +684,8 @@ mistaken for historic actuals or forecast inputs.
 
 - **Summary:** solver status, objective, import cost, export revenue, planned hours,
   the plan range (end exclusive), when the data snapshot was taken, battery wear
-  cost, EV shortfall at the deadline, and the load forecast method with its backtest
+  cost, the EV energy the plan cannot provide (at the deadline, for morning
+  minimums and for driving), and the load forecast method with its backtest
   error, each only when the plan has it.
 - **Charts:** above the table, charts like the Forecast tab. The price chart sits
   directly below the power chart with the same hours: import and export price in
@@ -710,8 +716,9 @@ mistaken for historic actuals or forecast inputs.
   row, so every column stays reachable. Values that round to zero have no minus sign.
 - **States:** before the first plan the tab says that no plan exists (HTTP 404);
   other failures (for example HTTP 503 without persistence) are shown as an error
-  message. Only optimal plans are stored, so infeasible or time-limited solves never
-  replace the shown plan; the solver status field therefore reads `optimal`.
+  message. Only optimal and feasible plans are stored, so infeasible solves and
+  solves without any plan never replace the shown plan; the solver status field
+  reads `optimal`, or `feasible` when the time limit stopped the search.
 - **Small screens:** the table scrolls inside its own container and the tab bar wraps.
 
 Not shown yet: a chart of the schedule, solve time and diagnostics (planned with the

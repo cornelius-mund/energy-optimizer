@@ -389,10 +389,17 @@ def extend_with_forecast(
         for index, start in enumerate(forecast.timestamps)
         if start > last_published
     ]
-    contiguous = bool(later) and (
-        forecast.timestamps[later[0]] == last_published + ONE_HOUR
-    )
-    if not contiguous:
+    if not later:
+        return published, None
+    first_forecast_hour = forecast.timestamps[later[0]]
+    if first_forecast_hour != last_published + ONE_HOUR:
+        logger.warning(
+            "event=price_forecast_discarded component=optimization operation=plan "
+            "reason=gap_after_published_prices last_published_hour=%s "
+            "first_forecast_hour=%s",
+            last_published.isoformat(),
+            first_forecast_hour.isoformat(),
+        )
         return published, None
     extended = replace(
         published,
@@ -417,7 +424,7 @@ def terminal_value_of_stored_energy(
     discount lets the battery supply it, and the cheapest price is often only a
     forecast.
     """
-    cheapest_import_price = min(import_prices)
+    cheapest_import_price = max(min(import_prices), 0.0)
     return (
         cheapest_import_price
         * math.sqrt(battery.battery_efficiency)
@@ -661,6 +668,7 @@ class PlanGenerator:
             maximum_import_kw=self.configuration.grid.maximum_import_kw,
             maximum_export_kw=self.configuration.grid.maximum_export_kw,
             time_limit_seconds=self.configuration.solver.time_limit_seconds,
+            mip_relative_gap=self.configuration.solver.mip_relative_gap,
             battery=(
                 self._battery_specification(
                     battery,

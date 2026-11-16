@@ -291,7 +291,7 @@ def test_the_summary_shows_the_economics_and_how_the_plan_was_made(
     expect(summary).to_contain_text("Import cost (EUR)3.000")
     expect(summary).to_contain_text("Export revenue (EUR)0.000")
     expect(summary).to_contain_text("Battery wear cost (EUR)0.250")
-    expect(summary).to_contain_text("EV shortfall at deadline (kWh)1.50")
+    expect(summary).to_contain_text("EV energy not provided (kWh)1.50")
     expect(summary).to_contain_text("Load forecastweekday_profile (±0.12 kW)")
     expect(summary).to_contain_text(
         f"{_stamp(FIRST_HOUR)} to {_stamp(FIRST_HOUR + timedelta(hours=PLAN_HOURS))}"

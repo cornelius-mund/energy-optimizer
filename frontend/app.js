@@ -859,7 +859,7 @@
       ["Based on data from", formatTimestamp(plan.created_at)],
     ];
     if (plan.degradation_cost_eur) items.push(["Battery wear cost (EUR)", planNumber(plan.degradation_cost_eur, 3)]);
-    if (plan.schedule.some((hour) => hour.ev)) items.push(["EV shortfall at deadline (kWh)", planNumber(plan.ev_shortfall_kwh)]);
+    if (plan.schedule.some((hour) => hour.ev)) items.push(["EV energy not provided (kWh)", planNumber(plan.ev_shortfall_kwh)]);
     if (plan.load_forecast) {
       const error = plan.load_forecast.mean_absolute_error_kw;
       items.push(["Load forecast", `${plan.load_forecast.method}${error === null ? "" : ` (±${planNumber(error)} kW)`}`]);

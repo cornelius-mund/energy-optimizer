@@ -31,6 +31,9 @@ grid:
 solver:
   name: highs
   time_limit_seconds: 60
+  # The search stops at this relative MIP gap; a valid plan found before the
+  # time limit is used even when it is not proven optimal.
+  mip_relative_gap: 0.0001
 
 # Persist validated normalized data returned by configured providers. Mount
 # /app/data as a durable volume in container deployments.

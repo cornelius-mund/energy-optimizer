@@ -1,5 +1,6 @@
 """Tests of the planning model, solved by the real HiGHS solver."""
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -216,3 +217,93 @@ def test_every_hour_balances_and_respects_the_physical_limits(
         hour.import_cost_eur - hour.export_revenue_eur for hour in plan.hours
     )
     assert plan.objective_eur == pytest.approx(net_cost, abs=1e-4)
+
+
+def _battery_week(hours: int = 168) -> PlanningProblem:
+    """Enough charge decisions that the first solution HiGHS finds is not the best."""
+    price = tuple(
+        0.30 + 0.12 * math.sin(hour / 5.3) + 0.05 * math.cos(hour / 1.9)
+        for hour in range(hours)
+    )
+    pv = tuple(
+        max(0.0, 7 * math.sin((hour % 24 - 7) / 9 * math.pi))
+        if 7 <= hour % 24 <= 16
+        else 0.0
+        for hour in range(hours)
+    )
+    return PlanningProblem(
+        start_time=START,
+        load_kw=tuple(0.6 + 0.5 * math.sin(hour / 3.7) ** 2 for hour in range(hours)),
+        pv_forecast_kw=pv,
+        import_price_eur_per_kwh=price,
+        export_price_eur_per_kwh=(0.07,) * hours,
+        maximum_import_kw=25,
+        maximum_export_kw=20,
+        time_limit_seconds=60,
+        battery=BatterySpecification(
+            minimum_soc_kwh=4.7,
+            maximum_soc_kwh=47,
+            initial_soc_kwh=10,
+            final_soc_kwh=4.7,
+            maximum_charge_kw=12,
+            maximum_discharge_kw=12,
+            charge_efficiency=0.866,
+            discharge_efficiency=0.866,
+            terminal_value_eur_per_kwh=min(price) * 0.85,
+            reserve_kwh=tuple(
+                min(0.4 * math.sqrt(max(hour - 1, 0)), 2.0) for hour in range(hours)
+            ),
+            reserve_penalties_eur_per_kwh=(0.05, 0.15),
+            headroom_kwh=tuple(4.7 if value > 0 else 0.0 for value in pv),
+            headroom_penalties_eur_per_kwh=(0.05, 0.15),
+        ),
+    )
+
+
+def test_a_solve_stopped_by_a_limit_keeps_the_feasible_plan_it_found() -> None:
+    plan = LinopyPlanSolver({"mip_max_improving_sols": 1}).solve(_battery_week())
+
+    assert plan.status is PlanStatus.FEASIBLE
+    assert plan.has_schedule()
+    assert len(plan.hours) == 168
+    assert plan.objective_eur is not None
+    optimal = solve(_battery_week())
+    assert optimal.status is PlanStatus.OPTIMAL
+    assert optimal.objective_eur is not None
+    assert plan.objective_eur >= optimal.objective_eur - TOLERANCE
+
+
+def test_a_solve_stopped_by_a_limit_without_any_plan_has_no_schedule() -> None:
+    plan = LinopyPlanSolver({"mip_max_nodes": 0}).solve(_battery_week())
+
+    assert plan.status is PlanStatus.TIME_LIMIT
+    assert plan.hours == ()
+    assert not plan.has_schedule()
+
+
+def test_pv_self_consumption_is_never_negative_when_the_battery_is_sold() -> None:
+    plan = solve(
+        PlanningProblem(
+            start_time=START,
+            load_kw=(0.0,) * 4,
+            pv_forecast_kw=(0.0,) * 4,
+            import_price_eur_per_kwh=(0.30,) * 4,
+            export_price_eur_per_kwh=(0.50,) * 4,
+            maximum_import_kw=25,
+            maximum_export_kw=20,
+            time_limit_seconds=30,
+            battery=BatterySpecification(
+                minimum_soc_kwh=1,
+                maximum_soc_kwh=10,
+                initial_soc_kwh=10,
+                final_soc_kwh=1,
+                maximum_charge_kw=5,
+                maximum_discharge_kw=5,
+                charge_efficiency=0.95,
+                discharge_efficiency=0.95,
+            ),
+        )
+    )
+
+    assert sum(hour.grid_export_kw for hour in plan.hours) > 1
+    assert all(hour.pv_self_consumption_kw >= 0 for hour in plan.hours)

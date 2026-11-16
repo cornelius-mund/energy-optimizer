@@ -12,6 +12,7 @@ type EuroPerKilowattHour = float
 
 class PlanStatus(StrEnum):
     OPTIMAL = "optimal"
+    FEASIBLE = "feasible"
     INFEASIBLE = "infeasible"
     TIME_LIMIT = "time_limit"
 
@@ -122,6 +123,7 @@ class PlanningProblem:
     time_limit_seconds: float
     battery: BatterySpecification | None = None
     ev: EvSpecification | None = None
+    mip_relative_gap: float = 1e-4
 
     def hours(self) -> int:
         return len(self.load_kw)
@@ -180,4 +182,6 @@ class Plan:
     degradation_cost_eur: Euro = 0.0
 
     def has_schedule(self) -> bool:
-        return self.status is PlanStatus.OPTIMAL
+        """A solve stopped by its time limit still has a schedule when the
+        solver had found a feasible one; it is valid, only maybe not the best."""
+        return self.status in (PlanStatus.OPTIMAL, PlanStatus.FEASIBLE)
