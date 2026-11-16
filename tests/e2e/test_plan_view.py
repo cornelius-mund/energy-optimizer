@@ -24,7 +24,14 @@ from energy_optimizer.optimization.plan_generation import (
 )
 from energy_optimizer.storage import ProviderDataStore
 from test_ev_planning import configuration, ev_responses, importer
-from test_plan_generation import NOW, flat_history, prices, pv_forecast, snapshot
+from test_plan_generation import (
+    NOW,
+    flat_history,
+    prices,
+    pv_forecast,
+    snapshot,
+)
+from test_plan_generation import battery as battery_data
 
 pytestmark = pytest.mark.e2e
 
@@ -207,6 +214,32 @@ def test_a_car_above_its_charging_limit_still_has_a_household_plan(
         )
         expect(row.locator("td").nth(headers.index("EV state (%)"))).to_have_text(
             "90.0"
+        )
+
+
+def test_a_battery_that_drifted_below_its_minimum_still_has_a_plan(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    drifted = replace(battery_data(initial_soc_kwh=0.9), minimum_soc_kwh=1.0)
+    stored = PlanGenerator(configuration(), provider_store)(
+        snapshot(
+            household_load=flat_history(1.0),
+            pv_generation=pv_forecast([0.0] * 4),
+            electricity_prices=prices([0.30] * 4),
+            battery=drifted,
+        )
+    )
+    assert stored.plan.status is PlanStatus.OPTIMAL
+
+    _open_plan(page)
+
+    expect(page.locator("#status")).to_contain_text("solver status optimal")
+    rows = page.locator("#plan-rows tr")
+    expect(rows).to_have_count(4)
+    headers = page.locator("#plan-head th").all_text_contents()
+    for row in rows.all():
+        expect(row.locator("td").nth(headers.index("Battery state (%)"))).to_have_text(
+            "9.0"
         )
 
 

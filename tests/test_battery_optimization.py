@@ -230,3 +230,59 @@ def test_the_balance_and_state_of_charge_hold_for_any_horizon(
         assert min(hour.battery.charge_kw, hour.battery.discharge_kw) <= TOLERANCE
         previous_soc_kwh = hour.battery.state_of_charge_kwh
     assert previous_soc_kwh >= initial_soc_kwh - SOC_TOLERANCE
+
+
+def test_a_battery_below_its_minimum_is_not_discharged_further_nor_forced_up() -> None:
+    plan = solve(
+        problem(
+            (1.0, 1.0, 1.0, 1.0),
+            (0.9, 0.9, 0.9, 0.9),
+            battery=battery(
+                minimum_soc_kwh=2.0, initial_soc_kwh=1.5, final_soc_kwh=1.5
+            ),
+        )
+    )
+
+    assert plan.status is PlanStatus.OPTIMAL
+    levels = [hour.battery.state_of_charge_kwh for hour in plan.hours if hour.battery]
+    assert levels == pytest.approx([1.5] * 4, abs=SOC_TOLERANCE)
+    assert [hour.grid_import_kw for hour in plan.hours] == pytest.approx([1.0] * 4)
+
+
+def test_a_battery_recharged_above_its_minimum_keeps_that_minimum_again() -> None:
+    plan = solve(
+        problem(
+            (0.0, 3.0, 3.0),
+            (0.1, 0.9, 0.9),
+            battery=battery(
+                minimum_soc_kwh=2.0,
+                initial_soc_kwh=1.0,
+                final_soc_kwh=1.0,
+                maximum_charge_kw=4.0,
+                maximum_discharge_kw=4.0,
+            ),
+        )
+    )
+
+    assert plan.status is PlanStatus.OPTIMAL
+    levels = [hour.battery.state_of_charge_kwh for hour in plan.hours if hour.battery]
+    assert levels[0] > 2.0
+    assert min(levels[1:]) >= 2.0 - SOC_TOLERANCE
+
+
+def test_a_battery_above_its_maximum_is_not_charged_further() -> None:
+    plan = solve(
+        problem(
+            (0.0, 0.0, 0.0),
+            (0.1, 0.1, 0.1),
+            pv_forecast_kw=(3.0, 3.0, 3.0),
+            export_price_eur_per_kwh=(0.0, 0.0, 0.0),
+            battery=battery(
+                maximum_soc_kwh=8.0, initial_soc_kwh=9.0, final_soc_kwh=0.0
+            ),
+        )
+    )
+
+    assert plan.status is PlanStatus.OPTIMAL
+    levels = [hour.battery.state_of_charge_kwh for hour in plan.hours if hour.battery]
+    assert max(levels) <= 9.0 + SOC_TOLERANCE

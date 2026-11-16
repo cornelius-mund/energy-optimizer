@@ -337,9 +337,19 @@ def _validate(data: BatteryData) -> None:
         )
     if data.maximum_soc_kwh > data.capacity_kwh:
         raise HomeAssistantError("Home Assistant battery maximum SOC exceeds capacity")
-    if not data.minimum_soc_kwh <= data.initial_soc_kwh <= data.maximum_soc_kwh:
+    if data.initial_soc_kwh > data.capacity_kwh:
         raise HomeAssistantError(
-            "Home Assistant battery state of charge is outside configured SOC limits"
+            "Home Assistant battery state of charge exceeds the battery capacity"
+        )
+    if not data.minimum_soc_kwh <= data.initial_soc_kwh <= data.maximum_soc_kwh:
+        # Standby consumption lets an idle battery drift below its minimum. The
+        # reading is physically valid; planning keeps it from moving further out.
+        logger.warning(
+            "event=battery_soc_outside_operating_band component=home_assistant "
+            "operation=fetch soc_kwh=%.3f minimum_soc_kwh=%.3f maximum_soc_kwh=%.3f",
+            data.initial_soc_kwh,
+            data.minimum_soc_kwh,
+            data.maximum_soc_kwh,
         )
     if not 0 < data.battery_efficiency <= 1:
         raise HomeAssistantError(

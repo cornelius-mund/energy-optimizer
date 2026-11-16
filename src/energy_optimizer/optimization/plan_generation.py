@@ -95,14 +95,14 @@ def battery_specification(
 ) -> BatterySpecification:
     """Split the battery round trip evenly between charging and discharging."""
     leg_efficiency = math.sqrt(battery.battery_efficiency)
-    return BatterySpecification(
+    specification = BatterySpecification(
         minimum_soc_kwh=battery.minimum_soc_kwh,
         maximum_soc_kwh=battery.maximum_soc_kwh,
         initial_soc_kwh=battery.initial_soc_kwh,
         final_soc_kwh=(
             battery.initial_soc_kwh
             if terminal_value_eur_per_kwh is None
-            else battery.minimum_soc_kwh
+            else min(battery.minimum_soc_kwh, battery.initial_soc_kwh)
         ),
         maximum_charge_kw=battery.maximum_charge_kw,
         maximum_discharge_kw=battery.maximum_discharge_kw,
@@ -111,6 +111,15 @@ def battery_specification(
         throughput_cost_eur_per_kwh=throughput_cost_eur_per_kwh,
         terminal_value_eur_per_kwh=terminal_value_eur_per_kwh or 0.0,
     )
+    if specification.starts_below_minimum() or specification.starts_above_maximum():
+        logger.warning(
+            "event=battery_soc_outside_operating_band component=optimization "
+            "operation=plan soc_kwh=%.3f minimum_soc_kwh=%.3f maximum_soc_kwh=%.3f",
+            battery.initial_soc_kwh,
+            battery.minimum_soc_kwh,
+            battery.maximum_soc_kwh,
+        )
+    return specification
 
 
 def deadline_hours(

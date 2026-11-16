@@ -237,6 +237,17 @@ authentication failures, missing entities, malformed values, invalid timestamps,
 inconsistent SOC limits, and stale data are reported as provider errors or stale
 orchestration runs.
 
+A state of charge must lie between zero and the capacity; a reading outside
+that range is a provider error. A reading outside the operating band
+(`minimum_soc` to `maximum_soc`) is valid, because standby consumption lets an
+idle battery drift below its minimum. It is imported with a
+`battery_soc_outside_operating_band` warning, and the plan then neither
+discharges the battery further below its minimum nor charges it further above
+its maximum. It is never forced back into the band: once it has been recharged
+above the minimum by a decision that pays, the minimum applies again. The soft
+reserve is measured from the lower of the minimum and the current state. The
+`POST /optimize` request keeps requiring an initial state inside the band.
+
 Example:
 
 ```yaml
