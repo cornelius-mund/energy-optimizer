@@ -5,19 +5,21 @@ vertical slices. Package names may evolve as the energy and asset models become
 better understood. `appliances.py` defines general electrical capabilities and
 household accounting. Energy history uses shared Home Assistant history needs
 and counter aggregation for appliances, household load, and arbitrary sources.
-`POST /optimize` solves the household-load schedule with PV, grid exchange, and an
-optional battery; appliance scheduling is not implemented yet.
-The `application` and `domain` layers named below are
+The service plans household load, PV, grid exchange, a battery and an electric
+vehicle with a mixed-integer linear program (linopy and HiGHS), described in
+[`optimization-model.md`](optimization-model.md); appliance scheduling is not
+implemented yet. The `application` and `domain` layers named below are
 boundaries without a package of their own.
 
 ## Package Structure
 
 ```text
 src/energy_optimizer/
+├── __main__.py               # Process entry point: logging first, then Uvicorn
 ├── api/
 │   ├── __init__.py           # Stable public API compatibility exports
-│   ├── app.py                # FastAPI application and route handlers
-│   ├── lifecycle.py          # Startup and shutdown orchestration
+│   ├── app.py                # FastAPI application, routers and dashboard files
+│   ├── lifecycle.py          # Startup and shutdown; starts the background loops
 │   ├── middleware.py         # Request IDs and outcome logging
 │   ├── historic.py           # Historic multi-asset actual loaders and availability
 │   ├── excluded.py           # Excluded-hours read model for the dashboard tab
@@ -25,40 +27,57 @@ src/energy_optimizer/
 │   ├── schemas.py            # HTTP request and response models
 │   ├── series.py             # Dashboard series alignment
 │   ├── validation.py         # Shared HTTP validation helpers
-│   └── routers/              # Core, provider, and dashboard route groups
+│   └── routers/              # Core, provider, dashboard, appliance, EV target
+│                             # and EV presence route groups
+├── background.py             # Supervised background loops and their health
 ├── config.py                 # YAML loading and validated runtime settings
+├── logging_config.py         # Structured log format and library log levels
 ├── optimization/
 │   ├── problem.py            # Solver-independent problem and plan types
 │   ├── solver.py             # PlanSolver port used by the application
-│   ├── battery_model.py      # Battery dispatch and state-of-charge constraints
 │   ├── linopy_solver.py      # linopy and HiGHS implementation of the port
+│   ├── battery_model.py      # Battery dispatch, state of charge, soft bands
+│   ├── battery_reserve.py    # Sizes of the soft reserve and headroom
 │   ├── ev_model.py           # EV charging constraints
+│   ├── ev_patterns.py        # Weekly driving and plug-in patterns of the car
+│   ├── optimizer_cost.py     # Hourly cost as the optimizer values it
 │   ├── load_forecast.py      # Load forecast methods and backtest selection
 │   └── plan_generation.py    # Snapshot to planning problem, solve, persist the plan
 ├── control/
-│   └── ev_controller.py      # Applies the planned EV power through Home Assistant
-├── orchestration.py          # Scheduled provider retrieval and plan triggers
+│   ├── ev_controller.py      # Applies the planned EV power through Home Assistant
+│   ├── plug_in_reminder.py   # Notifies when the car must be plugged in tonight
+│   └── home_assistant_service.py # Home Assistant service calls
+├── ev_targets.py             # Persistent dated minimum charge requirements
+├── ev_presence.py            # Persistent dated presence overrides of the car
+├── orchestration.py          # Scheduled provider retrieval, plan triggers, and
+│                             # the composition of the configured providers
 ├── providers/
 │   ├── interfaces.py         # Provider-independent normalized data models
 │   ├── http.py               # Shared bounded JSON HTTP requests
+│   ├── normalization.py      # Provider-independent timestamp/value utilities
 │   ├── awattar.py            # German aWATTar EPEX Spot price importer
+│   ├── epex_predictor.py     # Day-ahead price forecast after the published prices
 │   ├── forecast_solar.py     # Direct Forecast.Solar PV forecast importer
 │   ├── open_meteo_pv.py      # Multi-plane Open-Meteo PV forecast importer
 │   ├── pv_forecast.py        # Selects the configured PV forecast provider
-│   ├── normalization.py      # Provider-independent timestamp/value utilities
+│   ├── influxdb_ev_history.py # Hourly EV state of charge and plug history
 │   ├── home_assistant.py     # Household-load Home Assistant composition
 │   ├── home_assistant_history.py # Shared once-per-cycle Home Assistant history import
 │   ├── home_assistant_energy.py # Pure energy normalization and signed aggregation
+│   ├── home_assistant_energy_history.py # Appliance and generic energy histories
 │   ├── home_assistant_grid_flow.py # Grid-flow Home Assistant composition
+│   ├── home_assistant_pv.py  # Measured PV generation history
 │   ├── home_assistant_battery_efficiency.py # Measured battery-efficiency composition
-│   └── home_assistant_battery.py # Current battery state composition
+│   ├── home_assistant_battery.py # Current battery state composition
+│   └── home_assistant_ev.py  # Current state of charge and plug state of the car
 ├── storage.py                # Generic durable normalized provider-data storage
+├── storage_errors.py         # Storage error contract
 ├── exclusions.py             # Excluded hours: reason codes, causes, data points
 ├── legacy_quality.py         # Converts suspect quality of earlier versions on read
 ├── history_merge.py          # Merge and retention rules for grid-flow and price history
+├── household_load_records.py # Household-load NDJSON records and merge rules
 ├── household_load_store.py   # Append-friendly household-load NDJSON storage
-├── storage_errors.py         # Storage error contract
-└── appliances.py              # Electrical capabilities and load accounting
+└── appliances.py             # Electrical capabilities and load accounting
 ```
 
 Generic storage delegates household-load history to its own NDJSON module, and
@@ -98,6 +117,24 @@ storage -> validated provider-independent data models
 - `config` loads deployment settings. The composition layer passes validated
   configuration to components instead of having configuration code construct
   business objects directly.
+
+### Known deviations
+
+The code does not follow these rules everywhere yet. They are recorded here so
+that new code does not copy them:
+
+- `optimization/plan_generation.py` is the application use case "plan from a
+  snapshot", but it lives in `optimization` and imports `config`, `storage`,
+  `orchestration`, `control` and the EV target stores.
+  `optimization/battery_reserve.py` reads configuration models directly.
+- `storage.py` imports two provider modules to merge their histories on save.
+- `orchestration.py` holds both the provider-independent orchestrator and the
+  factories that compose every concrete provider (the composition root).
+- `api/routers/dashboard.py` constructs provider importers to check freshness.
+- Optimizer settings such as the soft reserve, headroom, wear cost and
+  end-of-horizon value are configured under `home_assistant.battery`, next to
+  the Home Assistant entity mappings.
+- Storage keys of the same record are written out in several modules.
 
 ## Request Flow
 
@@ -146,7 +183,8 @@ the range controls step by one hour.
 
 The domain represents time-series data, energy balances, asset capabilities, state
 of charge, availability, schedules, and optimization outcomes. It should be usable
-without starting FastAPI, reading YAML, making network requests, or loading Pyomo.
+without starting FastAPI, reading YAML, making network requests, or loading the
+modelling library.
 
 ### Providers
 
@@ -445,10 +483,21 @@ day-ahead prices once they are published, is defined by the importer.
 
 ### Optimization
 
-The optimization component builds a Pyomo mixed-integer linear program, applies
-technical constraints, and invokes HiGHS through a solver adapter. Result mapping
-converts solver variables into a schedule, objective values, costs, revenues,
-solver status, solve time, and diagnostics.
+The optimization component builds a mixed-integer linear program with linopy,
+applies technical constraints, and solves it with HiGHS behind the `PlanSolver`
+port. Result mapping converts solver variables into a schedule, objective
+values, costs, revenues and the solver status. Variables, constraints, objective
+terms, the rolling horizon and the known simplifications are described in
+[`optimization-model.md`](optimization-model.md).
+
+### Background loops
+
+Collection (`orchestration`), wall box control (`ev_control`) and the plug-in
+reminder (`plug_in_reminder`) each run as a `SupervisedLoop` (`background.py`):
+one cycle in a worker thread, then a wait that shutdown interrupts. A cycle that
+raises is logged with a traceback and retried after at most 60 seconds, so one
+failure never ends a loop. `GET /health` lists every loop and reports the service
+as degraded (HTTP 503) only when a loop has stopped while the service runs.
 
 ## Design Goals
 
