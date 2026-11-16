@@ -1,6 +1,5 @@
 """Apply the planned EV charge power to the wall box through Home Assistant."""
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -192,12 +191,3 @@ class EvController:
             call_service(self.home_assistant, self.client, service, data)
         except HomeAssistantServiceError as error:
             raise EvControlError(str(error)) from error
-
-    async def run_forever(self, stop_event: asyncio.Event) -> None:
-        interval = self.control.poll_interval_seconds
-        while not stop_event.is_set():
-            await asyncio.to_thread(self.apply_due)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=interval)
-            except asyncio.TimeoutError:
-                pass

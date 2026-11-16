@@ -7,7 +7,6 @@ in the rest of the night and the car is not plugged in, every configured notify
 service is called once for that night.
 """
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -195,13 +194,3 @@ class PlugInReminder:
             charge.first_hour.isoformat(),
         )
         return True
-
-    async def run_forever(self, stop_event: asyncio.Event) -> None:
-        while not stop_event.is_set():
-            await asyncio.to_thread(self.remind_due)
-            try:
-                await asyncio.wait_for(
-                    stop_event.wait(), timeout=self.settings.poll_interval_seconds
-                )
-            except asyncio.TimeoutError:
-                pass

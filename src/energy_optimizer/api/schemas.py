@@ -19,6 +19,26 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class BackgroundLoopHealthResponse(BaseModel):
+    """One background loop; a failing cycle is retried and does not stop it."""
+
+    running: bool
+    stopped_unexpectedly: bool
+    consecutive_failures: int
+    last_success_at: datetime | None
+    last_error: str | None
+
+
+class HealthResponse(BaseModel):
+    """`degraded` (HTTP 503) means a background loop has stopped."""
+
+    status: Literal["ok", "degraded"]
+    version: str
+    background_loops: dict[str, BackgroundLoopHealthResponse] = Field(
+        default_factory=dict
+    )
+
+
 class PlanningBatteryRequest(_StrictModel):
     """Technical limits and starting state of the battery to schedule."""
 
