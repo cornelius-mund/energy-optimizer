@@ -66,9 +66,10 @@ def _state_before_each_hour(
 ) -> LinearExpression:
     initial_state = pandas.Series(0.0, index=hours)
     initial_state.iloc[0] = specification.initial_soc_kwh
-    return (
+    state_before: LinearExpression = (
         variables.state_of_charge.shift({HOUR_DIMENSION: 1}).fillna(0) + initial_state
     )
+    return state_before
 
 
 def _keep_out_of_band_state_from_moving_further_out(

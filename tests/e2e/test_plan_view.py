@@ -24,7 +24,6 @@ from energy_optimizer.optimization.plan_generation import (
 )
 from energy_optimizer.storage import ProviderDataStore
 from test_ev_planning import configuration, ev_responses, importer
-from test_plan_generation import battery as battery_data
 from test_plan_generation import (
     NOW,
     flat_history,
@@ -32,6 +31,7 @@ from test_plan_generation import (
     pv_forecast,
     snapshot,
 )
+from test_plan_generation import battery as battery_data
 
 pytestmark = pytest.mark.e2e
 
