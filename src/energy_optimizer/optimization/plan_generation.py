@@ -493,7 +493,7 @@ class PlanGenerator:
             ),
         )
         self.store.save(PLAN_KEY, PLAN_ADAPTER, stored)
-        self._save_ev_schedule(stored)
+        self._save_ev_schedule(stored, car_is_known=isinstance(ev, EvData))
         logger.info(
             "event=plan_stored component=optimization operation=plan hours=%s "
             "objective_eur=%.4f",
@@ -630,15 +630,21 @@ class PlanGenerator:
             return 0.0
         return home_assistant.battery.throughput_cost_eur_per_kwh
 
-    def _save_ev_schedule(self, stored: PlanSnapshot) -> None:
-        if stored.ev_capacity_kwh is None:
+    def _save_ev_schedule(self, stored: PlanSnapshot, car_is_known: bool) -> None:
+        """A plan without car charging, for example because the next deadline lies
+        beyond the horizon, stores an explicit pause. Without it the last schedule
+        would grow stale and the wall box would fall back to its own behaviour."""
+        if not car_is_known or not stored.plan.hours:
             return
-        hours = [hour for hour in stored.plan.hours if hour.ev is not None]
+        hour_starts = tuple(hour.start_time for hour in stored.plan.hours)
+        charge_kw = tuple(
+            0.0 if hour.ev is None else hour.ev.charge_kw for hour in stored.plan.hours
+        )
         schedule = merge_schedule(
             self.store.load(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER),
             stored.created_at,
-            tuple(hour.start_time for hour in hours),
-            tuple(hour.ev.charge_kw for hour in hours if hour.ev),
+            hour_starts,
+            charge_kw,
         )
         self.store.save(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER, schedule)
 

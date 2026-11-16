@@ -703,6 +703,7 @@ home_assistant:
       enable_entity_id: switch.easee_charger_enabled   # optional: pause and resume
       max_plan_age_seconds: 7200
       poll_interval_seconds: 30
+      stale_plan_fallback: full_power  # full_power (default), off, or keep_last
 ```
 
 Integrations that address the charger as a device, such as Easee, take a
@@ -730,10 +731,13 @@ hour and sends the command only when it changed: `homeassistant.turn_on` plus th
 power for charging, `homeassistant.turn_off` for a pause (without
 `enable_entity_id` the limit is set to 0). A plan starts with the running hour, so
 the newest plan normally covers it; the hours of earlier plans before it are kept
-in an EV schedule. If no plan covers the hour or the schedule
-is older than `max_plan_age_seconds`, the charger is handed back to its own
-behaviour once (enabled at `maximum_charge_kw`). A rejected command is logged and
-retried at the next run.
+in an EV schedule. A plan that does not charge the car, for example because the
+next deadline lies beyond the planning horizon, stores a pause for its hours, so
+the schedule stays current. If no plan covers the hour or the schedule is older
+than `max_plan_age_seconds`, the charger follows `stale_plan_fallback` once:
+`full_power` hands it back to its own behaviour (enabled at `maximum_charge_kw`),
+`off` pauses it, and `keep_last` leaves the last setting unchanged. A rejected
+command is logged and retried at the next run.
 
 ### Home Assistant measured PV history
 

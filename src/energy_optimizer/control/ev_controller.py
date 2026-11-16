@@ -136,12 +136,21 @@ class EvController:
         return schedule.power_at(now)
 
     def _fall_back(self) -> ControlOutcome:
-        """Hand the charger back to its own behaviour: enabled, at full power."""
-        if self._applied == self.maximum_charge_kw:
+        """Without a current plan the charger follows the configured fallback."""
+        fallback = self.control.stale_plan_fallback
+        if fallback == "keep_last":
             return ControlOutcome.UNCHANGED
-        self._send_power(self.maximum_charge_kw)
-        self._applied = self.maximum_charge_kw
-        logger.warning("event=ev_control_fallback component=control operation=apply")
+        power_kw = self.maximum_charge_kw if fallback == "full_power" else 0.0
+        if self._applied == power_kw:
+            return ControlOutcome.UNCHANGED
+        self._send_power(power_kw)
+        self._applied = power_kw
+        logger.warning(
+            "event=ev_control_fallback component=control operation=apply "
+            "fallback=%s power_kw=%.2f",
+            fallback,
+            power_kw,
+        )
         return ControlOutcome.FELL_BACK
 
     def _apply(self, planned_kw: float) -> ControlOutcome:
