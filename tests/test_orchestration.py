@@ -1799,3 +1799,42 @@ def test_a_failing_price_forecast_does_not_prevent_the_plan(tmp_path: Path) -> N
 
     assert cycle.plan_status == "created"
     assert set(plans[0].data) == {"live"}
+
+
+def test_a_failed_source_is_retried_early_with_a_growing_delay(
+    tmp_path: Path,
+) -> None:
+    attempts: list[datetime] = []
+    failures_left = 3
+
+    def fetch(now: datetime, _: Any) -> HouseholdLoadData:
+        nonlocal failures_left
+        attempts.append(now)
+        if failures_left:
+            failures_left -= 1
+            raise RuntimeError("provider unavailable")
+        return data(now)
+
+    orchestrator = orchestrator_for(tmp_path, fetch, interval_seconds=3600)
+    for seconds in range(0, 4 * 3600, 30):
+        orchestrator.run_due(START + timedelta(seconds=seconds))
+
+    offsets = [int((moment - START).total_seconds()) for moment in attempts]
+    assert offsets[:5] == [0, 60, 180, 420, 4020]
+
+
+def test_a_source_that_is_not_due_logs_no_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    orchestrator = orchestrator_for(tmp_path, interval_seconds=300)
+    orchestrator.run_due(START)
+
+    with caplog.at_level(logging.DEBUG, logger="energy_optimizer"):
+        orchestrator.run_due(START + timedelta(seconds=10))
+
+    skipped = [
+        record
+        for record in caplog.records
+        if "event=provider_refresh_skipped" in record.getMessage()
+    ]
+    assert skipped and all(record.levelno == logging.DEBUG for record in skipped)

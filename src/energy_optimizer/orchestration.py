@@ -83,6 +83,9 @@ OPTIONAL_PLAN_SOURCES = frozenset(
     {ELECTRICITY_PRICE_FORECAST_SOURCE, EV_HISTORY_SOURCE}
 )
 
+# First retry delay of a failed source; it doubles with every further failure.
+FAILED_SOURCE_RETRY_SECONDS = 60.0
+
 RunStatus = Literal["success", "failed", "stale", "skipped"]
 PlanStatus = Literal["disabled", "not-ready", "unavailable", "created", "failed"]
 
@@ -200,6 +203,7 @@ class ProviderOrchestrator:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.history_importer = history_importer
         self._next_due: dict[str, datetime] = {}
+        self._consecutive_failures: dict[str, int] = {}
         self._latest_data: dict[str, object] = {}
         self._cycle_lock = threading.Lock()
         for registration in self.registrations:
@@ -300,7 +304,7 @@ class ProviderOrchestrator:
             if schedule is None or not schedule.enabled:
                 continue
             if not force and not self._is_due(registration.name, now, schedule):
-                logger.warning(
+                logger.debug(
                     "event=provider_refresh_skipped component=orchestration "
                     "operation=refresh source=%s reason=not_due",
                     registration.name,
@@ -476,14 +480,17 @@ class ProviderOrchestrator:
     ) -> ProviderRun:
         """Record a failed attempt; the last valid persisted data stays in place."""
         attempt_completed = self._as_utc(cycle_clock())
-        self._set_next_due(registration.name, attempt_completed, schedule)
+        retry_seconds = self._set_next_due_after_failure(
+            registration.name, attempt_completed, schedule
+        )
         message = str(error) or error.__class__.__name__
         logger.error(
             "event=provider_refresh_failed component=orchestration "
-            "operation=refresh source=%s error_type=%s error=%s",
+            "operation=refresh source=%s error_type=%s error=%s retry_in_seconds=%.0f",
             registration.name,
             error.__class__.__name__,
             message,
+            retry_seconds,
             exc_info=(None if isinstance(error, HomeAssistantError) else True),
         )
         return ProviderRun(
@@ -617,9 +624,28 @@ class ProviderOrchestrator:
         completed_at: datetime,
         schedule: DataSourceScheduleConfiguration,
     ) -> None:
+        self._consecutive_failures.pop(name, None)
         self._next_due[name] = completed_at + timedelta(
             seconds=schedule.interval_seconds
         )
+
+    def _set_next_due_after_failure(
+        self,
+        name: str,
+        completed_at: datetime,
+        schedule: DataSourceScheduleConfiguration,
+    ) -> float:
+        """A failure is often transient (a restart, a timeout), so the source is
+        retried early, with a delay that doubles per failure up to its interval.
+        Returns the delay in seconds."""
+        failures = self._consecutive_failures.get(name, 0) + 1
+        self._consecutive_failures[name] = failures
+        retry_seconds = min(
+            schedule.interval_seconds,
+            FAILED_SOURCE_RETRY_SECONDS * 2.0 ** (failures - 1),
+        )
+        self._next_due[name] = completed_at + timedelta(seconds=retry_seconds)
+        return retry_seconds
 
     @staticmethod
     def _key_for(data_type: str, data: object) -> ProviderDataKey:

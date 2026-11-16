@@ -3,6 +3,7 @@
 import hashlib
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,10 @@ from energy_optimizer.storage_errors import ProviderDataStoreError
 
 logger = logging.getLogger(__name__)
 HOUSEHOLD_LOAD_COMPACTION_THRESHOLD = HOUSEHOLD_LOAD_MAX_VALUES + 1_024
+# Windows refuses to replace a file that a virus scanner or a concurrent reader
+# holds open for a moment; a few short retries ride that out.
+REPLACE_ATTEMPTS = 5
+REPLACE_RETRY_DELAY_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -328,7 +333,7 @@ class ProviderDataStore:
                 temporary_file.write(payload)
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
-            os.replace(temporary_path, path)
+            _replace_with_retries(temporary_path, path)
             self._sync_directory()
         except OSError as error:
             temporary_path.unlink(missing_ok=True)
@@ -365,6 +370,23 @@ class ProviderDataStore:
             raise ProviderDataStoreError(
                 f"could not append normalized provider data to {path}: {error}"
             ) from error
+
+
+def _replace_with_retries(source: Path, target: Path) -> None:
+    for attempt in range(1, REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS:
+                raise
+            logger.debug(
+                "event=persistence_replace_retried component=storage operation=save "
+                "path=%s attempt=%s",
+                target.name,
+                attempt,
+            )
+            time.sleep(REPLACE_RETRY_DELAY_SECONDS * attempt)
 
 
 __all__ = [

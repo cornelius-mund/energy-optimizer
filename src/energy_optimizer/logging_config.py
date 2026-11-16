@@ -20,6 +20,9 @@ LOG_LEVELS: Final[dict[str, int]] = {
 _HANDLER_MARKER = "_energy_optimizer_handler"
 _EVENT_PREFIX = re.compile(r"^event=(\S+)")
 _NORMALIZED_LOGGERS: Final = ("uvicorn", "uvicorn.error", "httpx", "httpcore")
+# Libraries that log every solve or import at INFO in free text; the plan and
+# the solver status are already logged as structured events.
+_QUIET_LIBRARY_LOGGERS: Final = ("linopy", "numexpr")
 
 
 class _SuppressHttpxRequestLog(logging.Filter):
@@ -122,6 +125,9 @@ def _configure_logging(level: int) -> int:
     uvicorn_access = logging.getLogger("uvicorn.access")
     uvicorn_access.disabled = True
     uvicorn_access.propagate = False
+
+    for logger_name in _QUIET_LIBRARY_LOGGERS:
+        logging.getLogger(logger_name).setLevel(max(level, logging.WARNING))
 
     return level
 

@@ -85,7 +85,11 @@ non-health request, for example:
 `INFO 2026-08-11T11:51:51+0000 request_completed | event=request_completed component=api`.
 Successful health probes, including those of the image healthcheck, use the
 `health_check_request` event at `DEBUG`; they are therefore hidden at the default
-`INFO` threshold. When Uvicorn is started with an external logging configuration,
+`INFO` threshold. So is `provider_refresh_skipped reason=not_due`, logged for every
+source that is not due in a cycle. The `linopy` and `numexpr` libraries log only
+warnings and errors; the plan and its solver status are logged as structured
+events. HiGHS itself still prints a two-line banner to standard output for every
+solve, which no solver option suppresses. When Uvicorn is started with an external logging configuration,
 its root output handlers are reused and formatted rather than supplemented with
 another service handler.
 
@@ -325,8 +329,13 @@ putting polling or scheduling behavior in provider adapters. Each source has an
 independent `interval_seconds` and optional provider history lookback. With
 `startup_fetch: true`, enabled sources are fetched when the service starts; failed
 attempts leave the last valid persisted data in place and are reported through
-service logs. Missed intervals are not replayed: the next run is scheduled from
-the completed attempt. Scheduled collection requires `persistence.directory`, so
+service logs. A failed source is retried early: 60 seconds after the failure,
+then with a delay that doubles per further failure up to its interval (the
+orchestration loop checks sources at the shortest configured interval, so a retry
+happens at the first check after that delay). A success restores the regular
+interval. Missed intervals are not replayed: the next run is scheduled from
+the completed attempt. On Windows, replacing a persisted file that a virus scanner
+or a concurrent reader holds open for a moment is retried up to five times. Scheduled collection requires `persistence.directory`, so
 normalized data survives application restarts.
 
 Household-load collection bootstraps with up to the API maximum of 87,672 hourly
