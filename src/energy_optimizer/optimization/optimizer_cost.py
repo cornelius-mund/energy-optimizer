@@ -111,8 +111,8 @@ def ev_hourly_costs(
     missing for driving or a morning minimum and at the deadline."""
     charge = variables.charge.solution.values.astype(float) * numpy.asarray(durations)
     missing = variables.missing_energy.solution.values.astype(float)
-    stored_value = specification.value_eur_per_kwh * specification.charge_efficiency
-    costs = (SHORTFALL_PENALTY_EUR_PER_KWH * missing - stored_value * charge).tolist()
+    credits = numpy.asarray(specification.charge_credits_eur_per_kwh(len(charge)))
+    costs = (SHORTFALL_PENALTY_EUR_PER_KWH * missing - credits * charge).tolist()
     if specification.deadline_hours >= 1:
         costs[specification.deadline_hours - 1] += (
             SHORTFALL_PENALTY_EUR_PER_KWH * float(variables.shortfall.solution.item())

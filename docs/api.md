@@ -697,7 +697,10 @@ mistaken for historic actuals or forecast inputs.
   are left out.
 - **Table:** one row per planned hour in the dashboard time zone with load, PV, grid
   import and export in kW, battery charge, discharge and state of charge when a
-  battery was planned, EV charge power and state of charge when a car was planned,
+  battery was planned, EV charge power, `EV energy from` and state of charge when a
+  car was planned (`EV energy from` names PV, battery and grid: PV supplies the
+  household load first, then the car; the battery covers the rest of the load,
+  then the car; the grid supplies the remainder),
   `Cost (EUR)`, the cash cost of the hour (import cost minus export revenue; a
   negative value is a revenue), `Cumulative (EUR)`, its running total, and
   `Cost (Optimizer)`, the hour as the optimizer values it (`optimizer_cost_eur`):

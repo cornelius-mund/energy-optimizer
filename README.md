@@ -605,7 +605,11 @@ not part of the reported objective.
 `home_hours` (for example `{start: "22:00", end: "06:00"}`, may wrap midnight)
 are local hours in which the car is always home: it can charge in them on every
 planned day whatever its current plug state and plug history say, because it is
-plugged in when needed. The learned pattern applies outside them.
+plugged in when needed. The learned pattern applies outside them. When charging
+costs the same inside and outside them, for example energy that the house battery
+hands to the car, the plan charges inside them: each kWh charged there earns a
+credit of 0.1 ct, far below any price difference that matters, so the car is
+charged when it is surely plugged in and the plug-in reminder applies.
 
 When the car is home at night but plugged in only when needed, add a
 `plug_in_reminder` (it needs `home_hours`). From `at` (default 21:00 local) until

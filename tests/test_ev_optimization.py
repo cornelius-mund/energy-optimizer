@@ -320,3 +320,29 @@ def test_the_minimum_is_charged_even_when_the_energy_costs_more_than_it_is_worth
 
     assert charged_kw(plan) == pytest.approx([4.0, 0.0, 0.0, 0.0], abs=TOLERANCE)
     assert plan.ev_shortfall_kwh == pytest.approx(0.0, abs=TOLERANCE)
+
+
+def test_equally_cheap_charging_is_placed_in_the_preferred_home_hours() -> None:
+    ev = replace(
+        electric_vehicle(
+            stored_kwh_needed=3.6, deadline_hours=2, plugged_in=(True,) * 2
+        ),
+        preferred_hours=(False, True),
+    )
+
+    plan = solve_with(ev, prices=(0.30, 0.30))
+
+    assert charged_kw(plan) == pytest.approx([0.0, 4.0], abs=TOLERANCE)
+
+
+def test_a_real_price_difference_outweighs_the_home_hour_preference() -> None:
+    ev = replace(
+        electric_vehicle(
+            stored_kwh_needed=3.6, deadline_hours=2, plugged_in=(True,) * 2
+        ),
+        preferred_hours=(False, True),
+    )
+
+    plan = solve_with(ev, prices=(0.30, 0.31))
+
+    assert charged_kw(plan) == pytest.approx([4.0, 0.0], abs=TOLERANCE)

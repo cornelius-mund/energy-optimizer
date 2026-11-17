@@ -86,6 +86,7 @@ The solver minimizes, over all hours:
 | − final battery energy × terminal value | Energy left at the end replaces later imports | `home_assistant.battery.end_of_horizon`, `end_of_horizon_value_eur_per_kwh` |
 | + 1000 EUR/kWh × car energy not provided | Makes missing targets a last resort instead of infeasible | none |
 | − car charge × duration × η × stored value | Energy in the car is worth what charging it later would cost | `ev_charging.cheap_market_price_ct_per_kwh` |
+| − car charge × duration × 0.1 ct in home hours | Breaks ties towards the hours in which the car is surely home | `ev_charging.home_hours` |
 
 - **Terminal value:** the cheapest import price of the plan, times the
   discharge efficiency, minus 2 % so that the battery rather than the grid

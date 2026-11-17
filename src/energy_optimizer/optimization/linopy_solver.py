@@ -197,8 +197,8 @@ def _minimize_net_cost(
             variables.ev.shortfall + variables.ev.missing_energy.sum()
         )
         assert problem.ev is not None
-        stored_value = problem.ev.value_eur_per_kwh * problem.ev.charge_efficiency
-        objective = objective - stored_value * (variables.ev.charge * durations).sum()
+        credits = _hourly(problem.ev.charge_credits_eur_per_kwh(problem.hours()), hours)
+        objective = objective - (variables.ev.charge * durations * credits).sum()
     model.add_objective(objective)
 
 

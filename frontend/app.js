@@ -777,6 +777,23 @@
   };
   const isForecastPrice = (plan, hour) => Boolean(plan.price_forecast_from) && new Date(hour.start_time) >= new Date(plan.price_forecast_from);
   const hourCost = (hour) => hour.import_cost_eur - hour.export_revenue_eur;
+  // Attributes the car's charge power: PV supplies the household load first,
+  // then the car; the battery covers the rest of the load, then the car; the
+  // grid supplies whatever remains.
+  const evEnergySources = (hour) => {
+    const charge = hour.ev ? hour.ev.charge_kw : 0;
+    if (charge < 0.05) return "–";
+    const discharge = hour.battery ? hour.battery.discharge_kw : 0;
+    const pvAfterLoad = Math.max(hour.pv_generation_kw - hour.load_kw, 0);
+    const loadAfterPv = Math.max(hour.load_kw - hour.pv_generation_kw, 0);
+    const fromPv = Math.min(charge, pvAfterLoad);
+    const fromBattery = Math.min(charge - fromPv, Math.max(discharge - loadAfterPv, 0));
+    const fromGrid = charge - fromPv - fromBattery;
+    return [["PV", fromPv], ["battery", fromBattery], ["grid", fromGrid]]
+      .filter(([, kw]) => kw >= 0.05)
+      .map(([name]) => name)
+      .join(" + ") || "–";
+  };
   const sumOf = (schedule, read) => schedule.reduce((sum, hour) => sum + (read(hour) || 0), 0);
   // The running hour of a plan made during it is planned only for its rest, so
   // its power counts with that duration in an energy total.
@@ -832,6 +849,7 @@
     if (schedule.some((hour) => hour.ev)) {
       columns.push(
         power("EV charge (kW)", (hour) => hour.ev && hour.ev.charge_kw),
+        { title: "EV energy from", value: evEnergySources, total: () => "" },
         stateChange("EV state (%)", (hour) => hour.ev && hour.ev.state_of_charge_percent),
       );
       if (schedule.some((hour) => hour.ev && (!hour.ev.expected_plugged_in || hour.ev.consumption_kwh > 0))) {
