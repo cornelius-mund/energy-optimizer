@@ -9,6 +9,9 @@ type KilowattHour = float
 type Euro = float
 type EuroPerKilowattHour = float
 
+# Far below any price difference that matters, so it only breaks ties.
+PREFERRED_HOUR_CREDIT_EUR_PER_KWH = 0.001
+
 
 class PlanStatus(StrEnum):
     OPTIMAL = "optimal"
@@ -107,6 +110,21 @@ class EvSpecification:
     morning_minimums: tuple[tuple[int, KilowattHour], ...] = ()
     charging_horizon_hours: int | None = None
     dated_minimums: tuple[tuple[int, KilowattHour], ...] = ()
+    preferred_hours: tuple[bool, ...] | None = None
+
+    def charge_credits_eur_per_kwh(self, hours: int) -> tuple[EuroPerKilowattHour, ...]:
+        """Credit per kWh charged in each hour: the value of the stored energy,
+        plus a tiny preference for the hours in which the car is surely home.
+        The preference only resolves ties, for example a battery-to-car
+        transfer that costs the same at 19:00 and at 23:00, so that the car is
+        charged when it is plugged in for sure and the plug-in reminder applies.
+        """
+        stored_value = self.value_eur_per_kwh * self.charge_efficiency
+        preferred = self.preferred_hours or (False,) * hours
+        return tuple(
+            stored_value + (PREFERRED_HOUR_CREDIT_EUR_PER_KWH if is_preferred else 0.0)
+            for is_preferred in preferred
+        )
 
 
 @dataclass(frozen=True)

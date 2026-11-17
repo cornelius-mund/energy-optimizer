@@ -273,8 +273,9 @@ def test_the_plan_is_shown_hour_by_hour_with_battery_and_vehicle(
     expect(first_cells.nth(3)).to_have_text("5.00")
     expect(first_cells.nth(7)).to_have_text("40.0")
     expect(first_cells.nth(8)).to_have_text("4.00")
-    expect(first_cells.nth(9)).to_have_text("52.5")
-    expect(first_cells.nth(10)).to_have_text("0.500")
+    expect(first_cells.nth(9)).to_have_text("grid")
+    expect(first_cells.nth(10)).to_have_text("52.5")
+    expect(first_cells.nth(11)).to_have_text("0.500")
     expect(rows.nth(2).locator("td").nth(0)).to_have_text(
         _stamp(FIRST_HOUR + timedelta(hours=2))
     )
@@ -414,9 +415,9 @@ def test_the_learned_presence_and_driving_of_the_car_are_shown(
     expect(head).to_contain_text("EV at home")
     expect(head).to_contain_text("EV driving (kWh)")
     away_cells = page.locator("#plan-rows tr").nth(1).locator("td")
-    expect(away_cells.nth(10)).to_have_text("no")
-    expect(away_cells.nth(11)).to_have_text("12.5")
-    expect(page.locator("#plan-rows tr").nth(0).locator("td").nth(10)).to_have_text(
+    expect(away_cells.nth(11)).to_have_text("no")
+    expect(away_cells.nth(12)).to_have_text("12.5")
+    expect(page.locator("#plan-rows tr").nth(0).locator("td").nth(11)).to_have_text(
         "yes"
     )
 
@@ -665,3 +666,44 @@ def test_a_plan_made_during_an_hour_starts_with_that_hour(
     expect(rows.nth(0).locator("td").nth(0)).to_have_text(
         _stamp(FIRST_PLANNED_HOUR_OF_INPUTS + timedelta(hours=1))
     )
+
+
+def test_the_plan_shows_where_the_charged_energy_comes_from(
+    page: Page, provider_store: ProviderDataStore
+) -> None:
+    from_battery = replace(
+        _hour(0),
+        grid_import_kw=0.0,
+        import_cost_eur=0.0,
+        battery=PlannedBatteryHour(0.0, 5.0, 3.0),
+    )
+    from_pv_and_grid = replace(
+        _hour(1),
+        pv_generation_kw=3.0,
+        grid_import_kw=2.0,
+        battery=PlannedBatteryHour(0.0, 0.0, 3.0),
+    )
+    provider_store.save(
+        PLAN_KEY,
+        PLAN_ADAPTER,
+        PlanSnapshot(
+            created_at=CREATED_AT,
+            start_time=FIRST_HOUR,
+            battery_capacity_kwh=10.0,
+            ev_capacity_kwh=60.0,
+            plan=Plan(
+                status=PlanStatus.OPTIMAL,
+                objective_eur=1.0,
+                hours=(from_battery, from_pv_and_grid, _hour(2)),
+            ),
+        ),
+    )
+
+    _open_plan(page)
+
+    rows = page.locator("#plan-rows tr")
+    expect(rows).to_have_count(3)
+    column = page.locator("#plan-head th").all_text_contents().index("EV energy from")
+    expect(rows.nth(0).locator("td").nth(column)).to_have_text("battery")
+    expect(rows.nth(1).locator("td").nth(column)).to_have_text("PV + grid")
+    expect(rows.nth(2).locator("td").nth(column)).to_have_text("grid")

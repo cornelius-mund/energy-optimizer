@@ -305,6 +305,11 @@ def daily_minimum_charging(
         ),
         charge_limit_kwh=charging.limit_soc_percent / 100 * ev.capacity_kwh,
         value_eur_per_kwh=stored_value_eur_per_kwh,
+        preferred_hours=(
+            None
+            if home_hours is None
+            else tuple(home_hours.contains(moment.time()) for moment in local_hours)
+        ),
     )
 
 
