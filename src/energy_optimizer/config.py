@@ -472,8 +472,7 @@ class HomeAssistantEvControlConfiguration(_StrictModel):
     """Opt-in execution of the plan on the wall box.
 
     Without a plan for the running hour, or with a plan older than
-    ``max_plan_age_seconds``, the charger is handed back to its own behaviour:
-    enabled at the maximum power.
+    ``max_plan_age_seconds``, the charger follows ``stale_plan_fallback``.
     """
 
     enabled: bool = False
@@ -481,6 +480,14 @@ class HomeAssistantEvControlConfiguration(_StrictModel):
     enable_entity_id: str | None = Field(default=None, min_length=1, max_length=255)
     max_plan_age_seconds: float = Field(default=7200, gt=0)
     poll_interval_seconds: float = Field(default=30, gt=0)
+    stale_plan_fallback: Literal["full_power", "off", "keep_last"] = Field(
+        default="full_power",
+        description=(
+            "What the wall box does without a current plan: `full_power` hands "
+            "it back to its own behaviour (enabled at maximum power), `off` "
+            "pauses charging, `keep_last` leaves the last setting unchanged"
+        ),
+    )
 
 
 class HomeAssistantEvConfiguration(_StrictModel):

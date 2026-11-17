@@ -399,3 +399,28 @@ def test_the_plan_uses_the_target_of_the_weekday_that_comes_next(
     charged = [h.ev.charge_kw for h in stored.plan.hours if h.ev]
     assert sum(charged[:17]) * 0.9 == pytest.approx(6.0)
     assert sum(charged[17:]) == 0.0
+
+
+def test_a_plan_without_car_charging_stores_a_pause_for_the_wall_box(
+    tmp_path: Path,
+) -> None:
+    store = ProviderDataStore(tmp_path)
+    car = importer(ev_responses("50", "on")).fetch(now=NOW)
+
+    stored = PlanGenerator(configuration(), store)(
+        snapshot(
+            household_load=flat_history(0.0),
+            pv_generation=pv_forecast([0.0] * 3),
+            electricity_prices=prices([0.30] * 3),
+            ev=car,
+        )
+    )
+
+    assert all(hour.ev is None for hour in stored.plan.hours)
+    schedule = store.load(EV_SCHEDULE_KEY, EV_SCHEDULE_ADAPTER)
+    assert schedule is not None
+    assert schedule.updated_at == NOW
+    assert schedule.hour_starts == tuple(
+        FIRST_PLANNED_HOUR + timedelta(hours=index) for index in range(3)
+    )
+    assert schedule.charge_kw == (0.0, 0.0, 0.0)

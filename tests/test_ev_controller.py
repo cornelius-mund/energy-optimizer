@@ -285,3 +285,35 @@ def test_a_new_plan_wins_for_its_hours_and_earlier_hours_are_kept() -> None:
     assert merged.hour_starts == (NOON, NOON + HOUR, NOON + 2 * HOUR)
     assert merged.charge_kw == (1.0, 2.0, 9.0)
     assert merged.power_at(NOON + timedelta(minutes=90)) == 2.0
+
+
+def test_a_stale_plan_can_pause_the_charger_instead(
+    world: tuple[str, FakeWorld], store: ProviderDataStore
+) -> None:
+    url, fake = world
+    save_schedule(store, (4.0, 4.0, 4.0), updated_at=NOON)
+    now = [NOON + timedelta(hours=2, minutes=1)]
+
+    outcome = controller(url, store, now, stale_plan_fallback="off").apply_due()
+
+    assert outcome is ControlOutcome.FELL_BACK
+    assert fake.service_calls == [
+        ("homeassistant.turn_off", {"entity_id": SWITCH_ENTITY}),
+    ]
+
+
+def test_a_stale_plan_can_leave_the_last_setting_unchanged(
+    world: tuple[str, FakeWorld], store: ProviderDataStore
+) -> None:
+    url, fake = world
+    save_schedule(store, (4.0, 4.0, 4.0), updated_at=NOON)
+    now = [NOON + timedelta(minutes=5)]
+    ev_controller = controller(url, store, now, stale_plan_fallback="keep_last")
+    ev_controller.apply_due()
+    calls_while_current = list(fake.service_calls)
+
+    now[0] = NOON + timedelta(hours=2, minutes=1)
+    outcome = ev_controller.apply_due()
+
+    assert outcome is ControlOutcome.UNCHANGED
+    assert fake.service_calls == calls_while_current
